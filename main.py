@@ -29,7 +29,3 @@ def webhook():
     elif request.method == 'GET':
         print("Received GET request")
         return jsonify({"message": "GET request received"}), 200
-
-# Run the application on port 80
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80)
