@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    ports:
+      - "80:80"
     volumes:
       - .:/usr/src/app
-    command: python ./main.py 
+    command: python ./main.py
