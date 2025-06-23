@@ -6,6 +6,12 @@ services:
       dockerfile: Dockerfile
     ports:
       - "80:80"
+    env_file:
+      - .env
     volumes:
       - .:/usr/src/app
+      - db_data:/usr/src/app/instance
     command: gunicorn main:app -b 0.0.0.0:80 --reload
+volumes:
+  # Define the named volume for the database
+  db_data:
