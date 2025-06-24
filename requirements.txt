@@ -1,7 +1,7 @@
-flask
+Flask
 gunicorn==23.0.0
 python-dotenv
-pyjwt
-requests
 Flask-SQLAlchemy
-gunicorn
+pyotp
+qrcode
+Pillow

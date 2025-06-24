@@ -1,64 +1,201 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="bg-white p-8 rounded-lg shadow">
-    <!-- Configuration Form -->
-    <form action="{{ url_for('configure_instance') }}" method="POST" class="space-y-8">
-        <div>
-            <h2 class="text-xl font-semibold text-gray-700 mb-4">LLM Settings</h2>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                    <label for="llm_provider" class="block text-sm font-medium text-gray-700">LLM Provider</label>
-                    <select id="llm_provider" name="llm_provider" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm">
-                        <option value="groq" {% if config.llm_provider == 'groq' %}selected{% endif %}>Groq</option>
-                        <option value="openai" {% if config.llm_provider == 'openai' %}selected{% endif %}>OpenAI (ChatGPT)</option>
-                        <option value="anthropic" {% if config.llm_provider == 'anthropic' %}selected{% endif %}>Claude (Anthropic)</option>
-                        <option value="google" {% if config.llm_provider == 'google' %}selected{% endif %}>Gemini (Google)</option>
-                    </select>
+<div class="mx-auto max-w-7xl">
+    <!-- Page title -->
+    <div class="px-4 sm:px-6 lg:px-0 mb-6">
+        <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Settings</h1>
+        <p class="mt-2 text-sm text-gray-500">Manage your instance configuration, integrations, and API devices.</p>
+    </div>
+
+    <div class="lg:grid lg:grid-cols-12 lg:gap-x-5">
+        <!-- Vertical Tab Navigation -->
+        <aside class="px-2 py-6 sm:px-6 lg:col-span-3 lg:py-0 lg:px-0">
+            <nav class="space-y-1" id="tabs-nav">
+                <a href="#" data-tab-target="#general-settings" class="tab-item bg-indigo-50 text-indigo-700 hover:text-indigo-700 group flex items-center rounded-md px-3 py-2 text-sm font-medium">
+                    <svg class="text-indigo-500 group-hover:text-indigo-500 -ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527c.46-.329 1.025-.256 1.415.158l.781.781c.39.39.464.955.158 1.415l-.527.737c-.25.35-.272.806-.108 1.204.166.397.506.71.93.78l.894.15c.542.09.94.56.94 1.109v1.094c0 .55-.398 1.02-.94 1.11l-.894.149c-.424.07-.764.384-.93.78-.164.398-.142.854.108 1.204l.527.738c.329.46.256 1.025-.158 1.415l-.781.781c-.39.39-.955.464-1.415.158l-.737-.527c-.35-.25-.806-.272-1.204-.108-.397.166-.71.506-.78.93l-.15.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.02-.398-1.11-.94l-.149-.894c-.07-.424-.384-.764-.78-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.46.329-1.025.256-1.415-.158l-.781-.781c-.39-.39-.464-.955-.158-1.415l.527-.738c.25-.35.272-.806.108-1.204-.166-.397-.506-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.11v-1.093c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.764-.384.93-.78.164-.398.142-.855-.108-1.205l-.527-.737c-.329-.46-.256-1.025.158-1.415l.781-.781c.39-.39.955-.464 1.415.158l.737.527c.35.25.807.272 1.204.108.397-.166.71-.506.78-.93l.15-.894z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                    <span>General Settings</span>
+                </a>
+                <a href="#" data-tab-target="#integrations" class="tab-item text-gray-900 hover:text-gray-900 hover:bg-gray-50 group flex items-center rounded-md px-3 py-2 text-sm font-medium">
+                    <svg class="text-gray-400 group-hover:text-gray-500 -ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>
+                    <span>Integrations</span>
+                </a>
+                <a href="#" data-tab-target="#devices" class="tab-item text-gray-900 hover:text-gray-900 hover:bg-gray-50 group flex items-center rounded-md px-3 py-2 text-sm font-medium">
+                     <svg class="text-gray-400 group-hover:text-gray-500 -ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" /></svg>
+                    <span>Devices</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Tab Content Panels -->
+        <div class="space-y-6 sm:px-6 lg:col-span-9 lg:px-0">
+            <!-- Configuration and Integrations Form -->
+            <form id="config-form" method="POST" action="{{ url_for('configure_instance') }}">
+                
+                <!-- General Settings Panel -->
+                <div id="general-settings" class="tab-content">
+                    <div class="shadow sm:overflow-hidden sm:rounded-md">
+                        <div class="space-y-6 bg-white py-6 px-4 sm:p-6">
+                            <div>
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">LLM Configuration</h3>
+                                <p class="mt-1 text-sm text-gray-500">Configure the AI provider for receipt processing.</p>
+                            </div>
+                            <div class="grid grid-cols-6 gap-6">
+                                <div class="col-span-6 sm:col-span-3">
+                                    <label for="llm_provider" class="block text-sm font-medium text-gray-700">LLM Provider</label>
+                                    <select id="llm_provider" name="llm_provider" class="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm">
+                                        <option {% if config.llm_provider == 'groq' %}selected{% endif %}>groq</option>
+                                        <option {% if config.llm_provider == 'openai' %}selected{% endif %}>openai</option>
+                                    </select>
+                                </div>
+                                <div class="col-span-6 sm:col-span-4">
+                                    <label for="llm_api_key" class="block text-sm font-medium text-gray-700">API Key</label>
+                                    <input type="password" name="llm_api_key" id="llm_api_key" value="{{ config.llm_api_key or '' }}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div>
-                    <label for="llm_api_key" class="block text-sm font-medium text-gray-700">API Key</label>
-                    <input type="password" name="llm_api_key" id="llm_api_key" class="mt-1 block w-full rounded-md border-gray-300" value="{{ config.llm_api_key or '' }}">
+
+                <!-- Integrations Panel -->
+                <div id="integrations" class="tab-content hidden">
+                     <div class="shadow sm:overflow-hidden sm:rounded-md">
+                        <div class="space-y-6 bg-white py-6 px-4 sm:p-6">
+                            <div>
+                                <h3 class="text-lg font-medium leading-6 text-gray-900">Export & Backup Options</h3>
+                                <p class="mt-1 text-sm text-gray-500">Configure destinations for processed receipt data.</p>
+                            </div>
+                            <div class="grid grid-cols-6 gap-6">
+                                <div class="col-span-6">
+                                    <label for="export_spreadsheet_url" class="block text-sm font-medium text-gray-700">Google Sheet URL</label>
+                                    <input type="url" name="export_spreadsheet_url" id="export_spreadsheet_url" value="{{ config.export_spreadsheet_url or '' }}" placeholder="https://docs.google.com/spreadsheets/d/..." class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                                <div class="col-span-6">
+                                    <label for="post_callback_url" class="block text-sm font-medium text-gray-700">POST Callback URL</label>
+                                    <input type="url" name="post_callback_url" id="post_callback_url" value="{{ config.post_callback_url or '' }}" placeholder="https://yourapi.com/webhook" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+
+                                <div class="col-span-6 sm:col-span-3">
+                                    <label for="s3_bucket_name" class="block text-sm font-medium text-gray-700">S3 Bucket Name</label>
+                                    <input type="text" name="s3_bucket_name" id="s3_bucket_name" value="{{ config.s3_bucket_name or '' }}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                                <div class="col-span-6 sm:col-span-3">
+                                    <label for="s3_region" class="block text-sm font-medium text-gray-700">S3 Region</label>
+                                    <input type="text" name="s3_region" id="s3_region" value="{{ config.s3_region or '' }}" placeholder="e.g., us-east-1" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                                <div class="col-span-6 sm:col-span-3">
+                                    <label for="s3_access_key_id" class="block text-sm font-medium text-gray-700">S3 Access Key ID</label>
+                                    <input type="password" name="s3_access_key_id" id="s3_access_key_id" value="{{ config.s3_access_key_id or '' }}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                                <div class="col-span-6 sm:col-span-3">
+                                    <label for="s3_secret_access_key" class="block text-sm font-medium text-gray-700">S3 Secret Access Key</label>
+                                    <input type="password" name="s3_secret_access_key" id="s3_secret_access_key" value="{{ config.s3_secret_access_key or '' }}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </div>
 
-        <div>
-            <h2 class="text-xl font-semibold text-gray-700 mb-4">Export Settings</h2>
-            <div>
-                <label for="export_spreadsheet_url" class="block text-sm font-medium text-gray-700">Google Sheet / Spreadsheet URL</label>
-                <input type="url" name="export_spreadsheet_url" id="export_spreadsheet_url" class="mt-1 block w-full rounded-md border-gray-300" value="{{ config.export_spreadsheet_url or '' }}">
-            </div>
-        </div>
-
-        <div>
-            <button type="submit" class="w-full px-6 py-3 font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700">
-                Save Configuration
-            </button>
-        </div>
-    </form>
-
-    <!-- Device Management -->
-    <div class="mt-12">
-        <h2 class="text-xl font-semibold text-gray-700 mb-4">Manage Devices/Interfaces</h2>
-        <div class="bg-gray-50 p-4 rounded-lg">
-            <form action="{{ url_for('add_device') }}" method="POST" class="flex items-center space-x-4">
-                <input type="text" name="device_name" placeholder="New Device Name (e.g., 'John's iPhone')" class="flex-grow rounded-md border-gray-300" required>
-                <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700">Add Device</button>
+                <!-- Form Save Button -->
+                <div class="flex justify-end bg-gray-50 text-right px-4 py-3 sm:px-6 rounded-md" id="save-button-container">
+                    <button type="submit" class="inline-flex justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">Save Configuration</button>
+                </div>
             </form>
-        </div>
-        <ul class="mt-4 space-y-3">
-            {% for device in devices %}
-            <li class="p-4 bg-white border rounded-md flex items-center justify-between">
-                <div>
-                    <p class="font-semibold text-gray-800">{{ device.name }}</p>
-                    <p class="text-sm text-gray-500 font-mono">API Key: <span class="font-bold text-gray-600">{{ device.api_key }}</span></p>
+
+            <!-- Devices Panel -->
+            <div id="devices" class="tab-content hidden">
+                <div class="shadow sm:rounded-md">
+                    <div class="bg-white py-6 px-4 sm:p-6">
+                        <div>
+                            <h3 class="text-lg font-medium leading-6 text-gray-900">Manage Devices</h3>
+                            <p class="mt-1 text-sm text-gray-500">Add or view devices that can submit receipts.</p>
+                        </div>
+                        
+                        <!-- List of existing devices -->
+                        <div class="mt-6">
+                            <h4 class="text-sm font-medium text-gray-500 mb-2">Existing Devices</h4>
+                            <ul role="list" class="divide-y divide-gray-200 border border-gray-200 rounded-md">
+                                {% for device in devices %}
+                                <li class="flex items-center justify-between p-3">
+                                    <div class="flex min-w-0 flex-1 items-center">
+                                        <div class="min-w-0 flex-1">
+                                            <p class="truncate text-sm font-medium text-gray-900">{{ device.name }}</p>
+                                            <p class="truncate text-sm text-gray-500">API Key: <span class="font-mono">{{ device.api_key }}</span></p>
+                                        </div>
+                                    </div>
+                                </li>
+                                {% else %}
+                                <li class="p-4 text-sm text-gray-500">No devices have been added yet.</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        
+                        <!-- Add new device form -->
+                        <form method="POST" action="{{ url_for('add_device') }}" class="mt-6">
+                            <label for="device_name" class="block text-sm font-medium text-gray-700">Add New Device</label>
+                            <div class="mt-1 flex rounded-md shadow-sm">
+                                <input type="text" name="device_name" id="device_name" class="block w-full flex-1 rounded-none rounded-l-md border-gray-300 focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="e.g., WhatsApp Bot">
+                                <button type="submit" class="inline-flex items-center rounded-r-md border border-l-0 border-gray-300 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">Add</button>
+                            </div>
+                        </form>
+                    </div>
                 </div>
-            </li>
-            {% else %}
-            <li class="text-center text-gray-500 py-4">No devices registered yet.</li>
-            {% endfor %}
-        </ul>
+            </div>
+
+        </div>
     </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const tabs = document.querySelectorAll('.tab-item');
+    const tabContents = document.querySelectorAll('.tab-content');
+    const saveButtonContainer = document.getElementById('save-button-container');
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', function(event) {
+            event.preventDefault();
+
+            // Deactivate all tabs
+            tabs.forEach(item => {
+                item.classList.remove('bg-indigo-50', 'text-indigo-700');
+                item.classList.add('text-gray-900', 'hover:text-gray-900', 'hover:bg-gray-50');
+                const svg = item.querySelector('svg');
+                if (svg) {
+                    svg.classList.remove('text-indigo-500');
+                    svg.classList.add('text-gray-400', 'group-hover:text-gray-500');
+                }
+            });
+
+            // Activate the clicked tab
+            this.classList.add('bg-indigo-50', 'text-indigo-700');
+            this.classList.remove('text-gray-900', 'hover:text-gray-900', 'hover:bg-gray-50');
+            const svg = this.querySelector('svg');
+            if (svg) {
+                svg.classList.add('text-indigo-500');
+                svg.classList.remove('text-gray-400', 'group-hover:text-gray-500');
+            }
+
+            // Hide all content
+            tabContents.forEach(content => {
+                content.classList.add('hidden');
+            });
+
+            // Show the target content
+            const targetId = this.getAttribute('data-tab-target');
+            const targetContent = document.querySelector(targetId);
+            if (targetContent) {
+                targetContent.classList.remove('hidden');
+            }
+            
+            // Show/hide the save button container
+            if (targetId === '#devices') {
+                saveButtonContainer.classList.add('hidden');
+            } else {
+                saveButtonContainer.classList.remove('hidden');
+            }
+        });
+    });
+});
+</script>
 {% endblock %}

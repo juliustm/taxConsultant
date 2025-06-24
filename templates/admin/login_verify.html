@@ -1,23 +1,30 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="flex min-h-full flex-col justify-center px-6 py-12 lg:px-8">
-    <div class="sm:mx-auto sm:w-full sm:max-w-sm">
-        <h2 class="mt-10 text-center text-2xl font-bold leading-9 tracking-tight text-gray-900">Verify Your Identity</h2>
-        <p class="mt-2 text-center text-sm text-gray-600">Enter the code sent to <strong>{{ email }}</strong></p>
+<div class="flex min-h-full flex-col justify-center py-12 sm:px-6 lg:px-8">
+  <div class="sm:mx-auto sm:w-full sm:max-w-md">
+    <h2 class="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">Verify Your Identity</h2>
+    <p class="mt-2 text-center text-sm text-gray-600">
+      Enter the 6-digit code from your authenticator app for {{ email }}.
+    </p>
+  </div>
+
+  <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+    <div class="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
+      <form class="space-y-6" action="{{ url_for('login_verify') }}" method="POST">
+        <div>
+          <label for="totp_code" class="block text-sm font-medium text-gray-700">Authenticator Code</label>
+          <div class="mt-1">
+            <input id="totp_code" name="totp_code" type="text" autocomplete="one-time-code" required inputmode="numeric" pattern="[0-9]{6}"
+                   class="block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm">
+          </div>
+        </div>
+
+        <div>
+          <button type="submit" class="flex w-full justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">Log In</button>
+        </div>
+      </form>
     </div>
-    <div class="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
-        <form class="space-y-6" action="{{ url_for('verify_login_otp') }}" method="POST">
-            <div>
-                <label for="otp" class="block text-sm font-medium leading-6 text-gray-900">One-Time Code</label>
-                <div class="mt-2">
-                    <input id="otp" name="otp" type="text" pattern="\d{6}" maxlength="6" inputmode="numeric" required class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 text-center tracking-[.5em]">
-                </div>
-            </div>
-            <div>
-                <button type="submit" class="flex w-full justify-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Verify and Log In</button>
-            </div>
-        </form>
-    </div>
+  </div>
 </div>
 {% endblock %}
