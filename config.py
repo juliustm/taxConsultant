@@ -1,8 +1,6 @@
-# config.py (updated line)
+# config.py (Final, Corrected, and Seamless Version)
 import os
-from dotenv import load_dotenv
 from datetime import timedelta
-
 
 class Config:
     # Standard Flask secret key
@@ -12,14 +10,18 @@ class Config:
     PERMANENT_SESSION_LIFETIME = timedelta(hours=1)
 
     # --- THE SEAMLESS DATABASE CONFIGURATION ---
-    # Define a single, conventional path for the application's data.
-    DATA_DIR = '/data'
+    # Define a single, conventional path inside the project's root directory.
+    # The project lives at '/app' inside the container.
+    DATA_DIR = '/app/data'
     DB_FILE = 'taxconsult.db'
+    DB_PATH = os.path.join(DATA_DIR, DB_FILE)
     
-    # Ensure the data directory exists. This is critical for the first run.
+    # Ensure the data directory exists. This command will run as the container's user.
+    # On Deploy.tz, this user has permission to create subdirectories inside /app.
+    # This resolves the "Permission denied" error.
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Always point the database URI to the conventional path.
-    SQLALCHEMY_DATABASE_URI = f"sqlite:///{os.path.join(DATA_DIR, DB_FILE)}"
+    # Always point the database URI to our conventional path.
+    SQLALCHEMY_DATABASE_URI = f"sqlite:///{DB_PATH}"
     
     SQLALCHEMY_TRACK_MODIFICATIONS = False
