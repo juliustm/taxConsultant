@@ -1,6 +1,7 @@
 # config.py (updated line)
 import os
 from dotenv import load_dotenv
+from datetime import timedelta
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 load_dotenv(os.path.join(basedir, '.env'))
@@ -11,3 +12,9 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
         'sqlite:///' + os.path.join(basedir, 'instance', 'taxconsult.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # Session timeout configuration (1 hour)
+    PERMANENT_SESSION_LIFETIME = timedelta(hours=1)
+
+    # Language configuration for Babel
+    LANGUAGES = ['en', 'sw']

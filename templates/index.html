@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div>
+    <h1 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">Receipts Dashboard</h1>
+    
+    <!-- Stats Cards -->
+    <div class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {% set periods = [('24h', 'Last 24 Hours'), ('7d', 'Last 7 Days'), ('4w', 'Last 4 Weeks'), ('3m', 'Last 3 Months'), ('6m', 'Last 6 Months'), ('1y', 'Last Year')] %}
+        {% for key, name in periods %}
+        <div class="overflow-hidden rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+            <dt class="truncate text-sm font-medium text-gray-500">{{ name }}</dt>
+            <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900">{{ stats[key][0] or 0 }} receipts</dd>
+            <p class="text-sm text-gray-600">Total: {{ "%.2f"|format(stats[key][1] or 0) }} TZS</p>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Recent Receipts Table -->
+    <div class="mt-8">
+        <h2 class="text-xl font-semibold text-gray-900">Recent Receipts</h2>
+        <div class="mt-4 overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+            <table class="min-w-full divide-y divide-gray-300">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900">Vendor</th>
+                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Total Amount</th>
+                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Receipt Date</th>
+                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Processed At</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 bg-white">
+                    {% for receipt in recent_receipts %}
+                    <tr>
+                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900">{{ receipt.vendor_name }}</td>
+                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ "%.2f"|format(receipt.total_amount) }} TZS</td>
+                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ receipt.receipt_date.strftime('%Y-%m-%d') }}</td>
+                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ receipt.processed_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center py-4 text-sm text-gray-500">No recent receipts found.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
