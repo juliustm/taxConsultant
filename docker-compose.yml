@@ -10,7 +10,7 @@ services:
       - .env
     volumes:
       - .:/usr/src/app
-      - db_data:/usr/src/app/instance
+      - db_data:/data
     command: gunicorn main:app -b 0.0.0.0:80 --reload
 volumes:
   # Define the named volume for the database
