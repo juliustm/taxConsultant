@@ -1,130 +1,176 @@
 {% extends "base.html" %}
 
 {% block content %}
-{# This script tag will hold all our data, making it available to Alpine.js #}
 <script>
     const submissionsData = {{ submissions_json|safe }};
 </script>
 
-{% if not submissions %}
-    {# --- EMPTY STATE (Unchanged from before) --- #}
+{% if not submissions_json or submissions_json == '[]' %}
+    {# --- EMPTY STATE --- #}
     <div class="text-center py-12 px-4 sm:px-6 lg:px-8">
         <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h15.75c.621 0 1.125.504 1.125 1.125v6.75C21 20.496 20.496 21 19.875 21H4.125A1.125 1.125 0 013 19.875v-6.75zM3 8.625c0-.621.504-1.125 1.125-1.125h15.75c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H4.125A1.125 1.125 0 013 10.875V8.625zM12 3c-1.105 0-2 .895-2 2s.895 2 2 2 2-.895 2-2-.895-2-2-2z"></path></svg>
         <h3 class="mt-2 text-lg font-semibold text-gray-900">No receipts submitted yet</h3>
         <p class="mt-1 text-sm text-gray-500">Get started by sending receipts to your secure endpoint.</p>
-        <div class="mt-6 text-left max-w-4xl mx-auto bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-            <!-- ... (The 'get started' guide is unchanged) ... -->
-        </div>
     </div>
-
 {% else %}
-    {# --- THE NEW SUPER ADMIN DASHBOARD --- #}
     <div x-data="dashboard()">
-        <h1 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">Receipts Dashboard</h1>
+        <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
 
-        <!-- Stats Cards -->
-        <div class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {% set periods_display = [('24h', 'Last 24 Hours'), ('7d', 'Last 7 Days'), ('4w', 'Last 4 Weeks')] %}
-            {% for key, name in periods_display %}
-            <div class="overflow-hidden rounded-lg bg-white px-4 py-5 shadow sm:p-6">
-                <dt class="truncate text-sm font-medium text-gray-500">{{ name }}</dt>
-                <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900">{{ stats[key][0] or 0 }} receipts</dd>
-                <p class="text-sm text-gray-600">Total: {{ "%.2f"|format(stats[key][1] or 0) }} TZS</p>
+        <!-- DECORATED Stats Cards -->
+        <div class="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {% set card_styles = [
+                {'bg': 'bg-blue-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'},
+                {'bg': 'bg-green-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>'},
+                {'bg': 'bg-yellow-500', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5V4H4zm0 11h5v5H4v-5zm11 0h5v5h-5v-5zm0-11h5v5h-5V4z" /></svg>'},
+                {'bg': 'bg-red-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h.5A2.5 2.5 0 0020 5.5V3.935m-14 0A2.5 2.5 0 018.5 2h7A2.5 2.5 0 0118 4.5v-1.065" /></svg>'}
+            ] %}
+            {% set periods = [('Last 24 Hours', stats['24h']), ('Last 7 Days', stats['7d']), ('Last 4 Weeks', stats['4w']), ('Last 1 Year', stats['1y'])] %}
+            {% for i in range(periods|length) %}
+            <div class="{{ card_styles[i].bg }} relative overflow-hidden rounded-lg shadow">
+                <div class="p-5">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">{{ card_styles[i].icon|safe }}</div>
+                        <div class="ml-5 w-0 flex-1">
+                            <dl>
+                                <dt class="text-sm font-medium text-white truncate">{{ periods[i][0] }}</dt>
+                                <dd>
+                                    <div class="text-lg font-medium text-white">{{ periods[i][1][0] or 0 }} receipts</div>
+                                    <div class="text-sm font-medium text-gray-200">Total: {{ (periods[i][1][1] or 0) | currency }} TZS</div>
+                                </dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
             </div>
             {% endfor %}
         </div>
         
         <!-- Controls: Tabs and Search -->
         <div class="mt-8">
-            <div class="sm:flex sm:items-baseline sm:justify-between">
+             <div class="sm:flex sm:items-center sm:justify-between">
                 <div class="border-b border-gray-200">
                     <nav class="-mb-px flex space-x-8" aria-label="Tabs">
                         <button @click="changeTab('processed')" :class="getTabClass('processed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Processed</button>
+                        <button @click="changeTab('with_vat')" :class="getTabClass('with_vat')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center">
+                            With VAT <svg xmlns="http://www.w3.org/2000/svg" class="ml-1.5 h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>
+                        </button>
                         <button @click="changeTab('queued')" :class="getTabClass('queued')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Queued</button>
                         <button @click="changeTab('failed')" :class="getTabClass('failed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Failed</button>
                         <button @click="changeTab('duplicates')" :class="getTabClass('duplicates')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Duplicates</button>
                     </nav>
                 </div>
-                <div class="mt-4 sm:mt-0 sm:ml-4">
-                    <input type="search" x-model="searchQuery" @input.debounce.300ms="updateView()" placeholder="Search receipts..." class="block w-full rounded-md border-gray-300 shadow-sm sm:text-sm">
+                 <div class="mt-3 sm:ml-4 sm:mt-0">
+                    <label for="search_receipts" class="sr-only">Search receipts</label>
+                    <div class="relative rounded-md shadow-sm">
+                        <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clip-rule="evenodd" /></svg></div>
+                        <input type="search" x-model="searchQuery" @input.debounce.300ms="updateView()" name="search_receipts" id="search_receipts" class="block w-full rounded-md border-0 py-1.5 pl-10 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" placeholder="Search receipts...">
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- Interactive Table -->
         <div class="mt-8 flow-root">
-            <div class="inline-block min-w-full py-2 align-middle">
-                <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
-                    <table class="min-w-full divide-y divide-gray-300">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Input <span x-html="getSortIcon('vendor_name')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('vat_amount')" class="group inline-flex">VAT <span x-html="getSortIcon('vat_amount')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Details</th>
-                                <th scope="col" class="relative py-3.5 pl-3 pr-4"><span class="sr-only">View</span></th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-gray-200 bg-white">
-                            <template x-for="sub in view" :key="sub.id">
+            <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
+                    <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+                        <table class="min-w-full divide-y divide-gray-300">
+                            <thead class="bg-gray-50">
                                 <tr>
-                                    <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm">
-                                        <span x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span>
-                                    </td>
-                                    <td class="px-3 py-4 text-sm text-gray-900">
-                                        <div class="font-medium" x-text="sub.receipt ? sub.receipt.vendor_name : (sub.description || 'N/A')"></div>
-                                        <div class="text-gray-500 truncate max-w-xs" x-text="sub.input_type === 'url' ? sub.input_data : 'Photo Upload'"></div>
-                                    </td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt && sub.receipt.total_amount ? sub.receipt.total_amount.toFixed(2) + ' TZS' : '---'"></td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt && sub.receipt.vat_amount ? sub.receipt.vat_amount.toFixed(2) : '---'"></td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt ? sub.receipt.receipt_date : sub.received_at.split('T')[0]"></td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                                        <div x-show="sub.receipt" x-text="`Code: ${sub.receipt?.receipt_verification_code || 'N/A'}`"></div>
-                                        <div x-show="sub.location" x-text="`Loc: ${sub.location}`"></div>
-                                    </td>
-                                    <td class="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium">
-                                        <button @click="openModal(sub.id)" class="text-indigo-600 hover:text-indigo-900">View</button>
-                                    </td>
+                                    <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6"><button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button></th>
+                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Description <span x-html="getSortIcon('vendor_name')"></span></button></th>
+                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button></th>
+                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button></th>
+                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Tax Analysis</th>
+                                    <th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span class="sr-only">View</span></th>
                                 </tr>
-                            </template>
-                            <tr x-show="view.length === 0">
-                                <td colspan="7" class="text-center py-12 text-sm text-gray-500">No submissions match your criteria.</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200 bg-white">
+                                <template x-for="sub in view" :key="sub.id">
+                                    <tr>
+                                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm sm:pl-6"><span x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span></td>
+                                        <td class="px-3 py-4 text-sm text-gray-900">
+                                            <div class="font-medium" x-text="sub.receipt.vendor_name || 'Processing...'"></div>
+                                            <div class="text-gray-500" x-text="sub.description || 'Awaiting processing'"></div>
+                                        </td>
+                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                            <div class="flex items-center">
+                                                <span x-text="(sub.receipt.total_amount !== null ? (sub.receipt.total_amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' TZS' : '---')"></span>
+                                                <span x-show="sub.receipt && sub.receipt.vat_amount > 0" class="ml-2 inline-flex items-center rounded-md bg-teal-50 px-2 py-1 text-xs font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20">VAT</span>
+                                            </div>
+                                        </td>
+                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt.receipt_date || '---'"></td>
+                                        <td class="px-3 py-4 text-sm text-gray-500">
+                                            <div class="flex items-start">
+                                                <svg x-show="sub.receipt && sub.receipt.raw_llm_response" class="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
+                                                <span x-text="getTaxAnalysisText(sub)"></span>
+                                            </div>
+                                        </td>
+                                        <td class="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6"><button @click="openModal(sub.id)" class="text-indigo-600 hover:text-indigo-900">View</button></td>
+                                    </tr>
+                                </template>
+                                <tr x-show="view.length === 0"><td colspan="6" class="text-center py-12 text-sm text-gray-500">No submissions match your criteria.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- Details Modal -->
-        <div x-show="modal.open" class="relative z-10" style="display: none;">
-            <!-- ... (Modal backdrop and positioning unchanged) ... -->
-            <div @click.away="closeModal()" class="relative transform overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
-                <h3 class="text-lg font-semibold leading-6 text-gray-900">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
-                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                        <h4 class="text-sm font-medium text-gray-500">Input Data</h4>
-                        <pre class="mt-1 bg-gray-100 p-3 rounded-md text-xs h-96 overflow-auto" x-text="modal.data.input_type === 'url' ? 'Source URL:\n' + modal.data.input_data : 'Source Photo:\n' + modal.data.input_data"></pre>
+        <div x-show="modal.open" 
+             class="relative z-10" aria-labelledby="modal-title" role="dialog" aria-modal="true" style="display: none;">
+            
+            <div @click="closeModal()" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm"></div>
+
+            <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
+                <div @keydown.escape.window="closeModal()" class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                    <div @click.outside="closeModal()"
+                         class="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-4xl sm:p-6">
+                        <div>
+                            <h3 class="text-lg font-semibold leading-6 text-gray-900" id="modal-title">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
+                            <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                                
+                                <!-- === LEFT PANEL: INPUT DATA (Corrected and Enhanced) === -->
+                                <div class="space-y-4">
+                                    <h4 class="text-md font-medium text-gray-700">Input Data</h4>
+                                    <!-- Image Input -->
+                                    <template x-if="modal.data.input_type === 'photo'">
+                                        <div class="p-2 border rounded-lg"><img :src="getPublicUploadPath(modal.data.input_data)" alt="Receipt Photo" class="w-full rounded-md"></div>
+                                    </template>
+                                    <!-- URL Input -->
+                                    <template x-if="modal.data.input_type === 'url'">
+                                        <div class="w-full h-24 border rounded-md bg-gray-50 flex flex-col items-center justify-center p-4 text-center">
+                                            <p class="text-sm text-gray-600">Live preview blocked by source.</p>
+                                            <a :href="modal.data.input_data" target="_blank" class="mt-2 text-sm font-medium text-indigo-600 hover:underline">Open Receipt in New Tab <svg xmlns="http://www.w3.org/2000/svg" class="inline h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg></a>
+                                        </div>
+                                    </template>
+                                    <!-- Submission Meta Details -->
+                                    <dl class="divide-y divide-gray-100">
+                                        <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted At</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.received_at + ' UTC'"></dd></div>
+                                        <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted By</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.device_name"></dd></div>
+                                        <template x-if="modal.data.location"><div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Location</dt><dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0"><a :href="formatLocationUrl(modal.data.location)" target="_blank" class="text-indigo-600 hover:underline" x-text="modal.data.location"></a></dd></div></template>
+                                    </dl>
+                                </div>
+                                
+                                <!-- === RIGHT PANEL: LLM OUTPUT (Corrected) === -->
+                                <div>
+                                    <h4 class="text-md font-medium text-gray-700">LLM Output / Error</h4>
+                                    <div class="mt-2 h-96 overflow-y-auto rounded-md bg-gray-50 border p-3 text-sm space-y-3">
+                                        <!-- FIX: Use optional chaining (?.) to prevent error if receipt is null -->
+                                        <template x-if="modal.data.receipt?.raw_llm_response">
+                                            <div class="prose prose-sm max-w-none" x-html="renderLlmOutput(modal.data.receipt.raw_llm_response)"></div>
+                                        </template>
+                                        <!-- FIX: Use optional chaining (?.) here too for safety -->
+                                        <template x-if="!modal.data.receipt?.raw_llm_response && modal.data.error_message">
+                                            <div class="text-red-700 whitespace-pre-wrap" x-text="modal.data.error_message"></div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-5 sm:mt-6"><button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Close</button></div>
                     </div>
-                    <div>
-                        <h4 class="text-sm font-medium text-gray-500">LLM Output / Error</h4>
-                        <pre class="mt-1 bg-gray-100 p-3 rounded-md text-xs h-96 overflow-auto" x-text="modal.data.receipt ? JSON.stringify(modal.data.receipt.raw_llm_response, null, 2) : JSON.stringify({ error: modal.data.error_message }, null, 2)"></pre>
-                    </div>
-                </div>
-                <div class="mt-5 sm:mt-6">
-                    <button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-indigo-700">Close</button>
                 </div>
             </div>
         </div>
@@ -143,56 +189,44 @@ function dashboard() {
         modal: { open: false, data: {} },
 
         // --- Init ---
-        init() {
-            this.updateView();
-            console.log("Dashboard initialized.");
-        },
+        init() { this.updateView(); },
 
         // --- Methods ---
         updateView() {
             const query = this.searchQuery.toLowerCase();
             const filteredByTab = this.allSubmissions.filter(sub => {
-                if (this.tab === 'processed') return sub.status === 'completed' && !sub.is_duplicate;
-                if (this.tab === 'queued') return sub.status === 'queued';
+                if (this.tab === 'with_vat') return sub.status === 'completed' && sub.receipt && sub.receipt.vat_amount > 0;
+                if (this.tab === 'processed') return sub.status === 'completed';
+                if (this.tab === 'queued') return sub.status === 'queued' || sub.status === 'processing';
                 if (this.tab === 'failed') return sub.status === 'failed';
                 if (this.tab === 'duplicates') return sub.is_duplicate;
                 return false;
             });
-
             const filteredBySearch = query ? filteredByTab.filter(sub => {
                 return (sub.receipt?.vendor_name?.toLowerCase().includes(query)) ||
-                       (sub.receipt?.receipt_verification_code?.toLowerCase().includes(query)) ||
-                       (sub.description?.toLowerCase().includes(query)) ||
-                       (sub.location?.toLowerCase().includes(query));
+                       (sub.description?.toLowerCase().includes(query));
             }) : filteredByTab;
-            
             this.view = this.sortData(filteredBySearch);
         },
-
         sortData(data) {
             const col = this.sort.column;
             const dir = this.sort.direction === 'asc' ? 1 : -1;
-            
             return [...data].sort((a, b) => {
                 let valA = this.getSortValue(a, col);
                 let valB = this.getSortValue(b, col);
-                
                 if (valA < valB) return -1 * dir;
                 if (valA > valB) return 1 * dir;
                 return 0;
             });
         },
-        
         getSortValue(sub, col) {
             switch(col) {
-                case 'vendor_name': return sub.receipt?.vendor_name || sub.description || 'z';
+                case 'vendor_name': return sub.receipt?.vendor_name?.toLowerCase() || 'z';
                 case 'total_amount': return sub.receipt?.total_amount || -1;
-                case 'vat_amount': return sub.receipt?.vat_amount || -1;
                 case 'receipt_date': return sub.receipt?.receipt_date || sub.received_at;
-                default: return sub[col] || '';
+                default: return sub[col]?.toLowerCase() || '';
             }
         },
-
         sortBy(column) {
             if (this.sort.column === column) {
                 this.sort.direction = this.sort.direction === 'asc' ? 'desc' : 'asc';
@@ -202,21 +236,61 @@ function dashboard() {
             }
             this.updateView();
         },
-
         changeTab(newTab) {
             this.tab = newTab;
             this.updateView();
         },
-
         openModal(subId) {
             this.modal.data = this.allSubmissions.find(s => s.id === subId) || {};
             this.modal.open = true;
         },
-        
         closeModal() {
             this.modal.open = false;
         },
+        getPublicUploadPath(serverPath) {
+            if (!serverPath) return '';
+            return serverPath.replace('/app/data', '');
+        },
+        formatLocationUrl(locationString) {
+            if (!locationString) return '#';
+            const coords = locationString.split(' - ')[0];
+            return `https://www.google.com/maps/place/${coords}`;
+        },
+        renderLlmOutput(rawJson) {
+            if (!rawJson) return '<span>No LLM data available.</span>';
+            try {
+                const data = (typeof rawJson === 'string') ? JSON.parse(rawJson) : rawJson;
+                let html = '<dl class="divide-y divide-gray-200">';
+                for (const [key, value] of Object.entries(data)) {
+                    if (value) {
+                         html += `<div class="py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium text-gray-500 capitalize">${key.replace(/_/g, ' ')}</dt><dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0">${value}</dd></div>`;
+                    }
+                }
+                html += '</dl>';
+                return html;
+            } catch (e) {
+                return `<div class="text-red-700">Error parsing LLM response: ${e.message}</div><pre>${rawJson}</pre>`;
+            }
+        },
+        getTaxAnalysisText(sub) {
+            // 1. Safely check if the receipt and its LLM response exist. If not, show error or '---'.
+            if (!sub.receipt || !sub.receipt.raw_llm_response) {
+                return sub.error_message || '---';
+            }
+            try {
+                // 2. Safely check if the data is a string before trying to parse it.
+                const data = (typeof sub.receipt.raw_llm_response === 'string')
+                    ? JSON.parse(sub.receipt.raw_llm_response)
+                    : sub.receipt.raw_llm_response; // Assume it's already an object if not a string
 
+                // 3. Safely return the analysis text or a default message.
+                return data.llm_tax_analysis || 'No analysis provided.';
+            } catch (e) {
+                // This now only catches true parsing errors on malformed strings.
+                console.error("Failed to parse raw_llm_response for sub ID:", sub.id, e);
+                return 'Error: Malformed LLM data.';
+            }
+        },
         // --- UI Helpers ---
         getTabClass(tabName) {
             return this.tab === tabName 
@@ -229,10 +303,11 @@ function dashboard() {
             return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>';
         },
         getStatusClass(sub) {
-            if (sub.status === 'completed' && !sub.is_duplicate) return 'inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800';
-            if (sub.status === 'queued') return 'inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800';
-            if (sub.status === 'failed') return 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800';
             if (sub.is_duplicate) return 'inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800';
+            if (sub.status === 'completed') return 'inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800';
+            if (sub.status === 'queued' || sub.status === 'processing') return 'inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800';
+            if (sub.status === 'failed') return 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800';
+            return 'inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800';
         },
         getStatusText(sub) {
             if (sub.is_duplicate) return 'Duplicate';

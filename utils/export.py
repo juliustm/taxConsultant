@@ -125,6 +125,12 @@ def log_to_s3(event_type, payload, config):
     except (NoCredentialsError, ClientError) as e:
         print(f"Error logging to S3: {e}")
 
-
-
-
+def format_currency(value):
+    """Formats a number with commas for thousands."""
+    if value is None:
+        return "0.00"
+    try:
+        # Format with commas and 2 decimal places
+        return "{:,.2f}".format(float(value))
+    except (ValueError, TypeError):
+        return "0.00"

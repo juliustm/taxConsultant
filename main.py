@@ -11,16 +11,18 @@ from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, Submission
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
-from utils.export import dispatch_event
+from utils.export import dispatch_event, format_currency
 from utils.llm_processor import extract_receipt_details
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+app.jinja_env.filters['currency'] = format_currency
 
 # Configure the upload folder
 app.config['UPLOAD_FOLDER'] = os.path.join(Config.DATA_DIR, 'uploads')
@@ -70,7 +72,8 @@ def prepare_submissions_for_frontend(submissions):
             "location": sub.location,
             "error_message": sub.error_message,
             "is_duplicate": sub.status == 'duplicate',
-            "receipt": receipt_data
+            "receipt": receipt_data,
+            "device_name": sub.device.name if sub.device else 'Unknown Device'
         }
         if sub.receipt:
             data["receipt"] = {
@@ -545,3 +548,13 @@ def run_tasks():
         "message": f"Processed {len(processed_jobs)} job(s). Rescued {len(stuck_jobs)} stuck job(s).",
         "processed_details": processed_jobs
     }), 200
+
+@app.route('/uploads/<path:filename>')
+@login_required
+def uploaded_file(filename):
+    """Serves a file from the upload folder."""
+    return send_from_directory(
+        app.config['UPLOAD_FOLDER'],
+        filename,
+        as_attachment=False # Display in browser instead of downloading
+    )
