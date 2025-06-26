@@ -5,6 +5,7 @@ from datetime import timedelta
 class Config:
     # Standard Flask secret key
     SECRET_KEY = os.environ.get('SECRET_KEY', 'a-super-secret-key-for-local-development')
+    TASK_RUNNER_SECRET_KEY = os.environ.get('TASK_RUNNER_SECRET_KEY', 'local-secret-runner-key')
 
     # Session timeout configuration
     PERMANENT_SESSION_LIFETIME = timedelta(hours=1)

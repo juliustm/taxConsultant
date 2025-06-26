@@ -5,3 +5,10 @@ Flask-SQLAlchemy
 pyotp
 qrcode
 Pillow
+requests
+boto3
+openai
+beautifulsoup4
+lxml
+gspread
+oauth2client

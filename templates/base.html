@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TaxConsult AI Agent</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body class="h-full">
 <div class="min-h-full">
@@ -18,8 +19,38 @@
                         TaxConsult
                     </div>
                     <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
-                        <a href="{{ url_for('index') }}" class="border-indigo-500 text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Dashboard</a>
-                        <a href="{{ url_for('configure_instance') }}" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Configuration</a>
+                        
+                        <!-- Dashboard Link -->
+                        <a href="{{ url_for('index') }}" 
+                           class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
+                                  {% if request.endpoint == 'index' %}
+                                    border-indigo-500 text-gray-900
+                                  {% else %}
+                                    border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
+                                  {% endif %}">
+                           Dashboard
+                        </a>
+
+                        <a href="{{ url_for('queue_status') }}" class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
+                                  {% if request.endpoint == 'queue_status' %}
+                                    border-indigo-500 text-gray-900
+                                  {% else %}
+                                    border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
+                                  {% endif %}">
+                            Queue
+                        </a>
+
+                        <!-- Configuration Link -->
+                        <a href="{{ url_for('configure_instance') }}"
+                           class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
+                                  {% if request.endpoint == 'configure_instance' %}
+                                    border-indigo-500 text-gray-900
+                                  {% else %}
+                                    border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
+                                  {% endif %}">
+                           Configuration
+                        </a>
+
                     </div>
                 </div>
                 <div class="hidden sm:ml-6 sm:flex sm:items-center">

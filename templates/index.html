@@ -1,50 +1,245 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div>
-    <h1 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">Receipts Dashboard</h1>
-    
-    <!-- Stats Cards -->
-    <div class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {% set periods = [('24h', 'Last 24 Hours'), ('7d', 'Last 7 Days'), ('4w', 'Last 4 Weeks'), ('3m', 'Last 3 Months'), ('6m', 'Last 6 Months'), ('1y', 'Last Year')] %}
-        {% for key, name in periods %}
-        <div class="overflow-hidden rounded-lg bg-white px-4 py-5 shadow sm:p-6">
-            <dt class="truncate text-sm font-medium text-gray-500">{{ name }}</dt>
-            <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900">{{ stats[key][0] or 0 }} receipts</dd>
-            <p class="text-sm text-gray-600">Total: {{ "%.2f"|format(stats[key][1] or 0) }} TZS</p>
+{# This script tag will hold all our data, making it available to Alpine.js #}
+<script>
+    const submissionsData = {{ submissions_json|safe }};
+</script>
+
+{% if not submissions %}
+    {# --- EMPTY STATE (Unchanged from before) --- #}
+    <div class="text-center py-12 px-4 sm:px-6 lg:px-8">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h15.75c.621 0 1.125.504 1.125 1.125v6.75C21 20.496 20.496 21 19.875 21H4.125A1.125 1.125 0 013 19.875v-6.75zM3 8.625c0-.621.504-1.125 1.125-1.125h15.75c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H4.125A1.125 1.125 0 013 10.875V8.625zM12 3c-1.105 0-2 .895-2 2s.895 2 2 2 2-.895 2-2-.895-2-2-2z"></path></svg>
+        <h3 class="mt-2 text-lg font-semibold text-gray-900">No receipts submitted yet</h3>
+        <p class="mt-1 text-sm text-gray-500">Get started by sending receipts to your secure endpoint.</p>
+        <div class="mt-6 text-left max-w-4xl mx-auto bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+            <!-- ... (The 'get started' guide is unchanged) ... -->
         </div>
-        {% endfor %}
     </div>
 
-    <!-- Recent Receipts Table -->
-    <div class="mt-8">
-        <h2 class="text-xl font-semibold text-gray-900">Recent Receipts</h2>
-        <div class="mt-4 overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
-            <table class="min-w-full divide-y divide-gray-300">
-                <thead class="bg-gray-50">
-                    <tr>
-                        <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900">Vendor</th>
-                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Total Amount</th>
-                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Receipt Date</th>
-                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Processed At</th>
-                    </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-200 bg-white">
-                    {% for receipt in recent_receipts %}
-                    <tr>
-                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900">{{ receipt.vendor_name }}</td>
-                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ "%.2f"|format(receipt.total_amount) }} TZS</td>
-                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ receipt.receipt_date.strftime('%Y-%m-%d') }}</td>
-                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">{{ receipt.processed_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="4" class="text-center py-4 text-sm text-gray-500">No recent receipts found.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+{% else %}
+    {# --- THE NEW SUPER ADMIN DASHBOARD --- #}
+    <div x-data="dashboard()">
+        <h1 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">Receipts Dashboard</h1>
+
+        <!-- Stats Cards -->
+        <div class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {% set periods_display = [('24h', 'Last 24 Hours'), ('7d', 'Last 7 Days'), ('4w', 'Last 4 Weeks')] %}
+            {% for key, name in periods_display %}
+            <div class="overflow-hidden rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+                <dt class="truncate text-sm font-medium text-gray-500">{{ name }}</dt>
+                <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900">{{ stats[key][0] or 0 }} receipts</dd>
+                <p class="text-sm text-gray-600">Total: {{ "%.2f"|format(stats[key][1] or 0) }} TZS</p>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <!-- Controls: Tabs and Search -->
+        <div class="mt-8">
+            <div class="sm:flex sm:items-baseline sm:justify-between">
+                <div class="border-b border-gray-200">
+                    <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                        <button @click="changeTab('processed')" :class="getTabClass('processed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Processed</button>
+                        <button @click="changeTab('queued')" :class="getTabClass('queued')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Queued</button>
+                        <button @click="changeTab('failed')" :class="getTabClass('failed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Failed</button>
+                        <button @click="changeTab('duplicates')" :class="getTabClass('duplicates')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Duplicates</button>
+                    </nav>
+                </div>
+                <div class="mt-4 sm:mt-0 sm:ml-4">
+                    <input type="search" x-model="searchQuery" @input.debounce.300ms="updateView()" placeholder="Search receipts..." class="block w-full rounded-md border-gray-300 shadow-sm sm:text-sm">
+                </div>
+            </div>
+        </div>
+
+        <!-- Interactive Table -->
+        <div class="mt-8 flow-root">
+            <div class="inline-block min-w-full py-2 align-middle">
+                <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+                    <table class="min-w-full divide-y divide-gray-300">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900">
+                                    <button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button>
+                                </th>
+                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                    <button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Input <span x-html="getSortIcon('vendor_name')"></span></button>
+                                </th>
+                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                    <button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button>
+                                </th>
+                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                    <button @click="sortBy('vat_amount')" class="group inline-flex">VAT <span x-html="getSortIcon('vat_amount')"></span></button>
+                                </th>
+                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                    <button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button>
+                                </th>
+                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Details</th>
+                                <th scope="col" class="relative py-3.5 pl-3 pr-4"><span class="sr-only">View</span></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200 bg-white">
+                            <template x-for="sub in view" :key="sub.id">
+                                <tr>
+                                    <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm">
+                                        <span x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span>
+                                    </td>
+                                    <td class="px-3 py-4 text-sm text-gray-900">
+                                        <div class="font-medium" x-text="sub.receipt ? sub.receipt.vendor_name : (sub.description || 'N/A')"></div>
+                                        <div class="text-gray-500 truncate max-w-xs" x-text="sub.input_type === 'url' ? sub.input_data : 'Photo Upload'"></div>
+                                    </td>
+                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt && sub.receipt.total_amount ? sub.receipt.total_amount.toFixed(2) + ' TZS' : '---'"></td>
+                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt && sub.receipt.vat_amount ? sub.receipt.vat_amount.toFixed(2) : '---'"></td>
+                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt ? sub.receipt.receipt_date : sub.received_at.split('T')[0]"></td>
+                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                        <div x-show="sub.receipt" x-text="`Code: ${sub.receipt?.receipt_verification_code || 'N/A'}`"></div>
+                                        <div x-show="sub.location" x-text="`Loc: ${sub.location}`"></div>
+                                    </td>
+                                    <td class="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium">
+                                        <button @click="openModal(sub.id)" class="text-indigo-600 hover:text-indigo-900">View</button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="view.length === 0">
+                                <td colspan="7" class="text-center py-12 text-sm text-gray-500">No submissions match your criteria.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Details Modal -->
+        <div x-show="modal.open" class="relative z-10" style="display: none;">
+            <!-- ... (Modal backdrop and positioning unchanged) ... -->
+            <div @click.away="closeModal()" class="relative transform overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
+                <h3 class="text-lg font-semibold leading-6 text-gray-900">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <h4 class="text-sm font-medium text-gray-500">Input Data</h4>
+                        <pre class="mt-1 bg-gray-100 p-3 rounded-md text-xs h-96 overflow-auto" x-text="modal.data.input_type === 'url' ? 'Source URL:\n' + modal.data.input_data : 'Source Photo:\n' + modal.data.input_data"></pre>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-medium text-gray-500">LLM Output / Error</h4>
+                        <pre class="mt-1 bg-gray-100 p-3 rounded-md text-xs h-96 overflow-auto" x-text="modal.data.receipt ? JSON.stringify(modal.data.receipt.raw_llm_response, null, 2) : JSON.stringify({ error: modal.data.error_message }, null, 2)"></pre>
+                    </div>
+                </div>
+                <div class="mt-5 sm:mt-6">
+                    <button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-indigo-700">Close</button>
+                </div>
+            </div>
         </div>
     </div>
-</div>
+{% endif %}
+
+<script>
+function dashboard() {
+    return {
+        // --- State ---
+        allSubmissions: submissionsData,
+        view: [],
+        tab: 'processed',
+        searchQuery: '',
+        sort: { column: 'received_at', direction: 'desc' },
+        modal: { open: false, data: {} },
+
+        // --- Init ---
+        init() {
+            this.updateView();
+            console.log("Dashboard initialized.");
+        },
+
+        // --- Methods ---
+        updateView() {
+            const query = this.searchQuery.toLowerCase();
+            const filteredByTab = this.allSubmissions.filter(sub => {
+                if (this.tab === 'processed') return sub.status === 'completed' && !sub.is_duplicate;
+                if (this.tab === 'queued') return sub.status === 'queued';
+                if (this.tab === 'failed') return sub.status === 'failed';
+                if (this.tab === 'duplicates') return sub.is_duplicate;
+                return false;
+            });
+
+            const filteredBySearch = query ? filteredByTab.filter(sub => {
+                return (sub.receipt?.vendor_name?.toLowerCase().includes(query)) ||
+                       (sub.receipt?.receipt_verification_code?.toLowerCase().includes(query)) ||
+                       (sub.description?.toLowerCase().includes(query)) ||
+                       (sub.location?.toLowerCase().includes(query));
+            }) : filteredByTab;
+            
+            this.view = this.sortData(filteredBySearch);
+        },
+
+        sortData(data) {
+            const col = this.sort.column;
+            const dir = this.sort.direction === 'asc' ? 1 : -1;
+            
+            return [...data].sort((a, b) => {
+                let valA = this.getSortValue(a, col);
+                let valB = this.getSortValue(b, col);
+                
+                if (valA < valB) return -1 * dir;
+                if (valA > valB) return 1 * dir;
+                return 0;
+            });
+        },
+        
+        getSortValue(sub, col) {
+            switch(col) {
+                case 'vendor_name': return sub.receipt?.vendor_name || sub.description || 'z';
+                case 'total_amount': return sub.receipt?.total_amount || -1;
+                case 'vat_amount': return sub.receipt?.vat_amount || -1;
+                case 'receipt_date': return sub.receipt?.receipt_date || sub.received_at;
+                default: return sub[col] || '';
+            }
+        },
+
+        sortBy(column) {
+            if (this.sort.column === column) {
+                this.sort.direction = this.sort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                this.sort.column = column;
+                this.sort.direction = 'asc';
+            }
+            this.updateView();
+        },
+
+        changeTab(newTab) {
+            this.tab = newTab;
+            this.updateView();
+        },
+
+        openModal(subId) {
+            this.modal.data = this.allSubmissions.find(s => s.id === subId) || {};
+            this.modal.open = true;
+        },
+        
+        closeModal() {
+            this.modal.open = false;
+        },
+
+        // --- UI Helpers ---
+        getTabClass(tabName) {
+            return this.tab === tabName 
+                ? 'border-indigo-500 text-indigo-600' 
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300';
+        },
+        getSortIcon(column) {
+            if (this.sort.column !== column) return '<svg class="h-5 w-5 ml-2 text-gray-400 invisible group-hover:visible" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4"></path></svg>';
+            if (this.sort.direction === 'asc') return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>';
+            return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>';
+        },
+        getStatusClass(sub) {
+            if (sub.status === 'completed' && !sub.is_duplicate) return 'inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800';
+            if (sub.status === 'queued') return 'inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800';
+            if (sub.status === 'failed') return 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800';
+            if (sub.is_duplicate) return 'inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800';
+        },
+        getStatusText(sub) {
+            if (sub.is_duplicate) return 'Duplicate';
+            return sub.status.charAt(0).toUpperCase() + sub.status.slice(1);
+        }
+    }
+}
+</script>
+
 {% endblock %}
