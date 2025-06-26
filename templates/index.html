@@ -189,7 +189,10 @@ function dashboard() {
         modal: { open: false, data: {} },
 
         // --- Init ---
-        init() { this.updateView(); },
+        init() { 
+            this.updateView(); 
+            this.listenForUpdates();
+        },
 
         // --- Methods ---
         updateView() {
@@ -207,6 +210,70 @@ function dashboard() {
                        (sub.description?.toLowerCase().includes(query));
             }) : filteredByTab;
             this.view = this.sortData(filteredBySearch);
+        },
+
+        listenForUpdates() {
+            const eventSource = new EventSource("{{ url_for('stream') }}");
+            
+            eventSource.onmessage = (event) => {
+                // Ignore keep-alive comments
+                if (event.data.startsWith(':')) {
+                    return;
+                }
+                
+                console.log("SSE Message Received:", event.data);
+                const update = JSON.parse(event.data);
+                const submissionId = update.data.id || update.data.submission_id;
+
+                if (!submissionId) return;
+
+                // Find the index of the submission to update
+                const index = this.allSubmissions.findIndex(s => s.id === submissionId);
+
+                if (index !== -1) {
+                    // Update existing submission
+                    console.log(`Updating submission ID ${submissionId}`);
+                    // Re-create the object to ensure reactivity
+                    const existingSub = this.allSubmissions[index];
+                    this.allSubmissions[index] = {
+                        ...existingSub, // Keep old data
+                        status: update.data.status,
+                        description: update.data.data?.llm_extracted_description || existingSub.description,
+                        receipt: update.data.data ? { // If processed, update receipt
+                            vendor_name: update.data.data.vendor_name,
+                            total_amount: update.data.data.total_amount,
+                            vat_amount: update.data.data.vat_amount,
+                            receipt_date: update.data.data.receipt_date,
+                            raw_llm_response: JSON.stringify(update.data.data)
+                        } : existingSub.receipt,
+                        error_message: update.data.error_message || null,
+                        is_duplicate: update.data.status === 'duplicate',
+                    };
+                } else if (update.event_type === 'submission.queued') {
+                    // Add new submission to the top of the list
+                    console.log(`Adding new submission ID ${submissionId}`);
+                    const newSub = {
+                        id: update.data.id,
+                        received_at: update.data.received_at,
+                        status: update.data.status,
+                        input_type: update.data.input_type,
+                        input_data: update.data.input_data,
+                        description: update.data.description,
+                        location: update.data.location,
+                        device_name: update.data.device_name,
+                        error_message: null,
+                        is_duplicate: false,
+                        receipt: {}
+                    };
+                    this.allSubmissions.unshift(newSub);
+                }
+                // Refresh the view to show changes
+                this.updateView();
+            };
+
+            eventSource.onerror = (err) => {
+                console.error("EventSource failed:", err);
+            };
         },
         sortData(data) {
             const col = this.sort.column;

@@ -5,7 +5,7 @@ import time
 import json
 import pyotp
 import requests
-import threading
+import gevent
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
@@ -18,6 +18,7 @@ from models.user import db, InstanceConfig, Device, Receipt, Submission
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import extract_receipt_details
+from utils.sse_broker import announcer
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -164,14 +165,13 @@ def fetch_receipt_html_from_tra(submission):
 def trigger_url_in_background(url_to_trigger):
     """
     Waits for a short period and then calls a given URL.
-    This runs in a separate thread to not block the main request.
+    This now runs as a gevent greenlet.
     """
     print(f"[Trigger] Background trigger initiated for URL: {url_to_trigger}. Waiting 10 seconds...")
-    time.sleep(10)
+    gevent.sleep(10) # Use gevent's non-blocking sleep
     
     try:
         print(f"[Trigger] Making internal request to process the queue...")
-        # We don't need to wait long for a response, just to kick it off.
         requests.get(url_to_trigger, timeout=5)
         print("[Trigger] Internal request sent successfully.")
     except requests.exceptions.RequestException as e:
@@ -485,15 +485,9 @@ def receipt_endpoint():
     }
     dispatch_event('submission.queued', payload, config)
     
-    # Dynamically generate the full, external URL for the task runner.
-    #    `_external=True` uses the request's host and scheme (http/https).
     runner_secret = current_app.config['TASK_RUNNER_SECRET_KEY']
     runner_url = url_for('run_tasks', secret=runner_secret, _external=True)
-    
-    # Start the background thread, passing the complete URL.
-    thread = threading.Thread(target=trigger_url_in_background, args=(runner_url,))
-    thread.daemon = True
-    thread.start()
+    gevent.spawn(trigger_url_in_background, runner_url)
     
     return jsonify({ "message": "Receipt accepted and queued for processing.", "submission_id": new_submission.id }), 202
 
@@ -558,3 +552,17 @@ def uploaded_file(filename):
         filename,
         as_attachment=False # Display in browser instead of downloading
     )
+
+
+@app.route('/stream')
+@login_required
+def stream():
+    """This endpoint holds open a connection and streams updates."""
+    def event_stream():
+        # Listen to the announcer and yield messages
+        messages = announcer.listen()
+        while True:
+            msg = next(messages)
+            yield msg
+    
+    return app.response_class(event_stream(), mimetype='text/event-stream')

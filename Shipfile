@@ -3,4 +3,4 @@ script: |
   # Step 1: Install all dependencies from requirements.txt, including Flask-Babel
   pip install -r requirements.txt
 
-run: gunicorn main:app -b 0.0.0.0:80 --reload --timeout 300
+run: gunicorn wsgi:app -b 0.0.0.0:80 --reload --worker-class gevent --timeout 300

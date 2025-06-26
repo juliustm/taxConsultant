@@ -7,6 +7,7 @@ import boto3
 import requests
 from botocore.exceptions import NoCredentialsError, ClientError
 from datetime import datetime
+from .sse_broker import announcer
 import traceback
 
 # Expanded headers for comprehensive logging
@@ -22,6 +23,9 @@ def dispatch_event(event_type: str, payload: dict, config):
     Dispatches an event to all configured export destinations.
     """
     print(f"--- Dispatching event: {event_type} ---")
+
+    sse_payload = {"event_type": event_type, "data": payload}
+    announcer.announce(msg=json.dumps(sse_payload, default=str))
     
     if config.post_callback_url:
         send_webhook(event_type, payload, config.post_callback_url)

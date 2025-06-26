@@ -11,7 +11,7 @@ services:
     volumes:
       - .:/app
       - db_data:/app/data
-    command: gunicorn main:app -b 0.0.0.0:80 --reload --timeout 300
+    command: gunicorn wsgi:app -b 0.0.0.0:80 --reload --worker-class gevent --timeout 300
 volumes:
   # Define the named volume for the database
   db_data:
