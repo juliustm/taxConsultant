@@ -5,6 +5,7 @@ import time
 import json
 import pyotp
 import requests
+import threading
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
@@ -156,6 +157,22 @@ def fetch_receipt_html_from_tra(submission):
                 submission.error_message = f"Failed after {MAX_RETRIES+1} attempts: {e}"
                 db.session.commit()
                 return None
+
+def trigger_url_in_background(url_to_trigger):
+    """
+    Waits for a short period and then calls a given URL.
+    This runs in a separate thread to not block the main request.
+    """
+    print(f"[Trigger] Background trigger initiated for URL: {url_to_trigger}. Waiting 10 seconds...")
+    time.sleep(10)
+    
+    try:
+        print(f"[Trigger] Making internal request to process the queue...")
+        # We don't need to wait long for a response, just to kick it off.
+        requests.get(url_to_trigger, timeout=5)
+        print("[Trigger] Internal request sent successfully.")
+    except requests.exceptions.RequestException as e:
+        print(f"[Trigger Error] Could not trigger task runner internally: {e}")
 
 def process_submission(submission):
     """
@@ -464,6 +481,16 @@ def receipt_endpoint():
         "description": new_submission.description, "location": new_submission.location
     }
     dispatch_event('submission.queued', payload, config)
+    
+    # Dynamically generate the full, external URL for the task runner.
+    #    `_external=True` uses the request's host and scheme (http/https).
+    runner_secret = current_app.config['TASK_RUNNER_SECRET_KEY']
+    runner_url = url_for('run_tasks', secret=runner_secret, _external=True)
+    
+    # Start the background thread, passing the complete URL.
+    thread = threading.Thread(target=trigger_url_in_background, args=(runner_url,))
+    thread.daemon = True
+    thread.start()
     
     return jsonify({ "message": "Receipt accepted and queued for processing.", "submission_id": new_submission.id }), 202
 
