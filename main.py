@@ -215,35 +215,38 @@ def process_submission(submission):
         
         # --- Deduplication Logic ---
         verification_code = extracted_data.get('receipt_verification_code')
-        if verification_code:
+        # Only check for duplicates if the code is a meaningful, non-empty string.
+        if verification_code and verification_code.strip():
             existing_receipt = Receipt.query.filter_by(receipt_verification_code=verification_code).first()
             if existing_receipt:
-                print(f"[TaskSkip] Duplicate receipt found. Original sub ID: {existing_receipt.submission_id}")
+                print(f"[TaskSkip] Duplicate receipt found with code {verification_code}. Original sub ID: {existing_receipt.submission_id}")
                 submission.status = 'duplicate'
                 submission.error_message = f"Duplicate of submission ID {existing_receipt.submission_id}"
                 db.session.commit()
-                # --- Dispatch DUPLICATE event ---
+                # Dispatch duplicate event and exit cleanly
                 payload = {"submission_id": submission.id, "status": "duplicate", "error_message": submission.error_message}
                 dispatch_event('submission.duplicate', payload, config)
-
                 return
         
-        # --- Update Description from LLM ---
+       # --- Update Description, Parse Date, etc. ---
         llm_desc = extracted_data.get('llm_extracted_description')
         if llm_desc:
-            submission.description = llm_desc # Overwrite user description with more accurate LLM summary
+            submission.description = llm_desc
         
         receipt_date_obj = None
         if extracted_data.get('receipt_date'):
             try:
                 receipt_date_obj = date.fromisoformat(extracted_data['receipt_date'])
             except (ValueError, TypeError):
-                print(f"Warning: Could not parse date '{extracted_data['receipt_date']}'")
+                print(f"Warning: Could not parse date '{extracted_data.get('receipt_date')}'")
+
+        # Convert empty verification code string to None to avoid UNIQUE constraint violation on ""
+        db_verification_code = verification_code if (verification_code and verification_code.strip()) else None
 
         new_receipt = Receipt(
             vendor_name=extracted_data.get('vendor_name'), vendor_tin=extracted_data.get('vendor_tin'),
             vendor_phone=extracted_data.get('vendor_phone'), vrn=extracted_data.get('vrn'),
-            receipt_verification_code=verification_code, receipt_number=extracted_data.get('receipt_number'),
+            receipt_verification_code=db_verification_code, receipt_number=extracted_data.get('receipt_number'),
             uin=extracted_data.get('uin'), customer_name=extracted_data.get('customer_name'),
             customer_id_type=extracted_data.get('customer_id_type'), customer_id=extracted_data.get('customer_id'),
             total_amount=extracted_data.get('total_amount'), vat_amount=extracted_data.get('vat_amount'),
@@ -265,13 +268,21 @@ def process_submission(submission):
         print(f"[TaskSuccess] Submission {submission.id} completed.")
 
     except Exception as e:
+        # --- FIX #2: Resilient Error Handling ---
+        # This block ensures a single failed job doesn't kill the whole queue runner.
         print(f"[TaskError] Unhandled exception in process_submission {submission.id}: {e}")
-        submission.status = 'failed'
-        submission.error_message = str(e)
-        db.session.commit()
-        # --- Dispatch FAILED event ---
-        payload = {"submission_id": submission.id, "status": "failed", "error_message": submission.error_message}
-        dispatch_event('submission.failed', payload, config)
+        db.session.rollback()  # IMPORTANT: Rollback the failed transaction to clean the session
+        
+        # We need to re-fetch the submission object as the session was rolled back
+        submission_to_update = Submission.query.get(submission.id)
+        if submission_to_update:
+            submission_to_update.status = 'failed'
+            submission_to_update.error_message = str(e)
+            db.session.commit()
+            
+            # Dispatch failed event
+            payload = {"submission_id": submission.id, "status": "failed", "error_message": submission_to_update.error_message}
+            dispatch_event('submission.failed', payload, get_instance_config())
 
 # --- WEB ROUTES & AUTH ---
 
