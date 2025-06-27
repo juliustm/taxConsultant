@@ -177,6 +177,20 @@ def trigger_url_in_background(url_to_trigger):
     except requests.exceptions.RequestException as e:
         print(f"[Trigger Error] Could not trigger task runner internally: {e}")
 
+def calculate_dashboard_stats():
+    """Calculates and returns the dashboard stats dictionary."""
+    now = datetime.utcnow()
+    periods = {
+        '24h': now - timedelta(hours=24), '7d': now - timedelta(days=7),
+        '4w': now - timedelta(weeks=4), '1y': now - timedelta(days=365)
+    }
+    stats = {
+        name: db.session.query(db.func.count(Receipt.id), db.func.sum(Receipt.total_amount))
+                        .filter(Receipt.processed_at >= start_time).one()
+        for name, start_time in periods.items()
+    }
+    return {key: {'count': value[0] or 0, 'total': value[1] or 0.0} for key, value in stats.items()}
+
 def process_submission(submission):
     """
     Processes a single submission with deduplication logic and updates description from LLM.
@@ -208,6 +222,10 @@ def process_submission(submission):
                 submission.status = 'duplicate'
                 submission.error_message = f"Duplicate of submission ID {existing_receipt.submission_id}"
                 db.session.commit()
+                # --- Dispatch DUPLICATE event ---
+                payload = {"submission_id": submission.id, "status": "duplicate", "error_message": submission.error_message}
+                dispatch_event('submission.duplicate', payload, config)
+
                 return
         
         # --- Update Description from LLM ---
@@ -235,9 +253,15 @@ def process_submission(submission):
         db.session.add(new_receipt)
         submission.status = 'completed'
         db.session.commit()
-        
-        payload = {"submission_id": submission.id, "status": submission.status, "processed_at": new_receipt.processed_at.isoformat(), "data": extracted_data}
+        # --- Dispatch COMPLETED event ---
+        updated_stats = calculate_dashboard_stats()
+        payload = {
+            "submission_id": submission.id, "status": submission.status, 
+            "processed_at": new_receipt.processed_at.isoformat(), "data": extracted_data,
+            "stats": updated_stats
+        }
         dispatch_event('submission.processed', payload, config)
+
         print(f"[TaskSuccess] Submission {submission.id} completed.")
 
     except Exception as e:
@@ -245,6 +269,9 @@ def process_submission(submission):
         submission.status = 'failed'
         submission.error_message = str(e)
         db.session.commit()
+        # --- Dispatch FAILED event ---
+        payload = {"submission_id": submission.id, "status": "failed", "error_message": submission.error_message}
+        dispatch_event('submission.failed', payload, config)
 
 # --- WEB ROUTES & AUTH ---
 
@@ -260,28 +287,18 @@ def login_required(f):
 @app.route('/')
 @login_required
 def index():
-    submissions = Submission.query.order_by(Submission.received_at.desc()).all()
-    devices = Device.query.all()
+    # Calculate stats for the summary cards
+    stats = calculate_dashboard_stats()
     
-    now = datetime.utcnow()
-    periods = {
-        '24h': now - timedelta(hours=24), '7d': now - timedelta(days=7), '4w': now - timedelta(weeks=4),
-        '3m': now - timedelta(days=90), '6m': now - timedelta(days=180), '1y': now - timedelta(days=365)
-    }
-    stats = {
-        name: db.session.query(db.func.count(Receipt.id), db.func.sum(Receipt.total_amount))
-                        .filter(Receipt.processed_at >= start_time).one()
-        for name, start_time in periods.items()
-    }
+    # Fetch all submission data needed for the dashboard table
+    submissions = Submission.query.order_by(Submission.received_at.desc()).limit(50).all()
     
-    # Prepare data as a JSON string for Alpine.js
+    # Prepare the data in a JSON format for Alpine.js to consume
     submissions_json = prepare_submissions_for_frontend(submissions)
     
     return render_template('index.html', 
-                           submissions=submissions, 
-                           submissions_json=submissions_json,
-                           devices=devices, 
-                           stats=stats)
+                           stats=stats, 
+                           submissions_json=submissions_json)
 
 @app.route('/admin/setup', methods=['GET', 'POST'])
 def setup():

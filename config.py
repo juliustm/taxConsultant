@@ -8,7 +8,7 @@ class Config:
     TASK_RUNNER_SECRET_KEY = os.environ.get('TASK_RUNNER_SECRET_KEY', 'local-secret-runner-key')
 
     # Session timeout configuration
-    PERMANENT_SESSION_LIFETIME = timedelta(hours=1)
+    PERMANENT_SESSION_LIFETIME = timedelta(days=365)
 
     # --- THE SEAMLESS DATABASE CONFIGURATION ---
     # Define a single, conventional path inside the project's root directory.

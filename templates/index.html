@@ -3,6 +3,7 @@
 {% block content %}
 <script>
     const submissionsData = {{ submissions_json|safe }};
+    const initialStats = {{ stats|tojson|safe }};
 </script>
 
 {% if not submissions_json or submissions_json == '[]' %}
@@ -13,47 +14,81 @@
         <p class="mt-1 text-sm text-gray-500">Get started by sending receipts to your secure endpoint.</p>
     </div>
 {% else %}
-    <div x-data="dashboard()">
-        <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
+    <div x-data="dashboard()" x-init="init()">
 
-        <!-- DECORATED Stats Cards -->
+        <!-- In-App Notification Sliders -->
+        <div aria-live="assertive" class="pointer-events-none fixed inset-0 flex items-start px-4 py-6 sm:p-6 z-50">
+            <div class="flex w-full flex-col items-start space-y-4">
+                <template x-for="notification in notifications" :key="notification.id">
+                    <div x-show="notification.show"
+                         x-transition:enter="transform ease-out duration-300 transition"
+                         x-transition:enter-start="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
+                         x-transition:enter-end="translate-y-0 opacity-100 sm:translate-x-0"
+                         x-transition:leave="transition ease-in duration-100"
+                         x-transition:leave-start="opacity-100"
+                         x-transition:leave-end="opacity-0"
+                         class="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg bg-white shadow-lg ring-1 ring-black ring-opacity-5">
+                        <div class="p-4">
+                            <div class="flex items-start">
+                                <div class="flex-shrink-0" x-html="notification.icon"></div>
+                                <div class="ml-3 w-0 flex-1 pt-0.5">
+                                    <p class="text-sm font-medium text-gray-900" x-text="notification.title"></p>
+                                    <p class="mt-1 text-sm text-gray-500" x-text="notification.message"></p>
+                                </div>
+                                <div class="ml-4 flex flex-shrink-0">
+                                    <button @click="notification.show = false" type="button" class="inline-flex rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                                        <span class="sr-only">Close</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" /></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- Header and Browser Notification Toggle -->
+        <div class="md:flex md:items-center md:justify-between">
+            <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
+            <div class="mt-4 flex flex-shrink-0 md:ml-4 md:mt-0">
+                 <button @click="enableBrowserNotifications()" type="button" class="inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm" :class="browserNotificationsEnabled ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20' : 'bg-white text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50'">
+                    <svg x-show="!browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor"><path d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-3a1 1 0 00-1-1H9a1 1 0 00-1 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-6H3a1 1 0 01-.707-1.707l7-7z" /></svg>
+                    <svg x-show="browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>
+                    <span x-text="browserNotificationsEnabled ? 'Notifications On' : 'Enable Notifications'"></span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Stats Cards (Now Dynamic) -->
         <div class="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            {% set card_styles = [
-                {'bg': 'bg-blue-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'},
-                {'bg': 'bg-green-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>'},
-                {'bg': 'bg-yellow-500', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5V4H4zm0 11h5v5H4v-5zm11 0h5v5h-5v-5zm0-11h5v5h-5V4z" /></svg>'},
-                {'bg': 'bg-red-600', 'icon': '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h.5A2.5 2.5 0 0020 5.5V3.935m-14 0A2.5 2.5 0 018.5 2h7A2.5 2.5 0 0118 4.5v-1.065" /></svg>'}
-            ] %}
-            {% set periods = [('Last 24 Hours', stats['24h']), ('Last 7 Days', stats['7d']), ('Last 4 Weeks', stats['4w']), ('Last 1 Year', stats['1y'])] %}
-            {% for i in range(periods|length) %}
-            <div class="{{ card_styles[i].bg }} relative overflow-hidden rounded-lg shadow">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">{{ card_styles[i].icon|safe }}</div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-white truncate">{{ periods[i][0] }}</dt>
-                                <dd>
-                                    <div class="text-lg font-medium text-white">{{ periods[i][1][0] or 0 }} receipts</div>
-                                    <div class="text-sm font-medium text-gray-200">Total: {{ (periods[i][1][1] or 0) | currency }} TZS</div>
-                                </dd>
-                            </dl>
+            <template x-for="card in statCards" :key="card.name">
+                 <div :class="card.bg" class="relative overflow-hidden rounded-lg shadow">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0" x-html="card.icon"></div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-white truncate" x-text="card.name"></dt>
+                                    <dd>
+                                        <div class="text-lg font-medium text-white" x-text="`${card.count} receipts`"></div>
+                                        <div class="text-sm font-medium text-gray-200" x-text="`Total: ${card.total} TZS`"></div>
+                                    </dd>
+                                </dl>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
-            {% endfor %}
+            </template>
         </div>
         
-        <!-- Controls: Tabs and Search -->
+        <!-- Controls & Table -->
         <div class="mt-8">
              <div class="sm:flex sm:items-center sm:justify-between">
                 <div class="border-b border-gray-200">
                     <nav class="-mb-px flex space-x-8" aria-label="Tabs">
                         <button @click="changeTab('processed')" :class="getTabClass('processed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Processed</button>
-                        <button @click="changeTab('with_vat')" :class="getTabClass('with_vat')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center">
-                            With VAT <svg xmlns="http://www.w3.org/2000/svg" class="ml-1.5 h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>
-                        </button>
+                        <button @click="changeTab('with_vat')" :class="getTabClass('with_vat')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center">With VAT <svg xmlns="http://www.w3.org/2000/svg" class="ml-1.5 h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg></button>
                         <button @click="changeTab('queued')" :class="getTabClass('queued')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Queued</button>
                         <button @click="changeTab('failed')" :class="getTabClass('failed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Failed</button>
                         <button @click="changeTab('duplicates')" :class="getTabClass('duplicates')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Duplicates</button>
@@ -68,23 +103,12 @@
                 </div>
             </div>
         </div>
-
-        <!-- Interactive Table -->
         <div class="mt-8 flow-root">
             <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
                 <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
                     <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
                         <table class="min-w-full divide-y divide-gray-300">
-                            <thead class="bg-gray-50">
-                                <tr>
-                                    <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6"><button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button></th>
-                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Description <span x-html="getSortIcon('vendor_name')"></span></button></th>
-                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button></th>
-                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button></th>
-                                    <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Tax Analysis</th>
-                                    <th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span class="sr-only">View</span></th>
-                                </tr>
-                            </thead>
+                            <thead class="bg-gray-50"><tr><th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6"><button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Description <span x-html="getSortIcon('vendor_name')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Tax Analysis</th><th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span class="sr-only">View</span></th></tr></thead>
                             <tbody class="divide-y divide-gray-200 bg-white">
                                 <template x-for="sub in view" :key="sub.id">
                                     <tr>
@@ -118,83 +142,306 @@
         </div>
 
         <!-- Details Modal -->
-        <div x-show="modal.open" 
-             class="relative z-10" aria-labelledby="modal-title" role="dialog" aria-modal="true" style="display: none;">
-            
-            <div @click="closeModal()" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm"></div>
-
-            <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
-                <div @keydown.escape.window="closeModal()" class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
-                    <div @click.outside="closeModal()"
-                         class="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-4xl sm:p-6">
-                        <div>
-                            <h3 class="text-lg font-semibold leading-6 text-gray-900" id="modal-title">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
-                            <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                                
-                                <!-- === LEFT PANEL: INPUT DATA (Corrected and Enhanced) === -->
-                                <div class="space-y-4">
-                                    <h4 class="text-md font-medium text-gray-700">Input Data</h4>
-                                    <!-- Image Input -->
-                                    <template x-if="modal.data.input_type === 'photo'">
-                                        <div class="p-2 border rounded-lg"><img :src="getPublicUploadPath(modal.data.input_data)" alt="Receipt Photo" class="w-full rounded-md"></div>
-                                    </template>
-                                    <!-- URL Input -->
-                                    <template x-if="modal.data.input_type === 'url'">
-                                        <div class="w-full h-24 border rounded-md bg-gray-50 flex flex-col items-center justify-center p-4 text-center">
-                                            <p class="text-sm text-gray-600">Live preview blocked by source.</p>
-                                            <a :href="modal.data.input_data" target="_blank" class="mt-2 text-sm font-medium text-indigo-600 hover:underline">Open Receipt in New Tab <svg xmlns="http://www.w3.org/2000/svg" class="inline h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg></a>
-                                        </div>
-                                    </template>
-                                    <!-- Submission Meta Details -->
-                                    <dl class="divide-y divide-gray-100">
-                                        <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted At</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.received_at + ' UTC'"></dd></div>
-                                        <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted By</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.device_name"></dd></div>
-                                        <template x-if="modal.data.location"><div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Location</dt><dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0"><a :href="formatLocationUrl(modal.data.location)" target="_blank" class="text-indigo-600 hover:underline" x-text="modal.data.location"></a></dd></div></template>
-                                    </dl>
-                                </div>
-                                
-                                <!-- === RIGHT PANEL: LLM OUTPUT (Corrected) === -->
-                                <div>
-                                    <h4 class="text-md font-medium text-gray-700">LLM Output / Error</h4>
-                                    <div class="mt-2 h-96 overflow-y-auto rounded-md bg-gray-50 border p-3 text-sm space-y-3">
-                                        <!-- FIX: Use optional chaining (?.) to prevent error if receipt is null -->
-                                        <template x-if="modal.data.receipt?.raw_llm_response">
-                                            <div class="prose prose-sm max-w-none" x-html="renderLlmOutput(modal.data.receipt.raw_llm_response)"></div>
-                                        </template>
-                                        <!-- FIX: Use optional chaining (?.) here too for safety -->
-                                        <template x-if="!modal.data.receipt?.raw_llm_response && modal.data.error_message">
-                                            <div class="text-red-700 whitespace-pre-wrap" x-text="modal.data.error_message"></div>
-                                        </template>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="mt-5 sm:mt-6"><button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Close</button></div>
-                    </div>
-                </div>
-            </div>
+        <div x-show="modal.open" class="relative z-10" style="display: none;">
+             <div @click="closeModal()" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm"></div>
+             <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
+                 <div @keydown.escape.window="closeModal()" class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                     <div @click.outside="closeModal()" class="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-4xl sm:p-6">
+                         <h3 class="text-lg font-semibold leading-6 text-gray-900" id="modal-title">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
+                         <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                             <div class="space-y-4">
+                                 <h4 class="text-md font-medium text-gray-700">Input Data</h4>
+                                 <template x-if="modal.data.input_type === 'photo'"><div class="p-2 border rounded-lg"><img :src="getPublicUploadPath(modal.data.input_data)" alt="Receipt Photo" class="w-full rounded-md"></div></template>
+                                 <template x-if="modal.data.input_type === 'url'"><div class="w-full h-24 border rounded-md bg-gray-50 flex flex-col items-center justify-center p-4 text-center"><p class="text-sm text-gray-600">Live preview blocked by source.</p><a :href="modal.data.input_data" target="_blank" class="mt-2 text-sm font-medium text-indigo-600 hover:underline">Open Receipt in New Tab <svg xmlns="http://www.w3.org/2000/svg" class="inline h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg></a></div></template>
+                                 <dl class="divide-y divide-gray-100">
+                                     <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted At</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.received_at + ' UTC'"></dd></div>
+                                     <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted By</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.device_name"></dd></div>
+                                     <template x-if="modal.data.location"><div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Location</dt><dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0"><a :href="formatLocationUrl(modal.data.location)" target="_blank" class="text-indigo-600 hover:underline" x-text="modal.data.location"></a></dd></div></template>
+                                 </dl>
+                             </div>
+                             <div>
+                                 <h4 class="text-md font-medium text-gray-700">LLM Output / Error</h4>
+                                 <div class="mt-2 h-96 overflow-y-auto rounded-md bg-gray-50 border p-3 text-sm space-y-3">
+                                     <template x-if="modal.data.receipt?.raw_llm_response"><div class="prose prose-sm max-w-none" x-html="renderLlmOutput(modal.data.receipt.raw_llm_response)"></div></template>
+                                     <template x-if="!modal.data.receipt?.raw_llm_response && modal.data.error_message"><div class="text-red-700 whitespace-pre-wrap" x-text="modal.data.error_message"></div></template>
+                                 </div>
+                             </div>
+                         </div>
+                         <div class="mt-5 sm:mt-6"><button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Close</button></div>
+                     </div>
+                 </div>
+             </div>
         </div>
     </div>
 {% endif %}
 
 <script>
+// --- Improved Sound Generation with Noise, Filtering & Polyphony ---
+class SoundGenerator {
+  constructor() {
+    this.audioContext = null;
+    this.maxPolyphony = 5;
+    this.voicePool = Array(this.maxPolyphony).fill(null);
+  }
+
+  // init() must be called after a user interaction
+  init() {
+    if (!this.audioContext) {
+      try {
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        console.error("Web Audio API is not supported in this browser or could not be initialized.");
+      }
+    }
+  }
+
+  playSound() {
+    if (!this.audioContext) return; // Silently fail if context not ready
+
+    const now = this.audioContext.currentTime;
+    const voiceIndex = this.findFreeVoice();
+    if (voiceIndex === -1) {
+        console.warn("SoundGenerator: No free voices available to play sound.");
+        return; 
+    }
+
+    // This voice will be busy for the duration of the sound
+    this.voicePool[voiceIndex] = true; 
+    setTimeout(() => {
+        this.voicePool[voiceIndex] = null;
+    }, 2500); // Free the voice after 2.5 seconds
+
+    // --- Sound Layer 1: The "Scanner" Hiss (0s -> 1.5s) ---
+    const noiseBuffer = this.createNoiseBuffer(1.5); // 1.5 second noise buffer
+    const scanner = this.audioContext.createBufferSource();
+    scanner.buffer = noiseBuffer;
+    
+    const scannerBandpass = this.audioContext.createBiquadFilter();
+    scannerBandpass.type = 'bandpass';
+    scannerBandpass.frequency.setValueAtTime(500, now); // Start at a low-mid frequency
+    scannerBandpass.frequency.linearRampToValueAtTime(1500, now + 1.5); // Sweep up
+    scannerBandpass.Q.value = 15;
+
+    const scannerGain = this.audioContext.createGain();
+    scannerGain.gain.setValueAtTime(0, now);
+    scannerGain.gain.linearRampToValueAtTime(0.05, now + 0.1); // Fade in
+    scannerGain.gain.setValueAtTime(0.05, now + 1.4);
+    scannerGain.gain.linearRampToValueAtTime(0, now + 1.5); // Fade out
+    
+    scanner.connect(scannerBandpass).connect(scannerGain).connect(this.audioContext.destination);
+    scanner.start(now);
+    scanner.stop(now + 1.5);
+
+
+    // --- Sound Layer 2: The "Processing" Hum (1.5s -> 2.0s) ---
+    const hum = this.audioContext.createOscillator();
+    hum.type = 'sine';
+    hum.frequency.setValueAtTime(120, now + 1.5); // Low frequency hum
+
+    const humLFO = this.audioContext.createOscillator(); // For vibrato
+    humLFO.type = 'sine';
+    humLFO.frequency.setValueAtTime(5, now + 1.5); // Slow vibrato
+
+    const humLFOgain = this.audioContext.createGain();
+    humLFOgain.gain.setValueAtTime(3, now + 1.5); // Vibrato depth
+    
+    humLFO.connect(humLFOgain).connect(hum.frequency);
+    
+    const humGain = this.audioContext.createGain();
+    humGain.gain.setValueAtTime(0, now + 1.5);
+    humGain.gain.linearRampToValueAtTime(0.1, now + 1.55); // Fade in hum
+    humGain.gain.setValueAtTime(0.1, now + 1.95);
+    humGain.gain.linearRampToValueAtTime(0, now + 2.0); // Fade out hum
+    
+    hum.connect(humGain).connect(this.audioContext.destination);
+    humLFO.start(now + 1.5);
+    hum.start(now + 1.5);
+    humLFO.stop(now + 2.0);
+    hum.stop(now + 2.0);
+
+
+    // --- Sound Layer 3: The "Confirmation" Chime (2.0s) ---
+    const chime1 = this.audioContext.createOscillator();
+    chime1.type = 'sine';
+    chime1.frequency.setValueAtTime(783.99, now + 2.0); // G5 note
+    const chime1Gain = this.audioContext.createGain();
+    chime1Gain.gain.setValueAtTime(0.2, now + 2.0);
+    chime1Gain.gain.exponentialRampToValueAtTime(0.001, now + 2.4);
+    chime1.connect(chime1Gain).connect(this.audioContext.destination);
+    
+    const chime2 = this.audioContext.createOscillator();
+    chime2.type = 'sine';
+    chime2.frequency.setValueAtTime(1046.50, now + 2.1); // C6 note
+    const chime2Gain = this.audioContext.createGain();
+    chime2Gain.gain.setValueAtTime(0.15, now + 2.1);
+    chime2Gain.gain.exponentialRampToValueAtTime(0.001, now + 2.5);
+    chime2.connect(chime2Gain).connect(this.audioContext.destination);
+
+    chime1.start(now + 2.0);
+    chime2.start(now + 2.1);
+    chime1.stop(now + 2.4);
+    chime2.stop(now + 2.5);
+  }
+
+  // Renamed from generateNoiseBuffer for clarity
+  createNoiseBuffer(duration) {
+    if (!this.audioContext) return null;
+    const sampleRate = this.audioContext.sampleRate;
+    const bufferSize = Math.floor(duration * sampleRate);
+    const buffer = this.audioContext.createBuffer(1, bufferSize, sampleRate);
+    const data = buffer.getChannelData(0);
+    
+    // Using pink noise for a more natural, less harsh sound
+    let b0 = 0, b1 = 0, b2 = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      data[i] = (b0 + b1 + b2) * 0.3;
+    }
+    return buffer;
+  }
+
+  findFreeVoice() {
+    for (let i = 0; i < this.maxPolyphony; i++) {
+      if (!this.voicePool[i]) return i;
+    }
+    return -1;
+  }
+}
+
 function dashboard() {
     return {
         // --- State ---
         allSubmissions: submissionsData,
+        stats: initialStats,
+        notifications: [],
+        browserNotificationsEnabled: false,
         view: [],
         tab: 'processed',
         searchQuery: '',
         sort: { column: 'received_at', direction: 'desc' },
         modal: { open: false, data: {} },
+        soundGenerator: new SoundGenerator(),
 
-        // --- Init ---
-        init() { 
-            this.updateView(); 
-            this.listenForUpdates();
+        // --- Getters for Dynamic UI ---
+        get statCards() {
+            const styles = [
+                {bg: 'bg-blue-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'},
+                {bg: 'bg-green-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>'},
+                {bg: 'bg-yellow-500', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5V4H4zm0 11h5v5H4v-5zm11 0h5v5h-5v-5zm0-11h5v5h-5V4z" /></svg>'},
+                {bg: 'bg-red-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h.5A2.5 2.5 0 0020 5.5V3.935m-14 0A2.5 2.5 0 018.5 2h7A2.5 2.5 0 0118 4.5v-1.065" /></svg>'}
+            ];
+            const periods = [
+                { name: 'Last 24 Hours', data: this.stats['24h'] }, { name: 'Last 7 Days', data: this.stats['7d'] },
+                { name: 'Last 4 Weeks', data: this.stats['4w'] }, { name: 'Last 1 Year', data: this.stats['1y'] }
+            ];
+            return periods.map((p, i) => ({
+                name: p.name,
+                count: p.data.count || 0,
+                total: (p.data.total || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}),
+                ...styles[i]
+            }));
         },
 
-        // --- Methods ---
+        // --- Init & Listeners ---
+        init() {
+            this.updateView();
+            this.browserNotificationsEnabled = (window.Notification && Notification.permission === 'granted');
+            
+            // --- Lazy Initialization on first click ---
+            window.addEventListener('click', () => {
+                this.soundGenerator.init();
+            }, { once: true });
+
+            this.listenForUpdates();
+        },
+        listenForUpdates() {
+            const eventSource = new EventSource("{{ url_for('stream') }}");
+            eventSource.onmessage = (event) => {
+                if (event.data.startsWith(':')) return;
+                const update = JSON.parse(event.data);
+                this.handleSseUpdate(update);
+            };
+            eventSource.onerror = (err) => { console.error("EventSource failed:", err); };
+        },
+
+        // --- Core Methods ---
+        handleSseUpdate(update) {
+            const submissionId = update.data.submission_id || update.data.id;
+            if (!submissionId) return;
+            const eventType = update.event_type;
+            const index = this.allSubmissions.findIndex(s => s.id === submissionId);
+            let notification = {};
+
+            if (index !== -1) { // Update existing submission
+                const existingSub = this.allSubmissions[index];
+                this.allSubmissions[index] = {
+                    ...existingSub,
+                    status: update.data.status,
+                    description: update.data.data?.llm_extracted_description || existingSub.description,
+                    receipt: update.data.data ? { raw_llm_response: JSON.stringify(update.data.data), ...update.data.data } : existingSub.receipt,
+                    error_message: update.data.error_message || null,
+                    is_duplicate: update.data.status === 'duplicate',
+                };
+
+                if (eventType === 'submission.processed') {
+                    this.stats = update.data.stats;
+                    notification = { title: 'Receipt Processed!', message: `ID ${submissionId} processed successfully.`, type: 'success' };
+                } else if (eventType === 'submission.failed') {
+                    notification = { title: 'Processing Failed', message: `ID ${submissionId} failed. Check view for details.`, type: 'error' };
+                } else if (eventType === 'submission.duplicate') {
+                    notification = { title: 'Duplicate Detected', message: `ID ${submissionId} is a duplicate.`, type: 'warning' };
+                }
+            } else if (eventType === 'submission.queued') { // Add new submission
+                this.allSubmissions.unshift({ ...update.data, receipt: {}, is_duplicate: false });
+                notification = { title: 'New Receipt Queued', message: `Submission ID ${update.data.id} is waiting.`, type: 'info' };
+            }
+
+            if (notification.title) {
+                this.addNotification(notification.title, notification.message, notification.type);
+                this.showBrowserNotification(notification.title, notification.message);
+            }
+            this.updateView();
+        },
+        addNotification(title, message, type = 'info') {
+            const icons = {
+                success: '<svg class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>',
+                error: '<svg class="h-6 w-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>',
+                warning: '<svg class="h-6 w-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>',
+                info: '<svg class="h-6 w-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>'
+            };
+            const id = Date.now();
+            this.notifications.unshift({ id, title, message, show: true, icon: icons[type] });
+            this.soundGenerator.playSound();
+            setTimeout(() => {
+                const index = this.notifications.findIndex(n => n.id === id);
+                if (index > -1) this.notifications[index].show = false;
+            }, 5000);
+        },
+        enableBrowserNotifications() {
+            if (!window.Notification) { alert('This browser does not support desktop notification.'); return; }
+            if (Notification.permission === 'granted') {
+                this.browserNotificationsEnabled = true;
+                this.addNotification('Already Enabled', 'Browser notifications are active.', 'success');
+            } else if (Notification.permission !== 'denied') {
+                Notification.requestPermission().then(permission => {
+                    if (permission === 'granted') {
+                        this.browserNotificationsEnabled = true;
+                        this.addNotification('Notifications Enabled!', 'You will now receive system notifications.', 'success');
+                    }
+                });
+            }
+        },
+        showBrowserNotification(title, body) {
+            if (this.browserNotificationsEnabled) {
+                // Use a generic icon path that Flask will serve from the static folder
+                new Notification(title, { body, icon: '/static/logo.png' });
+            }
+        },
+        
+        // --- All methods from your working version ---
         updateView() {
             const query = this.searchQuery.toLowerCase();
             const filteredByTab = this.allSubmissions.filter(sub => {
@@ -210,70 +457,6 @@ function dashboard() {
                        (sub.description?.toLowerCase().includes(query));
             }) : filteredByTab;
             this.view = this.sortData(filteredBySearch);
-        },
-
-        listenForUpdates() {
-            const eventSource = new EventSource("{{ url_for('stream') }}");
-            
-            eventSource.onmessage = (event) => {
-                // Ignore keep-alive comments
-                if (event.data.startsWith(':')) {
-                    return;
-                }
-                
-                console.log("SSE Message Received:", event.data);
-                const update = JSON.parse(event.data);
-                const submissionId = update.data.id || update.data.submission_id;
-
-                if (!submissionId) return;
-
-                // Find the index of the submission to update
-                const index = this.allSubmissions.findIndex(s => s.id === submissionId);
-
-                if (index !== -1) {
-                    // Update existing submission
-                    console.log(`Updating submission ID ${submissionId}`);
-                    // Re-create the object to ensure reactivity
-                    const existingSub = this.allSubmissions[index];
-                    this.allSubmissions[index] = {
-                        ...existingSub, // Keep old data
-                        status: update.data.status,
-                        description: update.data.data?.llm_extracted_description || existingSub.description,
-                        receipt: update.data.data ? { // If processed, update receipt
-                            vendor_name: update.data.data.vendor_name,
-                            total_amount: update.data.data.total_amount,
-                            vat_amount: update.data.data.vat_amount,
-                            receipt_date: update.data.data.receipt_date,
-                            raw_llm_response: JSON.stringify(update.data.data)
-                        } : existingSub.receipt,
-                        error_message: update.data.error_message || null,
-                        is_duplicate: update.data.status === 'duplicate',
-                    };
-                } else if (update.event_type === 'submission.queued') {
-                    // Add new submission to the top of the list
-                    console.log(`Adding new submission ID ${submissionId}`);
-                    const newSub = {
-                        id: update.data.id,
-                        received_at: update.data.received_at,
-                        status: update.data.status,
-                        input_type: update.data.input_type,
-                        input_data: update.data.input_data,
-                        description: update.data.description,
-                        location: update.data.location,
-                        device_name: update.data.device_name,
-                        error_message: null,
-                        is_duplicate: false,
-                        receipt: {}
-                    };
-                    this.allSubmissions.unshift(newSub);
-                }
-                // Refresh the view to show changes
-                this.updateView();
-            };
-
-            eventSource.onerror = (err) => {
-                console.error("EventSource failed:", err);
-            };
         },
         sortData(data) {
             const col = this.sort.column;
@@ -340,25 +523,19 @@ function dashboard() {
             }
         },
         getTaxAnalysisText(sub) {
-            // 1. Safely check if the receipt and its LLM response exist. If not, show error or '---'.
             if (!sub.receipt || !sub.receipt.raw_llm_response) {
                 return sub.error_message || '---';
             }
             try {
-                // 2. Safely check if the data is a string before trying to parse it.
                 const data = (typeof sub.receipt.raw_llm_response === 'string')
                     ? JSON.parse(sub.receipt.raw_llm_response)
-                    : sub.receipt.raw_llm_response; // Assume it's already an object if not a string
-
-                // 3. Safely return the analysis text or a default message.
+                    : sub.receipt.raw_llm_response;
                 return data.llm_tax_analysis || 'No analysis provided.';
             } catch (e) {
-                // This now only catches true parsing errors on malformed strings.
                 console.error("Failed to parse raw_llm_response for sub ID:", sub.id, e);
                 return 'Error: Malformed LLM data.';
             }
         },
-        // --- UI Helpers ---
         getTabClass(tabName) {
             return this.tab === tabName 
                 ? 'border-indigo-500 text-indigo-600' 
