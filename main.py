@@ -1,17 +1,11 @@
 # main.py
-import os
-import re
-import time
-import json
-import pyotp
-import requests
-import gevent
+import os, re, time, json, csv, io, pyotp, requests, gevent
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory, Response
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, Submission
@@ -19,6 +13,7 @@ from utils.security import generate_totp_provisioning_uri, generate_qr_code_base
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import extract_receipt_details
 from utils.sse_broker import announcer
+from sqlalchemy.orm import joinedload
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -603,19 +598,12 @@ def uploaded_file(filename):
 @app.route('/export/csv')
 @login_required
 def export_csv():
-    """
-    NEW: Exports filtered receipt data to a CSV file.
-    Accepts 'search', 'start_date', and 'end_date' query parameters.
-    """
-    # Get filter parameters from the URL
     search_query = request.args.get('search', '').lower()
     start_date_str = request.args.get('start_date', '')
     end_date_str = request.args.get('end_date', '')
 
-    # Base query for processed receipts
     query = Receipt.query.join(Submission).filter(Submission.status == 'completed')
 
-    # Apply date filtering to the database query
     try:
         if start_date_str:
             start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
@@ -626,10 +614,12 @@ def export_csv():
     except ValueError:
         flash('Invalid date format provided for export.', 'danger')
         return redirect(url_for('index'))
+    
+    # --- MODIFIED: Added .options() for eager loading of the 'submission' relationship ---
+    query = query.options(joinedload(Receipt.submission))
 
     receipts = query.order_by(Receipt.receipt_date.desc()).all()
     
-    # Apply search filtering in Python (flexible for multiple fields)
     if search_query:
         filtered_receipts = []
         for receipt in receipts:
@@ -639,11 +629,9 @@ def export_csv():
                 filtered_receipts.append(receipt)
         receipts = filtered_receipts
 
-    # Prepare CSV data using a generator to stream the response
     def generate():
         data = io.StringIO()
         writer = csv.writer(data)
-
         header = [
             'ID', 'Status', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
             'Receipt No', 'Verification Code', 'Receipt Date', 'Total Amount', 'VAT Amount', 
@@ -654,6 +642,7 @@ def export_csv():
         data.seek(0)
         data.truncate(0)
 
+        # This will now work because receipt.submission was pre-loaded.
         for receipt in receipts:
             raw_response = json.loads(receipt.raw_llm_response or '{}')
             row = [
@@ -668,10 +657,10 @@ def export_csv():
             data.seek(0)
             data.truncate(0)
 
-    # Create the response
     response = Response(generate(), mimetype='text/csv')
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    response.headers.set("Content-Disposition", "attachment", filename=f"receipts_export_{timestamp}.csv")
+    response.headers["Content-Disposition"] = f'attachment; filename="receipts_export_{timestamp}.csv"'
+    
     return response
 
 @app.route('/stream')
