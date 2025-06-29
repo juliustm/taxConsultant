@@ -54,39 +54,31 @@ def prepare_submissions_for_frontend(submissions):
     """Converts Submission objects into a JSON-serializable list of dictionaries."""
     output = []
     for sub in submissions:
-        # Check if a receipt is linked to this submission
         receipt_data = {}
         if sub.receipt:
             receipt_data = {
-                "vendor_name": sub.receipt.vendor_name,
-                "total_amount": sub.receipt.total_amount,
-                "receipt_date": sub.receipt.receipt_date.strftime('%Y-%m-%d') if sub.receipt.receipt_date else None
+                "vendor_name": sub.receipt.vendor_name, "total_amount": sub.receipt.total_amount,
+                "vat_amount": sub.receipt.vat_amount, "receipt_date": sub.receipt.receipt_date.strftime('%Y-%m-%d') if sub.receipt.receipt_date else None,
+                "raw_llm_response": json.loads(sub.receipt.raw_llm_response) if sub.receipt.raw_llm_response else {}
             }
 
+        # Transform photo path for frontend consumption
+        frontend_input_data = sub.input_data
+        if sub.input_type == 'photo':
+            # sub.input_data is the full path: /app/data/uploads/file.jpg
+            # We create a public URL: /uploads/file.jpg
+            filename = os.path.basename(sub.input_data)
+            frontend_input_data = url_for('uploaded_file', filename=filename)
+
         data = {
-            "id": sub.id,
-            "status": sub.status,
-            "received_at": sub.received_at,
-            "input_type": sub.input_type,
-            "input_data": sub.input_data,
-            "description": sub.description,
-            "location": sub.location,
-            "error_message": sub.error_message,
-            "is_duplicate": sub.status == 'duplicate',
-            "receipt": receipt_data,
-            "device_name": sub.device.name if sub.device else 'Unknown Device'
+            "id": sub.id, "status": sub.status, "received_at": sub.received_at.isoformat(),
+            "input_type": sub.input_type, "input_data": frontend_input_data, # Use the transformed path
+            "description": sub.description, "location": sub.location,
+            "error_message": sub.error_message, "is_duplicate": sub.status == 'duplicate',
+            "receipt": receipt_data, "device_name": sub.device.name if sub.device else 'Unknown Device'
         }
-        if sub.receipt:
-            data["receipt"] = {
-                "vendor_name": sub.receipt.vendor_name,
-                "total_amount": sub.receipt.total_amount,
-                "vat_amount": sub.receipt.vat_amount,
-                "receipt_date": sub.receipt.receipt_date,
-                "receipt_verification_code": sub.receipt.receipt_verification_code,
-                "raw_llm_response": json.loads(sub.receipt.raw_llm_response) if sub.receipt.raw_llm_response else None
-            }
         output.append(data)
-    return json.dumps(output, default=safe_serialize)
+    return json.dumps(output)
 
 def clean_html_for_llm(html_content: str) -> str:
     """
@@ -298,18 +290,24 @@ def login_required(f):
 @app.route('/')
 @login_required
 def index():
-    # Calculate stats for the summary cards
+    # Handle incoming filter parameters from the URL
+    search_query = request.args.get('search', '')
+    start_date_str = request.args.get('start_date', '')
+    end_date_str = request.args.get('end_date', '')
+
     stats = calculate_dashboard_stats()
     
-    # Fetch all submission data needed for the dashboard table
-    submissions = Submission.query.order_by(Submission.received_at.desc()).limit(50).all()
-    
-    # Prepare the data in a JSON format for Alpine.js to consume
+    # Alpine.js handles all filtering.
+    submissions = Submission.query.order_by(Submission.received_at.desc()).all()
     submissions_json = prepare_submissions_for_frontend(submissions)
     
     return render_template('index.html', 
                            stats=stats, 
-                           submissions_json=submissions_json)
+                           submissions_json=submissions_json,
+                           # Pass URL params to the template for initialization
+                           search_query=search_query,
+                           start_date=start_date_str,
+                           end_date=end_date_str)
 
 @app.route('/admin/setup', methods=['GET', 'POST'])
 def setup():
@@ -470,6 +468,11 @@ def queue_status():
 
 @app.route('/receipt', methods=['POST'])
 def receipt_endpoint():
+    """
+    ### MODIFIED ###
+    Handles new submissions. Saves the full filesystem path for photos to the DB
+    for the backend, but sends a public URL in the SSE payload for the frontend.
+    """
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         return jsonify({'error': 'Authorization header is missing or invalid'}), 401
@@ -487,19 +490,33 @@ def receipt_endpoint():
     description = request.form.get('description')
     location = request.form.get('location')
 
-    input_type, input_data = ('', '')
+    input_type = ''
+    # This will be the path saved to the database.
+    db_input_data = ''
+    # This will be the path sent to the frontend via SSE.
+    frontend_input_data = ''
+
     if receipt_photo:
         input_type = 'photo'
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{receipt_photo.filename}")
+        
+        # The full, absolute path for backend processing.
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         receipt_photo.save(filepath)
-        input_data = filepath
+        
+        # Set the two different paths for their specific purposes.
+        db_input_data = filepath
+        frontend_input_data = url_for('uploaded_file', filename=filename)
+
     elif receipt_url:
         input_type = 'url'
-        input_data = receipt_url
+        # For URLs, the path is the same for both backend and frontend.
+        db_input_data = receipt_url
+        frontend_input_data = receipt_url
 
     new_submission = Submission(
-        device_id=device.id, input_type=input_type, input_data=input_data,
+        device_id=device.id, input_type=input_type,
+        input_data=db_input_data, # Save the full filesystem path to the DB
         description=description, location=location
     )
     db.session.add(new_submission)
@@ -508,7 +525,9 @@ def receipt_endpoint():
     config = get_instance_config()
     payload = {
         "id": new_submission.id, "device_name": device.name, "status": new_submission.status,
-        "received_at": new_submission.received_at.isoformat(), "input_type": new_submission.input_type,
+        "received_at": new_submission.received_at.isoformat(),
+        "input_type": new_submission.input_type,
+        "input_data": frontend_input_data, # Send the public URL to the frontend
         "description": new_submission.description, "location": new_submission.location
     }
     dispatch_event('submission.queued', payload, config)
@@ -581,6 +600,79 @@ def uploaded_file(filename):
         as_attachment=False # Display in browser instead of downloading
     )
 
+@app.route('/export/csv')
+@login_required
+def export_csv():
+    """
+    NEW: Exports filtered receipt data to a CSV file.
+    Accepts 'search', 'start_date', and 'end_date' query parameters.
+    """
+    # Get filter parameters from the URL
+    search_query = request.args.get('search', '').lower()
+    start_date_str = request.args.get('start_date', '')
+    end_date_str = request.args.get('end_date', '')
+
+    # Base query for processed receipts
+    query = Receipt.query.join(Submission).filter(Submission.status == 'completed')
+
+    # Apply date filtering to the database query
+    try:
+        if start_date_str:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            query = query.filter(Receipt.receipt_date >= start_date)
+        if end_date_str:
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+            query = query.filter(Receipt.receipt_date <= end_date)
+    except ValueError:
+        flash('Invalid date format provided for export.', 'danger')
+        return redirect(url_for('index'))
+
+    receipts = query.order_by(Receipt.receipt_date.desc()).all()
+    
+    # Apply search filtering in Python (flexible for multiple fields)
+    if search_query:
+        filtered_receipts = []
+        for receipt in receipts:
+            vendor_match = receipt.vendor_name and search_query in receipt.vendor_name.lower()
+            desc_match = receipt.submission.description and search_query in receipt.submission.description.lower()
+            if vendor_match or desc_match:
+                filtered_receipts.append(receipt)
+        receipts = filtered_receipts
+
+    # Prepare CSV data using a generator to stream the response
+    def generate():
+        data = io.StringIO()
+        writer = csv.writer(data)
+
+        header = [
+            'ID', 'Status', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
+            'Receipt No', 'Verification Code', 'Receipt Date', 'Total Amount', 'VAT Amount', 
+            'LLM Description', 'Tax Analysis', 'Customer Name', 'Customer ID'
+        ]
+        writer.writerow(header)
+        yield data.getvalue()
+        data.seek(0)
+        data.truncate(0)
+
+        for receipt in receipts:
+            raw_response = json.loads(receipt.raw_llm_response or '{}')
+            row = [
+                receipt.submission_id, 'completed', receipt.submission.received_at.strftime('%Y-%m-%d %H:%M:%S'),
+                receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
+                receipt.vrn, receipt.receipt_number, receipt.receipt_verification_code, receipt.receipt_date,
+                receipt.total_amount, receipt.vat_amount, receipt.submission.description,
+                raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id
+            ]
+            writer.writerow(row)
+            yield data.getvalue()
+            data.seek(0)
+            data.truncate(0)
+
+    # Create the response
+    response = Response(generate(), mimetype='text/csv')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    response.headers.set("Content-Disposition", "attachment", filename=f"receipts_export_{timestamp}.csv")
+    return response
 
 @app.route('/stream')
 @login_required
