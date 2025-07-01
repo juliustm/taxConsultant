@@ -1,6 +1,7 @@
 # TaxConsult AI Agent ✨🇹🇿
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Commercial License](https://img.shields.io/badge/License-Commercial-green.svg)](LICENSE-COMMERCIAL.md)
 
 An open-source, self-hostable AI agent designed to help Tanzanian businesses automate and simplify expense reporting by intelligently processing EFD (Electronic Fiscal Device) receipts.
 
@@ -21,15 +22,14 @@ This project empowers you to build your own internal, automated accounting assis
 ## Key Features
 
 -   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint.
--   **AI-Powered Data Extraction**: Utilizes LLMs (Groq, OpenAI) to accurately read and interpret receipt data.
--   **Intelligent Text Cleaning**: Automatically cleans and simplifies messy HTML from TRA verification portals before sending it to the AI, saving costs and improving accuracy.
+-   **AI-Powered Data Extraction**: Utilizes LLMs (Groq, OpenAI) to accurately read and interpret receipt data, including vision support for images.
+-   **Intelligent Text Cleaning**: Automatically cleans messy HTML from TRA verification portals before sending it to the AI, saving costs and improving accuracy.
 -   **Multiple Export Destinations**:
     -   **Google Sheets**: Automatically logs all submissions and processed data into a monthly-tabbed spreadsheet.
-    -   **Webhook**: Sends real-time event notifications (`queued`, `processed`) to any URL you provide.
+    -   **Webhook**: Sends real-time event notifications (`queued`, `processed`, `failed`, `duplicate`) to any URL you provide.
     -   **Amazon S3**: Backs up all event data as JSON files for auditing and safekeeping.
--   **Secure Admin Dashboard**: A clean, passwordless (TOTP-based) web UI for configuration and monitoring.
--   **Asynchronous Job Queue**: Uses a robust, database-backed queue to process submissions in the background without blocking, perfect for single-app hosting environments like [Deploy.tz](https://deploy.tz/).
--   **Receipt Deduplication**: Automatically detects and flags duplicate submissions based on the receipt verification code.
+-   **Real-time Admin Dashboard**: A clean, passwordless (TOTP-based) web UI for configuration and live monitoring of the submission queue.
+-   **Asynchronous Job Queue**: Uses a robust, database-backed queue to process submissions in the background, perfect for single-app hosting environments like [Deploy.tz](https://deploy.tz/).
 -   **Self-Hostable & Private**: You control your data. Host your own instance and ensure your financial information remains confidential.
 
 ## How It Works: The "In-App Cron" Architecture
@@ -39,7 +39,9 @@ To ensure compatibility with simple, single-app hosting platforms (like Deploy.t
 1.  **Intake**: The `/receipt` endpoint is lightweight. It validates the request, saves the submission to the database with a `queued` status, and immediately responds.
 2.  **Queue**: The SQLite database itself acts as the job queue.
 3.  **Processing**: A secret endpoint, `/tasks/run`, acts as the "worker." When triggered, it processes all jobs in the queue.
-4.  **Trigger**: You use a free external service like [cron-job.org](https://cron-job.org/) to automatically call the `/tasks/run` endpoint on a schedule (e.g., every 5 minutes), kicking off the processing.
+4.  **Trigger**: A dual-trigger system provides both immediate feedback and robust reliability:
+    -   **Instant Trigger**: A non-blocking background task is spawned on receipt submission to call the `/tasks/run` endpoint after a 10-second delay.
+    -   **Cron Job (Fallback)**: You use a free external service like [cron-job.org](https://cron-job.org/) to call the `/tasks/run` endpoint on a schedule (e.g., every 5 minutes). This ensures any failed or missed jobs are always processed.
 
 ## Getting Started
 
@@ -58,17 +60,14 @@ git clone https://github.com/your-username/taxconsult-ai-agent.git
 cd taxconsult-ai-agent
 
 # 2. Create your local environment file
-# Create a new file named .env and paste the content from the sample below.
-# (On Linux/macOS, you can use: cp .env.sample .env)
-# For now, you don't need to change anything in it.
+# Create a new file named .env. For now, you don't need to change anything in it.
 touch .env
 ```
 
-**Sample `.env` content:**
+**`.env` content:**
 ```env
-# A secret key for signing Flask sessions. The default is fine for local use.
+# A secret key for signing Flask sessions.
 SECRET_KEY='a-super-secret-key-for-local-development'
-
 # A secret key to protect the task runner endpoint.
 TASK_RUNNER_SECRET_KEY='local-cron-job-secret-12345'
 ```
@@ -82,111 +81,58 @@ Your application should now be running! You can access it at `http://localhost:5
 
 ### 2. Initial Administrator Setup
 
-The first time you visit the application, you'll be guided through a secure setup process.
-
-1.  **Navigate** to `http://localhost:5000`.
-2.  **Enter Your Email**: Provide the email address you want to use as the root administrator.
-3.  **Scan the QR Code**: You will be shown a QR code. Use an authenticator app (like Google Authenticator, Authy, or Microsoft Authenticator) to scan it.
-4.  **Verify**: Enter the 6-digit code from your authenticator app to complete the setup.
-5.  **Log In**: You will be redirected to the login page. Enter your admin email and the new code from your authenticator app to log in.
+The first time you visit the application, you'll be guided through a secure setup process using any standard authenticator app (Google Authenticator, Authy, etc.).
 
 ## Configuration Guide
 
-After logging in, navigate to the **Configuration** page. Here's how to set up each integration:
+After logging in, navigate to the **Configuration** page to set up the LLM provider and your desired data export destinations (Google Sheets, Webhook, S3). Detailed instructions are provided on the page itself.
 
-### A. LLM Provider (Required)
+---
 
-This is the AI brain of the agent.
+## License & Usage
 
-1.  **LLM Provider**: Select `groq` (recommended for speed and cost) or `openai`.
-2.  **API Key**:
-    -   For **Groq**, get your key from the [Groq Console](https://console.groq.com/keys).
-    -   For **OpenAI**, get your key from the [OpenAI Platform](https://platform.openai.com/api-keys).
-3.  Paste the key into the "API Key" field.
+This project is dual-licensed to balance community collaboration with sustainable development.
 
-### B. Google Sheets Export (Recommended)
+### 1. AGPLv3 License (for Open-Source Use)
 
-This is the best way to get a clean, browsable log of your expenses.
+This project is open-source under the **GNU Affero General Public License v3.0 (AGPLv3)**.
 
-1.  **Create a Service Account:**
-    -   Go to the [Google Cloud Console Service Accounts page](https://console.cloud.google.com/iam-admin/serviceaccounts).
-    -   Select or create a project.
-    -   Click **"+ CREATE SERVICE ACCOUNT"**. Name it something like `taxconsult-sheet-writer`.
-    -   Click "CREATE AND CONTINUE", then grant it the role of **Editor**.
-    -   Click "Done". Find your new service account in the list.
-    -   Click the three dots under "Actions" -> "Manage keys" -> "ADD KEY" -> "Create new key".
-    -   Choose **JSON** and click "CREATE". A `credentials.json` file will be downloaded.
+**In simple terms, this means:**
+-   ✅ **You are free to use, modify, and distribute** this software for personal or internal business use.
+-   ✅ **You can** self-host it on your own servers to manage your company's receipts.
+-   ⚠️ **You must** also open-source any modifications you make if you provide this software as a service to others over a network.
 
-2.  **Share Your Google Sheet:**
-    -   Open the downloaded `credentials.json` file. Copy the `client_email` value (e.g., `...gserviceaccount.com`).
-    -   Create a new Google Sheet.
-    -   Click the **Share** button. Paste the service account's email and give it **Editor** access.
+The AGPLv3 is a "strong copyleft" license designed to ensure that derivatives of open-source software remain open-source. This is the perfect license to prevent the project from being taken and offered as a closed-source SaaS product without contributing back to the community.
 
-3.  **Configure in the App:**
-    -   **Google Sheet ID**: Copy the long ID from your sheet's URL (`.../d/THIS_IS_THE_ID/edit...`) and paste it here.
-    -   **Google Service Account JSON**: Open the `credentials.json` file, copy its **entire content**, and paste it into this large text box.
-    -   Click **Save Configuration**.
+You can find the full license text in the `LICENSE-AGPLv3.txt` file.
 
-### C. Webhook Callback Export
+### 2. Commercial License (for Business Use without AGPLv3 Obligations)
 
-If you want to trigger another service (like a custom notification system), use this.
+If you wish to use this software in a commercial product, SaaS offering, or any other scenario where you do not want to be bound by the source-sharing terms of the AGPLv3, you must purchase a commercial license.
 
--   **POST Callback URL**: Enter the URL where you want the agent to send a `POST` request with the event data (`submission.queued`, `submission.processed`).
+**A commercial license grants you the right to:**
+-   Integrate this software into your proprietary, closed-source applications.
+-   Offer a service based on this software without being required to release your own source code.
+-   Receive priority support and influence the project's roadmap.
 
-### D. Amazon S3 Bucket Export
+This dual-license model ensures that individual users and the open-source community can benefit freely, while businesses that profit from this work contribute back to its sustainable development.
 
-For a robust, long-term backup of all submission data.
+**To inquire about a commercial license, please contact:**
 
--   Enter your **S3 Bucket Name**, **Region**, **Access Key ID**, and **Secret Access Key**.
+**Julius Moshiro T/A Atana Ventures**
+- **Email:** [julius@atana.co.tz](mailto:julius@atana.co.tz)
+- **Website:** [atana.co.tz](https://atana.co.tz)
 
-## Usage
-
-### Submitting Receipts
-
-Interact with your agent by sending a `POST` request to the `/receipt` endpoint. You must include your device's API Key as a Bearer Token. You can find your initial API key on the **Configuration** page.
-
-**Example using cURL:**
-```bash
-# Get your API Key from the dashboard's Configuration page
-API_KEY="your-api-key-from-the-dashboard"
-
-# Submit a receipt URL
-curl -X POST \
-  -H "Authorization: Bearer $API_KEY" \
-  -F "receipturl=https://verify.tra.go.tz/A89E231255_145327" \
-  -F "description=Lunch meeting with client" \
-  http://localhost:5000/receipt
-
-# Or, submit a photo of a receipt
-curl -X POST \
-  -H "Authorization: Bearer $API_KEY" \
-  -F "receiptphoto=@/path/to/your/receipt.jpg" \
-  http://localhost:5000/receipt
-```
-
-### Processing the Queue (The Cron Job)
-
-Your submissions are now waiting in the queue. To process them, you need to trigger the task runner.
-
--   **Locally**: You can do this manually by visiting the **Queue** page in the admin dashboard and clicking "Process Queue Now".
--   **In Production (on Deploy.tz, etc.)**:
-    1.  Set up a free cron job service like [cron-job.org](https://cron-job.org/).
-    2.  Create a new job that sends a `GET` request to your secret runner URL every 5 minutes.
-    3.  The URL will be: `https://your-app-name.deploy.tz/tasks/run?secret=YOUR_TASK_RUNNER_SECRET_KEY`
-        -   Make sure to set the `TASK_RUNNER_SECRET_KEY` in your production environment variables!
+---
 
 ## Contributing
 
-Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+We welcome contributions from the community! Whether it's a bug fix, a new feature, or documentation improvements, your help is greatly appreciated.
 
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
+If you have a suggestion, please fork the repo and create a pull request, or open an issue with the tag "enhancement". Please note that all contributions will be licensed under the AGPLv3.
 
 1.  Fork the Project
 2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
 3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
 4.  Push to the Branch (`git push origin feature/AmazingFeature`)
 5.  Open a Pull Request
-
-## License
-
-Distributed under the MIT License. See `LICENSE` for more information.
