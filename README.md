@@ -77,7 +77,7 @@ TASK_RUNNER_SECRET_KEY='local-cron-job-secret-12345'
 docker-compose up --build
 ```
 
-Your application should now be running! You can access it at `http://localhost:5000`.
+Your application should now be running! You can access it at `http://localhost:80`.
 
 ### 2. Initial Administrator Setup
 
