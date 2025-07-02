@@ -5,11 +5,14 @@
 
 An open-source, self-hostable AI agent designed to help Tanzanian businesses automate and simplify expense reporting by intelligently processing EFD (Electronic Fiscal Device) receipts.
 
+![TaxConsult AI Agent Dashboard](static/dashboard.png)
+
 ## The Problem
 
 For many businesses in Tanzania, managing and recording expenses is a tedious, manual process. Collecting physical EFD receipts, manually entering data into spreadsheets, and ensuring compliance for audits is time-consuming and prone to errors. This administrative burden takes valuable time away from focusing on growing the business.
 
 ## The Solution
+
 
 **TaxConsult AI Agent** transforms this process. By deploying your own private instance of this agent, you create a central hub that can:
 1.  **Receive** receipts from various sources (WhatsApp, Telegram, Web App, etc.) via a secure API.
