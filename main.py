@@ -285,6 +285,8 @@ def login_required(f):
 @app.route('/')
 @login_required
 def index():
+    # Check for the 'story' parameter to auto-launch the story mode
+    start_in_story_mode = request.args.get('story', 'false').lower() == 'true'
     # Handle incoming filter parameters from the URL
     search_query = request.args.get('search', '')
     start_date_str = request.args.get('start_date', '')
@@ -302,7 +304,8 @@ def index():
                            # Pass URL params to the template for initialization
                            search_query=search_query,
                            start_date=start_date_str,
-                           end_date=end_date_str)
+                           end_date=end_date_str,
+                           start_in_story_mode=start_in_story_mode)
 
 @app.route('/admin/setup', methods=['GET', 'POST'])
 def setup():

@@ -7,6 +7,31 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Primary Meta Tags -->
+    <title>TaxConsult AI Agent | Automate Your EFD Receipts</title>
+    <meta name="title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
+    <meta name="description" content="Tired of manual data entry? TaxConsult AI is a self-hostable agent that uses AI to automatically process Tanzanian EFD receipts, saving you hours of work and ensuring audit-proof records.">
+    <meta name="keywords" content="Tanzania EFD receipt, tax automation Tanzania, AI accountant, receipt scanner, expense reporting, TRA receipt verification, Julius Moshiro, Atana">
+    <meta name="author" content="Julius Moshiro">
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='favicon.png') }}">
+
+    <!-- Open Graph / Facebook / LinkedIn / WhatsApp -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{{ request.url }}">
+    <meta property="og:title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
+    <meta property="og:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
+    <meta property="og:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="{{ request.url }}">
+    <meta property="twitter:title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
+    <meta property="twitter:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
+    <meta property="twitter:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
 </head>
 <body class="h-full">
 <div class="min-h-full">

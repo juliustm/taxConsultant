@@ -1,23 +1,201 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="flex min-h-full flex-col justify-center px-6 py-12 lg:px-8">
-    <div class="sm:mx-auto sm:w-full sm:max-w-sm">
-        <h2 class="mt-10 text-center text-2xl font-bold leading-9 tracking-tight text-gray-900">Admin Login</h2>
-        <p class="mt-2 text-center text-sm text-gray-600">Enter your email to receive a login code.</p>
+<div x-data="landingPage()" x-init="init()" class="relative bg-white overflow-hidden">
+    
+    <!-- Animated background pattern -->
+    <div class="absolute inset-0 -z-10 h-full w-full bg-white transition-all duration-500" 
+         :style="`background-position: ${backgroundPos.x}px ${backgroundPos.y}px`"
+         style="background-image: linear-gradient(to right, #f0f0f0 1px, transparent 1px), linear-gradient(to bottom, #f0f0f0 1px, transparent_1px); background-size: 6rem 4rem;">
     </div>
-    <div class="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
-        <form class="space-y-6" action="{{ url_for('admin_login') }}" method="POST">
-            <div>
-                <label for="email" class="block text-sm font-medium leading-6 text-gray-900">Email Address</label>
-                <div class="mt-2">
-                    <input id="email" name="email" type="email" autocomplete="email" required class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300">
+
+    <!-- Main Content Area -->
+    <div class="relative min-h-[85vh] flex items-center justify-center">
+        <div class="w-full max-w-lg px-4 sm:px-0 text-center">
+            <!-- Scene 1: Default View (Login + Story Hook) -->
+            <div x-show="!storyMode" x-transition:enter="ease-out duration-300" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100">
+                <h1 class="text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl" x-text="slogan"></h1>
+                <p class="mt-4 text-lg leading-8 text-gray-600">The AI agent that automates your EFD receipt processing.</p>
+                <div class="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
+                    <form class="space-y-6" action="{{ url_for('admin_login') }}" method="POST">
+                        <div><label for="email" class="sr-only">Email Address</label><input id="email" name="email" type="email" autocomplete="email" required class="block w-full rounded-md border-0 py-2.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm" placeholder="Enter your admin email"></div>
+                        <div><button type="submit" class="flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Login</button></div>
+                    </form>
                 </div>
+                <div class="mt-12"><p class="text-gray-600" x-text="hook"></p><button @click="startStory()" class="mt-2 font-semibold text-indigo-600 hover:text-indigo-500">Let me show you <span aria-hidden="true">→</span></button></div>
             </div>
-            <div>
-                <button type="submit" class="flex w-full justify-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Send Login Code</button>
-            </div>
-        </form>
+        </div>
     </div>
+    
+    <!-- Full-Screen Story Mode -->
+    <div x-show="storyMode" 
+         @keydown.escape.window="endStory()" @keydown.arrow-left.window="prevSlide()" @keydown.arrow-right.window="nextSlide()"
+         x-transition:enter="ease-out duration-300" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
+         x-transition:leave="ease-in duration-200" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0"
+         class="fixed inset-0 z-20 bg-white/95 backdrop-blur-sm flex flex-col items-center justify-between p-4 sm:p-8" 
+         x-on:wheel.debounce.250ms="handleScroll" x-on:touchstart="handleTouchStart" x-on:touchmove="handleTouchMove"
+         style="display:none;">
+        
+        <button @click="endStory()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-700 z-40">
+            <span class="sr-only">Close</span>
+            <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+            
+        <!-- Story Content -->
+        <div class="w-full max-w-4xl mx-auto text-center flex-grow flex items-center">
+            <div class="w-full relative h-96">
+                <template x-for="i in 5" :key="i">
+                    <div x-show="slide === i" x-transition:enter="ease-in-out duration-500" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100" x-transition:leave="ease-in-out duration-300" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0" class="absolute inset-0 flex flex-col justify-center">
+                        <!-- Slide 1: Role Selection -->
+                        <div x-show="slide === 1">
+                            <h2 class="text-lg font-semibold leading-7 text-indigo-600">The Journey Begins</h2>
+                            <p class="mt-2 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl md:text-6xl">Your relationship with receipts is about to change.</p>
+                            <p class="mt-6 text-xl leading-8 text-gray-600">But first, to understand your world, tell us who you are.</p>
+                            <div class="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
+                                <button @click="selectRole('Business Owner')" class="flex flex-col items-center p-6 border-2 border-gray-200 rounded-lg hover:border-indigo-600 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"><span>🏢</span><span class="font-semibold text-lg mt-2">Business Owner</span></button>
+                                <button @click="selectRole('Accountant')" class="flex flex-col items-center p-6 border-2 border-gray-200 rounded-lg hover:border-indigo-600 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"><span>🧾</span><span class="font-semibold text-lg mt-2">Accountant</span></button>
+                                <button @click="selectRole('Advisor')" class="flex flex-col items-center p-6 border-2 border-gray-200 rounded-lg hover:border-indigo-600 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"><span>📈</span><span class="font-semibold text-lg mt-2">Financial Advisor</span></button>
+                            </div>
+                        </div>
+                        <!-- Slide 2: The Problem (Personalized) -->
+                        <div x-show="slide === 2"><h2 class="text-lg font-semibold leading-7 text-indigo-600" x-text="`A Story for the ${role}`"></h2><p class="mt-2 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl md:text-6xl" x-html="storyContent.problem.headline"></p><p class="mt-6 text-xl leading-8 text-gray-600" x-html="storyContent.problem.body"></p></div>
+                        <!-- Slide 3: The Solution (Personalized) -->
+                        <div x-show="slide === 3"><h2 class="text-lg font-semibold leading-7 text-indigo-600">The Turning Point</h2><p class="mt-2 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl md:text-6xl" x-html="storyContent.solution.headline"></p><p class="mt-6 text-xl leading-8 text-gray-600" x-html="storyContent.solution.body"></p></div>
+                        <!-- Slide 4: The Gift -->
+                        <div x-show="slide === 4"><h2 class="text-lg font-semibold leading-7 text-indigo-600">A Gift to the Community</h2><p class="mt-2 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl md:text-6xl">This tool is free. Forever.</p><p class="mt-6 text-xl leading-8 text-gray-600">Built by Tanzanian problem-solvers, this agent is open-source. You can self-host it, modify it, and use it to its full potential, free of charge. We believe powerful tools should be accessible to everyone driving our economy forward.</p></div>
+                        <!-- Slide 5: The Offer -->
+                        <div x-show="slide === 5"><h2 class="text-lg font-semibold leading-7 text-indigo-600">The "Focus on Your Business" Offer</h2><p class="mt-2 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl md:text-6xl">Your Time is Your Most Valuable Asset. Let Us Save It For You.</p><p class="mt-6 text-xl leading-8 text-gray-600">For an Annual fee of *120,000 TZS, we will handle everything: full setup for your organization, team training, and a year of dedicated support. *Be operational in one hour* and start saving countless days of manual work.</p><a :href="getMailtoLink()" class="mt-10 inline-block rounded-md bg-indigo-600 px-8 py-4 text-lg font-semibold text-white shadow-sm hover:bg-indigo-500">Yes, Set It Up For Me</a></div>
+                    </div>
+                </template>
+            </div>
+        </div>
+        <!-- Integrated Story Navigation -->
+        <div class="w-full max-w-3xl mx-auto flex items-center justify-between pb-8">
+            <button @click="prevSlide()" x-show="slide > 1" class="inline-flex items-center gap-x-2 rounded-md bg-white px-3.5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                <svg class="h-5 w-5 text-gray-500" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd" /></svg>
+                Back
+            </button>
+            <div x-show="slide <= 1"></div> <!-- Spacer -->
+            
+            <div class="flex items-center gap-x-2">
+                <template x-for="i in 5"><button @click="handleDotNav(i)" :class="slide === i ? 'bg-indigo-600' : 'bg-gray-300 hover:bg-gray-400'" class="h-2 w-10 rounded-full transition-colors"></button></template>
+            </div>
+
+            <!-- THE CHANGE IS HERE: Added :disabled and classes -->
+            <button @click="nextSlide()" x-show="slide < 5" 
+                    :disabled="slide === 1 && !role"
+                    class="inline-flex items-center gap-x-2 rounded-md bg-indigo-600 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:bg-indigo-300 disabled:cursor-not-allowed">
+                Next
+                <svg class="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
+            </button>
+            <div x-show="slide >= 5"></div> <!-- Spacer -->
+        </div>
+    </div>
+    
+    <!-- Trust-Building Footer -->
+    <footer class="absolute bottom-0 left-0 w-full p-4"><div class="text-center text-xs text-gray-500">Built and Hosted by Problem Solvers of the United Republic of Tanzania 🇹🇿<a href="https://github.com/juliustm/taxConsultant" target="_blank" class="font-medium text-indigo-600 hover:underline ml-2">View Source Code</a></div></footer>
 </div>
+
+<script>
+const style = document.createElement('style');
+style.innerHTML = `
+    @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        25% { transform: translateX(-5px); }
+        75% { transform: translateX(5px); }
+    }
+    .shake { animation: shake 0.3s ease-in-out; }
+`;
+document.head.appendChild(style);
+
+
+function landingPage() {
+    return {
+        storyMode: false, slide: 1, role: '', slogan: '', hook: '',
+        backgroundPos: { x: 0, y: 0 }, touchStartX: 0,
+        roleSelectionError: false, // For the shake animation
+
+        slogans: ["Love Your Receipts", "Finally, An End to Receipt Chaos", "Your Accountant's New Best Friend", "The Last Receipt You'll Ever Type"],
+        hooks: ["Tired of receipt chaos?", "Is manual data entry slowing you down?", "What if your expenses managed themselves?"],
+        storyContent: {},
+
+        init() {
+            this.slogan = this.slogans[Math.floor(Math.random() * this.slogans.length)];
+            this.hook = this.hooks[Math.floor(Math.random() * this.hooks.length)];
+            setInterval(() => { this.backgroundPos.x -= 0.15; this.backgroundPos.y -= 0.15; }, 50);
+            if (new URLSearchParams(window.location.search).get('story') === 'true') {
+                this.startStory();
+            }
+        },
+        startStory() { 
+            this.slide = 1; 
+            this.role = ''; // Reset role when story starts
+            this.storyMode = true; 
+        },
+        endStory() { this.storyMode = false; setTimeout(() => this.slide = 1, 300); },
+        
+        selectRole(selectedRole) {
+            this.role = selectedRole;
+            this.roleSelectionError = false; // Clear error state
+            this.setStoryContent();
+            this.nextSlide();
+        },
+        setStoryContent() {
+            const content = {
+                'Business Owner': {
+                    problem: { headline: "You're drowning in tiny slips of paper.", body: "Every receipt represents a decision, an expense, a potential tax deduction. But right now, they're just a compliance headache, a shoebox of lost opportunities that keeps you from focusing on strategy, sales, and your team." },
+                    solution: { headline: "Turn Your Expenses Into Intelligence.", body: "Imagine every receipt automatically transformed into a clean data point. See your spending in real-time. Understand your tax position instantly. This isn't just about saving time; it's about making smarter decisions, faster." }
+                },
+                'Accountant': {
+                    problem: { headline: "You're chasing ghosts.", body: "The end of the month is a nightmare. You're chasing down executives for faded receipts, deciphering cryptic notes, and manually keying in hundreds of entries. Your expertise is wasted on clerical work, not financial strategy." },
+                    solution: { headline: "Become a Strategic Partner, Not a Data Clerk.", body: "What if the data was already there, perfectly categorized and verified, before you even asked? This agent automates the grunt work, freeing you to provide high-value analysis, identify savings, and guide your clients to financial health." }
+                },
+                'Advisor': {
+                    problem: { headline: "You're advising with incomplete data.", body: "Your clients come to you for strategic guidance, but their financial records are a mess of delayed, error-filled spreadsheets. You can't give your best advice when you're working with a blurry picture of the past." },
+                    solution: { headline: "Give Your Clients the Gift of Clarity.", body: "Equip your clients with a tool that provides a perfect, real-time ledger of their expenses. When they succeed, you succeed. Base your advice on accurate, up-to-the-minute data and become an indispensable part of their growth." }
+                }
+            };
+            this.storyContent = content[this.role];
+        },
+        nextSlide() {
+            // --- THE GUARDRAIL IS HERE ---
+            if (this.slide === 1 && !this.role) {
+                // Trigger shake animation to prompt user for selection
+                this.roleSelectionError = true;
+                setTimeout(() => this.roleSelectionError = false, 300);
+                return; // Stop the function
+            }
+            if (this.slide < 5) this.slide++;
+        },
+
+        prevSlide() { 
+            if (this.slide > 1) this.slide--; 
+        },
+
+        handleDotNav(slideNumber) {
+            // Allow backward navigation freely, but forward only if role is selected
+            if (slideNumber > 1 && !this.role) {
+                 this.roleSelectionError = true;
+                setTimeout(() => this.roleSelectionError = false, 300);
+            } else {
+                this.slide = slideNumber;
+            }
+        },
+
+        handleScroll(event) { if(this.storyMode){ if (event.deltaY > 50) this.nextSlide(); if (event.deltaY < -50) this.prevSlide(); }},
+        handleTouchStart(event) { this.touchStartX = event.touches[0].clientX; },
+        handleTouchMove(event) {
+            if (!this.touchStartX || !this.storyMode) return;
+            const diffX = this.touchStartX - event.touches[0].clientX;
+            if (diffX > 50) { this.nextSlide(); this.touchStartX = null; }
+            if (diffX < -50) { this.prevSlide(); this.touchStartX = null; }
+        },
+        getMailtoLink() {
+            const subject = encodeURIComponent(`TaxConsult AI - Setup Offer Inquiry (${this.role})`);
+            const body = encodeURIComponent(`Hello Julius,\n\nI'm interested in the "Focus on Your Business" offer for the TaxConsult AI Agent.\n\nMy role is: ${this.role}\n\nPlease let me know the next steps.\n\nMy phone number is: [Please enter your phone number here]\n\nThank you,`);
+            return `mailto:julius@atana.co.tz?subject=${subject}&body=${body}`;
+        }
+    }
+}
+</script>
 {% endblock %}
