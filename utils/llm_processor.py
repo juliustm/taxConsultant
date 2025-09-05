@@ -111,7 +111,7 @@ def extract_receipt_details(content, is_image, config):
             "role": "user",
             "content": f"Please analyze this receipt text, extract its data, and provide a tax analysis:\n\n{content}"
         })
-        model = "llama3-70b-8192" if config.llm_provider == 'groq' else "gpt-4o"
+        model = "llama-3.3-70b-versatile" if config.llm_provider == 'groq' else "gpt-4o"
 
     try:
         print(f"[LLM] Calling model '{model}' with tool-calling enabled...")
