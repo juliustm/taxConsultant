@@ -45,6 +45,29 @@ def safe_serialize(obj):
         return obj.isoformat()
     return str(obj)
 
+def clean_amount(value):
+    """
+    Cleans a string amount (e.g. '10,000.00', 'TZS 5000') into a float.
+    Returns None if conversion fails.
+    """
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    # Remove everything except digits and dots
+    # This handles '10,000', 'TZS 1000', etc.
+    # We assume standard decimal notation.
+    try:
+        # Remove commas
+        cleaned = str(value).replace(',', '')
+        # Extract the first valid number found (simple approach)
+        # Or just strip non-numeric chars except dot
+        cleaned = re.sub(r'[^\d.]', '', cleaned)
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return None
+
 def prepare_submissions_for_frontend(submissions):
     """Converts Submission objects into a JSON-serializable list of dictionaries."""
     output = []
@@ -236,7 +259,7 @@ def process_submission(submission):
             receipt_verification_code=db_verification_code, receipt_number=extracted_data.get('receipt_number'),
             uin=extracted_data.get('uin'), customer_name=extracted_data.get('customer_name'),
             customer_id_type=extracted_data.get('customer_id_type'), customer_id=extracted_data.get('customer_id'),
-            total_amount=extracted_data.get('total_amount'), vat_amount=extracted_data.get('vat_amount'),
+            total_amount=clean_amount(extracted_data.get('total_amount')), vat_amount=clean_amount(extracted_data.get('vat_amount')),
             receipt_date=receipt_date_obj, raw_llm_response=json.dumps(extracted_data),
             device_id=submission.device_id, submission_id=submission.id
         )
@@ -451,6 +474,126 @@ def add_device():
     db.session.commit()
     flash(f'Device "{device_name}" added successfully.', 'success')
     return redirect(url_for('configure_instance'))
+
+@app.route('/admin/receipt/<int:submission_id>/reanalyze', methods=['POST'])
+@login_required
+def reanalyze_receipt(submission_id):
+    """
+    Re-analyzes a receipt by re-fetching from TRA (if URL) or re-using photo,
+    then sending to LLM again and updating the receipt data.
+    """
+    submission = Submission.query.get(submission_id)
+    if not submission:
+        return jsonify({'error': 'Submission not found'}), 404
+    
+    try:
+        config = get_instance_config()
+        if not config or not config.is_configured():
+            return jsonify({'error': 'Instance is not configured with LLM provider and API key'}), 500
+
+        # Fetch content based on input type
+        content_for_llm, is_image = (None, False)
+        if submission.input_type == 'url':
+            print(f"[Reanalyze] Re-fetching URL for submission {submission_id}")
+            content_for_llm = fetch_receipt_html_from_tra(submission)
+            if content_for_llm is None:
+                return jsonify({'error': 'Could not fetch receipt from TRA. It may be temporarily unavailable.'}), 500
+        elif submission.input_type == 'photo':
+            print(f"[Reanalyze] Re-using photo for submission {submission_id}")
+            content_for_llm = submission.input_data
+            is_image = True
+        
+        # Call LLM to extract fresh data
+        print(f"[Reanalyze] Sending to LLM for analysis...")
+        extracted_data = extract_receipt_details(content_for_llm, is_image, config)
+        
+        # Update submission description
+        llm_desc = extracted_data.get('llm_extracted_description')
+        if llm_desc:
+            submission.description = llm_desc
+        
+        # Parse receipt date
+        receipt_date_obj = None
+        if extracted_data.get('receipt_date'):
+            try:
+                receipt_date_obj = date.fromisoformat(extracted_data['receipt_date'])
+            except (ValueError, TypeError):
+                print(f"Warning: Could not parse date '{extracted_data.get('receipt_date')}'")
+        
+        # Convert empty verification code string to None
+        verification_code = extracted_data.get('receipt_verification_code')
+        db_verification_code = verification_code if (verification_code and verification_code.strip()) else None
+        
+        # Update or create receipt
+        existing_receipt = Receipt.query.filter_by(submission_id=submission_id).first()
+        
+        if existing_receipt:
+            # Update existing receipt
+            print(f"[Reanalyze] Updating existing receipt for submission {submission_id}")
+            existing_receipt.vendor_name = extracted_data.get('vendor_name')
+            existing_receipt.vendor_tin = extracted_data.get('vendor_tin')
+            existing_receipt.vendor_phone = extracted_data.get('vendor_phone')
+            existing_receipt.vrn = extracted_data.get('vrn')
+            existing_receipt.receipt_verification_code = db_verification_code
+            existing_receipt.receipt_number = extracted_data.get('receipt_number')
+            existing_receipt.uin = extracted_data.get('uin')
+            existing_receipt.customer_name = extracted_data.get('customer_name')
+            existing_receipt.customer_id_type = extracted_data.get('customer_id_type')
+            existing_receipt.customer_id = extracted_data.get('customer_id')
+            existing_receipt.total_amount = clean_amount(extracted_data.get('total_amount'))
+            existing_receipt.vat_amount = clean_amount(extracted_data.get('vat_amount'))
+            existing_receipt.receipt_date = receipt_date_obj
+            existing_receipt.raw_llm_response = json.dumps(extracted_data)
+            existing_receipt.processed_at = datetime.utcnow()
+        else:
+            # Create new receipt
+            print(f"[Reanalyze] Creating new receipt for submission {submission_id}")
+            new_receipt = Receipt(
+                vendor_name=extracted_data.get('vendor_name'),
+                vendor_tin=extracted_data.get('vendor_tin'),
+                vendor_phone=extracted_data.get('vendor_phone'),
+                vrn=extracted_data.get('vrn'),
+                receipt_verification_code=db_verification_code,
+                receipt_number=extracted_data.get('receipt_number'),
+                uin=extracted_data.get('uin'),
+                customer_name=extracted_data.get('customer_name'),
+                customer_id_type=extracted_data.get('customer_id_type'),
+                customer_id=extracted_data.get('customer_id'),
+                total_amount=clean_amount(extracted_data.get('total_amount')),
+                vat_amount=clean_amount(extracted_data.get('vat_amount')),
+                receipt_date=receipt_date_obj,
+                raw_llm_response=json.dumps(extracted_data),
+                device_id=submission.device_id,
+                submission_id=submission.id
+            )
+            db.session.add(new_receipt)
+        
+        # Update submission status
+        submission.status = 'completed'
+        submission.error_message = None
+        db.session.commit()
+        
+        # Dispatch event
+        updated_stats = calculate_dashboard_stats()
+        payload = {
+            "submission_id": submission.id,
+            "status": submission.status,
+            "processed_at": datetime.utcnow().isoformat(),
+            "data": extracted_data,
+            "stats": updated_stats
+        }
+        dispatch_event('submission.processed', payload, config)
+        
+        print(f"[Reanalyze] Successfully re-analyzed submission {submission_id}")
+        return jsonify({
+            'message': 'Receipt re-analyzed successfully',
+            'data': extracted_data
+        }), 200
+        
+    except Exception as e:
+        print(f"[Reanalyze Error] Failed to re-analyze submission {submission_id}: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
