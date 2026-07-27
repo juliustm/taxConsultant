@@ -12,8 +12,10 @@ class Config:
 
     # --- THE SEAMLESS DATABASE CONFIGURATION ---
     # Define a single, conventional path inside the project's root directory.
-    # The project lives at '/app' inside the container.
-    DATA_DIR = '/app/data'
+    # The project lives at '/app' inside the container. DATA_DIR can be overridden so
+    # the app can be imported outside the container - the test suite points it at a
+    # temporary directory, since '/app' is not writable on a developer machine.
+    DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
     DB_FILE = 'taxconsult.db'
     DB_PATH = os.path.join(DATA_DIR, DB_FILE)
     

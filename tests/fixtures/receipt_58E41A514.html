@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>EFD | Receipt Verification</title>
+
+    <link rel="shortcut icon" href="/resources/images/eti/logo.png" type="image/x-icon"/>
+
+    <link href="/resources/css/eti/bootstrap.min.css" rel="stylesheet">
+    <link href="/resources/css/eti/font-awesome.min.css" rel="stylesheet">
+    <link href="/resources/css/eti/nprogress.css" rel="stylesheet">
+    <link href="/resources/css/eti/jquery.mCustomScrollbar.min.css" rel="stylesheet">
+    <link href="/resources/css/eti/custom.min.css" rel="stylesheet">
+    <link href="/resources/css/eti/bootstrap-datetimepicker.css" rel="stylesheet">
+
+    <style>
+		html, body { height: 100%; overflow-x: hidden;}
+		body { padding-top: 0; }
+		.container.body-content { padding-left: 15px; padding-right: 15px; }
+		.no-sidebar .right_col { margin-left: 0 !important; }
+		.no-sidebar .top_nav   { margin-left: 0 !important; }
+		
+		.right_col { flex: 1; padding-top: 70px; }        /* 60~80 조정 */
+		
+		.page-wrap{
+		  overflow-x: hidden;
+		  min-height: 100vh;
+		  display: flex;
+		  flex-direction: column;
+		}
+		
+		
+        #pageOverlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.35);
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        #pageOverlay .loading-box {
+            background: #fff;
+            font-size: 16px;
+            padding: 16px 24px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            font-weight: bold;
+            color: #333333;
+        }
+        
+		.cancelled-watermark {
+		  position: fixed;
+		  inset: 0;
+		  z-index: 2147483647;      /* 최상위급 */
+		  pointer-events: none;
+		}
+		
+		.cancelled-watermark {
+		  position: fixed;
+		  inset: 0;
+		  z-index: 2147483647;
+		  pointer-events: none;
+		}
+		
+		.cancelled-watermark::before {
+		  content: "CANCELLED";
+		  position: absolute;
+		  top: 50%;
+		  left: 50%;
+		  transform: translate(-50%, -50%) rotate(-30deg);
+		
+		  font-size: 7rem;              /* 5배 느낌: 필요시 6~8rem 조절 */
+		  font-weight: 800;
+		  letter-spacing: 10px;
+		  color: rgba(120, 120, 120, 0.18);  /* 회색 + 반투명 */
+		  white-space: nowrap;
+		  text-transform: uppercase;
+		}     
+		
+		.test-watermark {
+		  position: absolute;
+		  inset: 0;
+		  z-index: 2147483647;
+		  pointer-events: none;
+		}
+		
+		.test-watermark::before {
+		  content: 
+		  	"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A"
+			"TEST ENVIRONMENT  TEST ENVIRONMENT  TEST ENVIRONMENT \A";
+		  position: absolute;
+		  top: 60%;
+		  left: 50%;
+		  transform: translate(-50%, -50%) rotate(-30deg);
+		
+		  white-space: pre;       /* \A 줄바꿈 적용 */
+		  font-size: 3.2rem;              /* 5배 느낌: 필요시 6~8rem 조절 */
+		  font-weight: 800;
+		  letter-spacing: 6px;
+		  line-height: 8.6;
+		  color: rgba(120, 120, 120, 0.12);  /* 회색 + 반투명 */
+		  text-transform: uppercase;
+		}     
+        
+	@media print {
+
+			  @page {
+			    margin: 10mm;
+			  }
+			
+			  body {
+			    margin: 0 !important;
+			    padding: 0 !important;
+			    background: #fff !important;
+			    break-before: avoid !important;
+			    page-break-before: avoid !important;
+			    -webkit-print-color-adjust: exact;
+			    print-color-adjust: exact;
+			  }
+			
+			  html, body {
+			    height: auto !important;
+			    overflow: visible !important;
+			  }
+			
+			  .container,
+			  .container.body,
+			  .container.body-content,
+			  .main_container,
+			  .right_col {
+			    margin: 0 !important;
+			    padding: 0 !important;
+			    min-height: auto !important;
+			    height: auto !important;
+			    overflow: visible !important;
+			  }
+			
+			  .right_col {
+			    padding-top: 0 !important;
+			  }
+			
+			  #inv {
+			    break-before: avoid !important;
+			    page-break-before: avoid !important;
+			    margin-top: 0 !important;
+			    padding-top: 0 !important;
+			  }
+			
+			  #pageOverlay,
+			  .navbar,
+			  .navbar-fixed-top,
+			  .top_nav,
+			  footer,
+			  .no-print,
+			  #menu_toggle {
+			    display: none !important;
+			  }
+			
+			  * {
+			    box-shadow: none !important;
+			    text-shadow: none !important;
+			  }
+			
+			  .row {
+			    margin-left: 0 !important;
+			    margin-right: 0 !important;
+			  }
+			  
+			  .cancelled-watermark { position: fixed; }
+			  .cancelled-watermark::before { color: rgba(120,120,120,0.22); }
+			  .test-watermark { position: fixed; }
+			  .test-watermark::before { color: rgba(120, 120, 120, 0.05) !important; font-size: 4rem;}
+		}
+	
+    </style>
+
+    <script src="/resources/js/eti/jquery.min.js"></script>
+    <script src="/resources/js/eti/bootstrap.min.js"></script>
+    <script src="/resources/js/eti/fastclick.js"></script>
+    <script src="/resources/js/eti/nprogress.js"></script>
+    <script src="/resources/js/eti/jquery.mCustomScrollbar.concat.min.js"></script>
+    <script src="/resources/js/eti/custom.min.js"></script>
+
+    <script>
+        window.addEventListener("load", function () {
+            const overlay = document.getElementById("pageOverlay");
+            if (overlay) overlay.style.display = "none";
+        });
+    </script>
+
+</head>
+<body>
+
+<!-- Page loading overlay -->
+<div id="pageOverlay">
+  <div class="loading-box">Page is loading...</div>
+</div>
+	<div class="container body">
+		<div class="main_container page-wrap">
+
+			<!-- top navigation -->
+			<center>
+				<div id="topNavi" class="navbar navbar-inverse navbar-fixed-top">
+					<div class="nav_menu" style="background-color:#FDEE02">
+						<nav>
+							<div class="row">
+								<div class="nav hidden">
+									<a id="menu_toggle" class="menu-state-button">
+										<i class="fa fa-bars" style="color:black"></i>
+									</a>
+								</div>
+								<div>
+									<h4 style="color:black; padding-top:12px">
+										<a href="/Home/Index">TAXPAYER RECEIPT VERIFICATION PORTAL</a>
+									</h4>
+								</div>
+							</div>
+						</nav>
+					</div>
+				</div>
+			</center>
+			<!-- /top navigation -->
+
+			<!-- page content -->
+			<div class="right_col" role="main">
+				<div class="container body-content">
+
+					<div class="clearfix"></div>
+
+					<div class="row" style="padding-top:15px">
+						<div class="col-md-4 col-sm-12 col-xs-12"></div>
+						<div class="col-md-4 col-sm-12 col-xs-12">
+							<div class="x_panel">
+								<div class="x_title" style="padding-top: 20px;">
+									<h4 style="text-align:center">*** START OF LEGAL RECEIPT ***</h4>
+									<center>
+										<img src="/resources/images/eti/logo.png"
+											style="width:100px;height:100px;" />
+									</center>
+									<div class="clearfix"></div>
+								</div>
+								<div class="x_content">
+									<section class="content invoice" id="inv">
+										<!-- Seller / Taxpayer Info -->
+										<div class="row">
+											<div class="col-xs-12 invoice-header">
+												<center>
+													<!-- Online Invoice -->
+												    
+	
+												    <!-- Receipt -->
+												    <h4>
+												        <b>PLASCO LIMITED</b>
+												    </h4>
+												</center>
+											</div>
+										</div>
+										<div class="row invoice-info col-xs-12">
+											<center>
+												<div class="col-xs-12 invoice-col">
+													<h4>
+														<b>P.O BOX <span>19956</span></b>
+													</h4>
+													<br />
+													<b>MOBILE:</b>
+													<span>+255 761 850 579</span>
+													<br />
+													<b>TIN:</b>
+													<span>100147181</span>
+													<br />
+													<b>VRN:</b>
+													<span>10007206H</span>
+													<br />
+													<b>SERIAL NO:</b>
+													<span>03TZ343001520</span>
+													<br />
+													<b>UIN: </b>
+													<span>02ESDINCOTEX118M-11078151210014718103TZ343001520</span>
+													<br />
+													<b>TAX OFFICE: </b>
+													<span>LARGE TAXPAYERS DEPARTMENT</span>
+												</div>
+											</center>
+										</div>
+
+										<!-- Customer Info -->
+										<div class="row">
+											<div class="col-xs-12 invoice-header">
+												<hr style="border-top: dotted 1px;" />
+												<b>CUSTOMER NAME: </b>
+												<span>NZEGA URBAN WATER</span>
+												<br />
+												<b>CUSTOMER ID TYPE: </b>
+												<span>
+													
+													
+													<span>TIN</span>
+													
+													
+													
+													
+													
+													
+													
+												</span>
+												<br />
+												<b>CUSTOMER ID: </b>
+												<span>108537108</span>
+												<br />
+												<b>CUSTOMER MOBILE: </b>
+												<span>n/a</span>
+											</div>
+										</div>
+
+										<!-- Receipt Info -->
+										<div class="row">
+											<div class="col-xs-12 invoice-header">
+												<hr style="border-top: dotted 1px;" />
+												<b>RECEIPT NO: </b>
+												<span>514</span>
+												<br />
+												<b>Z NUMBER: </b>
+												<span>169</span>
+												<br />
+												<b>RECEIPT DATE: </b>
+												<span>08/03/2022</span>
+												<br />
+												<b>RECEIPT TIME: </b>
+												<span>09:20:22</span>
+												<br />
+												<hr style="border-top: dotted 1px;" />
+											</div>
+										</div>
+
+										<!-- Purchased Items -->
+										<h4>Purchased Items</h4>
+										<hr style="border-top: dotted 1px;" />
+										<div class="row">
+											<div class="col-xs-12 table">
+												<table class="table table-striped">
+													<thead>
+														<tr>
+															<th style="width: 55%">Description</th>
+															<th style="width: 7%; text-align: center;">Qty</th>
+															<th style="width: 30%; text-align: right;">Amount</th>
+															<th style="width: 8%; text-align: center;">Type</th>
+														</tr>
+													</thead>
+													<tbody>
+														<tr>
+															<td style="width: 55%">SUMMARIZED SALE - E</td>
+															<td style="width: 7%; text-align: center;">1</td>
+															<td style="width: 30%; text-align: right;" align="right">24,273,000.00</td>
+															<td style="width: 8%; text-align: center;">
+															  
+															  
+															  
+															  
+															  <span>EX</span>
+															  
+															</td>
+														</tr>
+													</tbody>
+												</table>
+											</div>
+										</div>
+										
+										<!-- Invoice Adjustments Items -->
+										
+										
+										
+										
+										<!-- Invoice Payments Items -->
+										
+										
+																		
+																				
+
+										<!-- Totals -->
+										<div class="row">
+											<div class="col-xs-12">
+												<div class="table">
+													<table class="table">
+														<tbody>
+															<tr>
+																<th style="width:70%">TOTAL EXCL OF TAX:</th>
+																<td align="right">24,273,000.00</td>
+															</tr>
+															
+															<!-- DISCOUNT -->
+															
+
+															<!-- TAX RATE A -->
+															
+
+															<!-- TAX RATE B -->
+															
+
+															<!-- TAX RATE C -->
+															
+
+															<!-- TAX RATE SR -->
+															
+
+															<!-- TAX RATE EX -->
+															<tr>
+																<th>
+																	<small>TAX RATE EX (0%)</small>
+																</th>
+																<td align="right">
+																	<small>0.00</small>
+																</td>
+															</tr>
+
+															<tr>
+																<th>TOTAL TAX:</th>
+																<td align="right">0.00</td>
+															</tr>
+															
+															<!-- Normal -->
+															<tr>
+																<th>TOTAL INCL OF TAX:</th>
+																<td align="right">24,273,000.00</td>
+															</tr>
+															
+															<!-- TANESCO (TIN = 100183471) -->
+															
+															
+															
+															
+															
+														</tbody>
+													</table>
+
+													<hr style="border-top: dotted 1px;" />
+
+													<!-- Verification Code -->
+													<div class="row">
+														<div class="col-xs-12 invoice-header">
+															<center>
+																<h4><b>RECEIPT VERIFICATION CODE</b></h4>
+															</center>
+															<center>
+																<h4>58E41A514</h4>
+															</center>
+														</div>
+													</div>
+
+													<hr style="border-top: dotted 1px;" />
+
+													<!-- QR Code -->
+													<div class="col-xs-12 invoice-header">
+														<center>
+															<img id="barcode"
+																src="https://api.qrserver.com/v1/create-qr-code/?data=https://verify.tra.go.tz/58E41A514_092022&amp;size=100x100"
+																alt="" title="58E41A514" width="100"
+																height="100" />
+														</center>
+														<hr style="border-top: dotted 1px;" />
+													</div>
+
+													<h4 style="text-align:center">*** END OF LEGAL RECEIPT ***</h4>
+												</div>
+											</div>
+										</div>
+
+										<!-- Print Button -->
+										<div class="row no-print">
+											<div class="col-xs-12">
+												<center>
+													<button class="btn btn-default"
+														style="background:#FDEE02; color:#202020;"
+														onclick="receiptPrint(this);">
+														<b>
+															<span style="filter: grayscale(100%);">🖨</span>
+															Print Receipt
+														</b>
+													</button>
+												</center>
+											</div>
+										</div>
+										<!-- Cancelled Watermark -->
+										
+										<!-- TEST Watermark -->
+										
+									</section>
+								</div>
+							</div>
+						</div>
+						<div class="col-md-4 col-sm-12 col-xs-12"></div>
+					</div>
+
+				</div>
+			</div>
+			<!-- /page content -->
+
+			<!-- footer content -->
+			<body>
+<footer style="max-height:40px; margin-left:0">
+    <center>
+        <p style="color:black">
+            &copy;
+            <span>2026</span>
+            - TRA Receipt Verification Portal
+        </p>
+    </center>
+</footer>
+</body>
+			<!-- /footer content -->
+		</div>
+	</div>	
+<script>
+	
+  let PRINT_HEAD_CACHE = null;
+  
+	function getPrintHeadCache() {
+			if (PRINT_HEAD_CACHE) return PRINT_HEAD_CACHE;
+			const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+				.map(l => `<link rel="stylesheet" href="${l.href}">`).join("\n");
+			const styles = Array.from(document.querySelectorAll("style"))
+				.map(s => `<style>${s.innerHTML}</style>`).join("\n");
+			PRINT_HEAD_CACHE = links + "\n" + styles;
+			return PRINT_HEAD_CACHE;
+		}
+	
+  (function () {
+    const overlay = document.getElementById("pageOverlay");
+    if (!overlay) return;
+
+    let done = false;
+
+    function hideOverlay(reason) {
+      if (done) return;
+      done = true;
+      overlay.style.display = "none";
+    }
+
+    const timer = setTimeout(function () {
+      hideOverlay("timeout(3s)");
+    }, 3000);
+
+	window.addEventListener("load", function () {
+	  preparePrintIframe();
+	  buildPrintDocOnce();
+	  clearTimeout(timer);
+	  hideOverlay("window.load");
+	}); // 
+
+  function preparePrintIframe() {
+    if (document.getElementById("printFrame")) return;
+
+    const iframe = document.createElement("iframe");
+    iframe.id = "printFrame";
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "0";
+
+    document.body.appendChild(iframe);
+  }
+    
+  })();
+  
+	function buildPrintDocOnce() {
+	  const iframe = document.getElementById("printFrame");
+	  if (!iframe) return;
+	
+	  if (iframe.dataset.ready === "1") return;
+	
+	  const panel = document.querySelector(".x_panel");
+	  if (!panel) return;
+	
+	  const doc = iframe.contentWindow.document;
+	
+	  doc.open();
+	  doc.write(`
+	    <!doctype html>
+	    <html>
+	      <head>
+	        <meta charset="utf-8">
+	        ${getPrintHeadCache()}
+	      </head>
+	      <body>
+	        ${panel.outerHTML}
+	      </body>
+	    </html>
+	  `);
+	  doc.close();
+	
+	  iframe.dataset.ready = "1";
+	}
+  
+  function receiptPrint(btn) {
+		if (!btn) return;
+
+		if (btn.dataset.printing === "1") return;
+		btn.dataset.printing = "1";
+
+		const originalHtml = btn.innerHTML;
+		const originalDisabled = btn.disabled;
+
+		btn.disabled = true;
+		btn.style.opacity = "0.55";
+		btn.style.cursor = "not-allowed";
+		btn.innerHTML = "Processing...";
+
+		const restoreButton = () => {
+			if (btn.dataset.printing !== "1") return;
+
+			btn.disabled = originalDisabled;
+			btn.style.opacity = "";
+			btn.style.cursor = "";
+			btn.innerHTML = originalHtml;
+			btn.dataset.printing = "0";
+		};
+
+		const panel = document.querySelector(".x_panel");
+		if (!panel) {
+			restoreButton();
+			alert(".x_panel not found");
+			return;
+		}
+
+		const iframe = document.getElementById("printFrame");
+		if (!iframe) {restoreButton(); return;}
+
+		iframe.contentWindow.focus();
+		iframe.contentWindow.print();
+
+		iframe.contentWindow.onafterprint = function () {
+			restoreButton();
+		};
+
+		const safetyTimer = setTimeout(() => {
+			restoreButton();
+		}, 3000);
+
+		const wrappedAfterprint = iframe.contentWindow.onafterprint;
+		iframe.contentWindow.onafterprint = function () {
+			clearTimeout(safetyTimer);
+			wrappedAfterprint();
+		};
+	}
+  
+</script>
+
+</body>
+</html>

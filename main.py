@@ -1,22 +1,23 @@
 # main.py
-import os, re, time, json, csv, io, pyotp, requests, gevent
+import os, time, json, csv, io, pyotp, requests, gevent
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
-from bs4 import BeautifulSoup
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory, Response
 
 from config import Config
-from models.user import db, InstanceConfig, Device, Receipt, Submission
+from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
 from utils.export import dispatch_event, format_currency
-from utils.llm_processor import extract_receipt_details
+from utils.llm_processor import analyse_receipt, extract_receipt_details, LlmUnavailable
+from utils.money import format_cents, from_cents, to_cents, to_decimal
 from utils.sse_broker import announcer
 from utils.tra import (
     fetch_receipt_html, TraError, TraReceiptNotUploaded, TraThrottled,
     TraTransportError, TraUnexpectedResponse,
 )
+from utils.tra_parser import parse_receipt_html, TAX_CODES, TraParseError
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import joinedload
 
@@ -35,27 +36,112 @@ db.init_app(app)
 def get_instance_config():
     return InstanceConfig.query.first()
 
+# Columns added to existing tables after their first release. db.create_all() builds
+# new tables but never alters an existing one, and there is no migration tool in this
+# project, so they are added by hand on boot.
+PENDING_COLUMNS = {
+    'submission': (
+        ('next_attempt_at', 'DATETIME'),
+        ('claimed_at', 'DATETIME'),
+    ),
+    'receipt': (
+        ('vendor_id', 'INTEGER'),
+        ('tax_office', 'VARCHAR(200)'),
+        ('z_number', 'VARCHAR(50)'),
+        ('efd_serial', 'VARCHAR(100)'),
+        ('customer_mobile', 'VARCHAR(50)'),
+        ('receipt_time', 'TIME'),
+        ('total_incl_tax_cents', 'BIGINT'),
+        ('total_excl_tax_cents', 'BIGINT'),
+        ('total_tax_cents', 'BIGINT'),
+        ('discount_cents', 'BIGINT'),
+        ('is_cancelled', 'BOOLEAN NOT NULL DEFAULT 0'),
+        ('is_test', 'BOOLEAN NOT NULL DEFAULT 0'),
+        ('extraction_source', 'VARCHAR(20)'),
+        ('source_html', 'TEXT'),
+        ('category', 'VARCHAR(50)'),
+        ('llm_status', 'VARCHAR(20)'),
+    ),
+}
+
+# Indexes on columns added above. create_all() only indexes tables it creates.
+PENDING_INDEXES = (
+    ('ix_submission_next_attempt_at', 'submission', 'next_attempt_at'),
+    ('ix_receipt_receipt_date', 'receipt', 'receipt_date'),
+    ('ix_receipt_vendor_id', 'receipt', 'vendor_id'),
+    ('ix_receipt_vendor_tin', 'receipt', 'vendor_tin'),
+    ('ix_receipt_is_cancelled', 'receipt', 'is_cancelled'),
+    ('ix_receipt_is_test', 'receipt', 'is_test'),
+    ('ix_receipt_category', 'receipt', 'category'),
+)
+
+def _table_columns(table):
+    return {row[1] for row in db.session.execute(sa_text(f"PRAGMA table_info({table})"))}
+
 def apply_pending_migrations():
     """
-    Adds columns introduced after a database was first created.
+    Brings an existing database up to the current schema.
 
-    There is no migration tool in this project and db.create_all() skips tables that
-    already exist, so an existing deployment would otherwise keep an old 'submission'
-    table and fail on the scheduling columns.
+    Adds the columns and indexes listed above, then backfills the two things that
+    cannot be expressed as a default: money that used to be stored as a float, and
+    the vendor rows that receipts now group by.
     """
-    existing_columns = {row[1] for row in db.session.execute(sa_text("PRAGMA table_info(submission)"))}
-    if not existing_columns:
-        return  # Fresh database; create_all() already built the current schema.
+    columns_by_table = {}
+    for table, columns in PENDING_COLUMNS.items():
+        existing = _table_columns(table)
+        if not existing:
+            continue  # Fresh database; create_all() already built the current schema.
+        columns_by_table[table] = existing
 
-    for column, ddl_type in (('next_attempt_at', 'DATETIME'), ('claimed_at', 'DATETIME')):
-        if column not in existing_columns:
-            print(f"[Migration] Adding submission.{column}")
-            db.session.execute(sa_text(f"ALTER TABLE submission ADD COLUMN {column} {ddl_type}"))
+        for column, ddl in columns:
+            if column not in existing:
+                print(f"[Migration] Adding {table}.{column}")
+                db.session.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
-    db.session.execute(sa_text(
-        "CREATE INDEX IF NOT EXISTS ix_submission_next_attempt_at ON submission (next_attempt_at)"
-    ))
+    for name, table, column in PENDING_INDEXES:
+        db.session.execute(sa_text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})"))
     db.session.commit()
+
+    _backfill_money(columns_by_table.get('receipt', set()))
+    _backfill_vendors()
+
+def _backfill_money(receipt_columns):
+    """
+    Copies the legacy Float amounts into their integer-cent columns.
+
+    The old total_amount/vat_amount columns are left in place - SQLite makes dropping
+    a column awkward and they are harmless once nothing writes them - but they are no
+    longer on the model, so this runs once and the floats are never read again.
+    """
+    for legacy, cents in (('total_amount', 'total_incl_tax_cents'), ('vat_amount', 'total_tax_cents')):
+        if legacy not in receipt_columns:
+            continue
+        result = db.session.execute(sa_text(
+            f"UPDATE receipt SET {cents} = CAST(ROUND({legacy} * 100) AS INTEGER) "
+            f"WHERE {cents} IS NULL AND {legacy} IS NOT NULL"
+        ))
+        if result.rowcount:
+            print(f"[Migration] Converted {result.rowcount} receipt.{legacy} values to cents.")
+    db.session.commit()
+
+def _backfill_vendors():
+    """Attaches existing receipts to a Vendor, keyed on TIN where they carry one."""
+    orphans = Receipt.query.filter(Receipt.vendor_id.is_(None)).all()
+    if not orphans:
+        return
+
+    attached = 0
+    for receipt in orphans:
+        vendor = Vendor.upsert(
+            tin=receipt.vendor_tin, name=receipt.vendor_name,
+            vrn=receipt.vrn, phone=receipt.vendor_phone, tax_office=receipt.tax_office,
+        )
+        if vendor is not None:
+            receipt.vendor = vendor
+            attached += 1
+
+    db.session.commit()
+    print(f"[Migration] Attached {attached} receipt(s) to {Vendor.query.count()} vendor(s).")
 
 # Create database tables and seed with dummy data for demo
 with app.app_context():
@@ -90,40 +176,78 @@ def safe_serialize(obj):
         return obj.isoformat()
     return str(obj)
 
-def clean_amount(value):
+def _as_float(cents):
+    """Display value for the browser. Sums are done on the *_cents fields, not these."""
+    amount = from_cents(cents)
+    return None if amount is None else float(amount)
+
+def receipt_to_dict(receipt):
     """
-    Cleans a string amount (e.g. '10,000.00', 'TZS 5000') into a float.
-    Returns None if conversion fails.
+    The canonical JSON view of a stored receipt.
+
+    Shared by the dashboard bootstrap, the SSE payload and the webhook/sheet exports,
+    so every consumer sees the same shape. Amounts appear twice: as cents, which is
+    what anything adding them up must use, and as a float for display only.
     """
-    if not value:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    
-    # Remove everything except digits and dots
-    # This handles '10,000', 'TZS 1000', etc.
-    # We assume standard decimal notation.
-    try:
-        # Remove commas
-        cleaned = str(value).replace(',', '')
-        # Extract the first valid number found (simple approach)
-        # Or just strip non-numeric chars except dot
-        cleaned = re.sub(r'[^\d.]', '', cleaned)
-        return float(cleaned)
-    except (ValueError, TypeError):
-        return None
+    if receipt is None:
+        return {}
+
+    judgment = json.loads(receipt.raw_llm_response) if receipt.raw_llm_response else {}
+    return {
+        "vendor_name": receipt.vendor_name,
+        "vendor_tin": receipt.vendor_tin,
+        "vendor_key": receipt.vendor.lookup_key if receipt.vendor else None,
+        "vendor_phone": receipt.vendor_phone,
+        "vrn": receipt.vrn,
+        "tax_office": receipt.tax_office,
+        "efd_serial": receipt.efd_serial,
+        "z_number": receipt.z_number,
+        "uin": receipt.uin,
+        "receipt_number": receipt.receipt_number,
+        "receipt_verification_code": receipt.receipt_verification_code,
+        "customer_name": receipt.customer_name,
+        "customer_id_type": receipt.customer_id_type,
+        "customer_id": receipt.customer_id,
+        "receipt_date": receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else None,
+        "receipt_time": receipt.receipt_time.strftime('%H:%M:%S') if receipt.receipt_time else None,
+        "total_amount": _as_float(receipt.total_incl_tax_cents),
+        "total_amount_cents": receipt.total_incl_tax_cents,
+        "total_excl_tax": _as_float(receipt.total_excl_tax_cents),
+        "vat_amount": _as_float(receipt.total_tax_cents),
+        "vat_amount_cents": receipt.total_tax_cents,
+        "discount": _as_float(receipt.discount_cents),
+        "is_cancelled": receipt.is_cancelled,
+        "is_test": receipt.is_test,
+        "is_expense": receipt.is_expense,
+        "category": receipt.category,
+        "extraction_source": receipt.extraction_source,
+        "llm_status": receipt.llm_status,
+        "items": [
+            {
+                "line_number": item.line_number, "description": item.description,
+                "quantity": float(item.quantity) if item.quantity is not None else None,
+                "amount": _as_float(item.amount_cents), "tax_code": item.tax_code,
+            }
+            for item in receipt.items
+        ],
+        "tax_lines": [
+            {
+                "code": line.code,
+                "rate": float(line.rate) if line.rate is not None else None,
+                "amount": _as_float(line.amount_cents),
+            }
+            for line in receipt.tax_lines
+        ],
+        "llm_extracted_description": judgment.get('llm_extracted_description'),
+        "llm_tax_analysis": judgment.get('llm_tax_analysis'),
+        "raw_llm_response": judgment,
+    }
 
 def prepare_submissions_for_frontend(submissions):
     """Converts Submission objects into a JSON-serializable list of dictionaries."""
     output = []
     for sub in submissions:
-        receipt_data = {}
-        if sub.receipt:
-            receipt_data = {
-                "vendor_name": sub.receipt.vendor_name, "total_amount": sub.receipt.total_amount,
-                "vat_amount": sub.receipt.vat_amount, "receipt_date": sub.receipt.receipt_date.strftime('%Y-%m-%d') if sub.receipt.receipt_date else None,
-                "raw_llm_response": json.loads(sub.receipt.raw_llm_response) if sub.receipt.raw_llm_response else {}
-            }
+        receipt_data = receipt_to_dict(sub.receipt)
 
         # Transform photo path for frontend consumption
         frontend_input_data = sub.input_data
@@ -142,46 +266,6 @@ def prepare_submissions_for_frontend(submissions):
         }
         output.append(data)
     return json.dumps(output)
-
-def clean_html_for_llm(html_content: str) -> str:
-    """
-    Parses raw HTML and extracts clean text from the main receipt section.
-    """
-    soup = BeautifulSoup(html_content, 'lxml')
-    
-    # Target the specific <section> tag that contains the receipt details
-    invoice_section = soup.find('section', class_='invoice')
-    
-    if invoice_section:
-        # Get text from the specific section for a cleaner result
-        text = invoice_section.get_text(separator='\n', strip=True)
-    else:
-        # Fallback to the whole body if the specific section isn't found
-        print("Warning: Specific invoice section not found, falling back to full body text.")
-        text = soup.body.get_text(separator='\n', strip=True)
-        
-    # Replace multiple newlines with a single one for cleaner formatting
-    return re.sub(r'\n\s*\n', '\n', text)
-
-
-def fetch_receipt_text_from_tra(submission):
-    """
-    Fetches the receipt from the TRA portal and returns it as clean text for the LLM.
-
-    One request, no retry loop: retries are scheduled on the submission by the caller.
-    Raises a TraError subclass when the portal did not hand us a receipt.
-    """
-    url = submission.input_data
-    print(f"[Fetch] Attempt {(submission.retry_count or 0) + 1} for {url}")
-
-    raw_html = fetch_receipt_html(url)
-    print(f"[FetchSuccess] Successfully retrieved HTML (length: {len(raw_html)}).")
-
-    cleaned_text = clean_html_for_llm(raw_html)
-    print(f"[Clean] HTML cleaned. New length: {len(cleaned_text)}.")
-    print(f"[Clean] Sample of cleaned text being sent to LLM:\n---\n{cleaned_text[:500]}...\n---")
-
-    return cleaned_text
 
 def schedule_retry_or_fail(submission, error):
     """
@@ -247,115 +331,323 @@ def trigger_url_in_background(url_to_trigger):
         print(f"[Trigger Error] Could not trigger task runner internally: {e}")
 
 def calculate_dashboard_stats():
-    """Calculates and returns the dashboard stats dictionary."""
-    now = datetime.utcnow()
+    """
+    Spending per period, measured on the date printed on the receipt.
+
+    Not on processed_at: that is the moment someone got round to scanning it, so a
+    receipt from March scanned in July would land in "today". Expense reporting asks
+    when the money was spent, which is receipt_date.
+
+    Cancelled and test receipts are excluded - neither is money that left the business.
+    """
+    today = datetime.utcnow().date()
     periods = {
-        '24h': now - timedelta(hours=24), '7d': now - timedelta(days=7),
-        '4w': now - timedelta(weeks=4), '1y': now - timedelta(days=365)
+        'today': today,
+        '7d': today - timedelta(days=6),
+        '4w': today - timedelta(days=27),
+        '1y': today - timedelta(days=364),
     }
-    stats = {
-        name: db.session.query(db.func.count(Receipt.id), db.func.sum(Receipt.total_amount))
-                        .filter(Receipt.processed_at >= start_time).one()
-        for name, start_time in periods.items()
+
+    stats = {}
+    for name, start_date in periods.items():
+        count, total_cents = (
+            db.session.query(db.func.count(Receipt.id), db.func.sum(Receipt.total_incl_tax_cents))
+            .filter(
+                Receipt.receipt_date >= start_date,
+                Receipt.receipt_date <= today,
+                Receipt.is_cancelled.is_(False),
+                Receipt.is_test.is_(False),
+            ).one()
+        )
+        stats[name] = {
+            'count': count or 0,
+            'total_cents': total_cents or 0,
+            'total': _as_float(total_cents or 0),
+        }
+    return stats
+
+def _receipt_from_tra_url(submission, config):
+    """
+    Builds a Receipt from the TRA verified page. Returns None if there is nothing to
+    store yet (a retry was scheduled, or this receipt is already in the ledger).
+    """
+    url = submission.input_data
+    print(f"[Fetch] Attempt {(submission.retry_count or 0) + 1} for {url}")
+
+    try:
+        html = fetch_receipt_html(url)
+    except TraError as e:
+        schedule_retry_or_fail(submission, e)
+        return None
+
+    print(f"[FetchSuccess] Retrieved HTML (length: {len(html)}).")
+    parsed = parse_receipt_html(html)
+    flags = ''.join(f' [{flag}]' for flag, on in (('CANCELLED', parsed.is_cancelled), ('TEST', parsed.is_test)) if on)
+    print(
+        f"[Parse] {parsed.verification_code}: {parsed.vendor_name} (TIN {parsed.vendor_tin}), "
+        f"{len(parsed.items)} item(s), total {parsed.total_incl_tax}, tax {parsed.total_tax}{flags}"
+    )
+
+    if _register_duplicate(submission, parsed.verification_code, config):
+        return None
+
+    judgment, llm_status = _judge_receipt(parsed, submission, config)
+
+    receipt = Receipt(
+        vendor=Vendor.upsert(
+            tin=parsed.vendor_tin, name=parsed.vendor_name, vrn=parsed.vrn,
+            phone=parsed.vendor_phone, tax_office=parsed.tax_office,
+        ),
+        vendor_name=parsed.vendor_name, vendor_tin=parsed.vendor_tin,
+        vendor_phone=parsed.vendor_phone, vrn=parsed.vrn, tax_office=parsed.tax_office,
+        receipt_verification_code=parsed.verification_code,
+        receipt_number=parsed.receipt_number, z_number=parsed.z_number,
+        efd_serial=parsed.efd_serial, uin=parsed.uin,
+        customer_name=parsed.customer_name, customer_id_type=parsed.customer_id_type,
+        customer_id=parsed.customer_id, customer_mobile=parsed.customer_mobile,
+        total_incl_tax_cents=to_cents(parsed.total_incl_tax),
+        total_excl_tax_cents=to_cents(parsed.total_excl_tax),
+        total_tax_cents=to_cents(parsed.total_tax),
+        discount_cents=to_cents(parsed.discount),
+        receipt_date=parsed.receipt_date, receipt_time=parsed.receipt_time,
+        is_cancelled=parsed.is_cancelled, is_test=parsed.is_test,
+        extraction_source='tra_html', source_html=html,
+        category=judgment.get('category'), llm_status=llm_status,
+        raw_llm_response=json.dumps(judgment),
+        device_id=submission.device_id, submission_id=submission.id,
+    )
+
+    for item in parsed.items:
+        receipt.items.append(ReceiptItem(
+            line_number=item.line_number, description=item.description,
+            quantity=item.quantity, amount_cents=to_cents(item.amount), tax_code=item.tax_code,
+        ))
+    for line in parsed.tax_lines:
+        receipt.tax_lines.append(ReceiptTaxLine(
+            code=line.code, rate=line.rate, amount_cents=to_cents(line.amount),
+        ))
+
+    return receipt
+
+def _receipt_from_photo(submission, config):
+    """
+    Builds a Receipt from a photograph.
+
+    The only path where the model is still trusted with facts, because there is no
+    verified page behind the image. Recorded as extraction_source='llm_vision' so
+    these receipts stay distinguishable from the exact ones.
+    """
+    if not config.is_configured():
+        raise ValueError("Instance is not configured with LLM provider and API key.")
+
+    data = extract_receipt_details(submission.input_data, True, config)
+
+    verification_code = (data.get('receipt_verification_code') or '').strip() or None
+    if _register_duplicate(submission, verification_code, config):
+        return None
+
+    category = data.get('category')
+    judgment = {
+        'category': category,
+        'llm_extracted_description': data.get('llm_extracted_description'),
+        'llm_tax_analysis': data.get('llm_tax_analysis'),
     }
-    return {key: {'count': value[0] or 0, 'total': value[1] or 0.0} for key, value in stats.items()}
+
+    receipt = Receipt(
+        vendor=Vendor.upsert(
+            tin=data.get('vendor_tin'), name=data.get('vendor_name'),
+            vrn=data.get('vrn'), phone=data.get('vendor_phone'),
+        ),
+        vendor_name=data.get('vendor_name'), vendor_tin=data.get('vendor_tin'),
+        vendor_phone=data.get('vendor_phone'), vrn=data.get('vrn'),
+        receipt_verification_code=verification_code,
+        receipt_number=data.get('receipt_number'), z_number=data.get('z_number'),
+        efd_serial=data.get('efd_serial'), uin=data.get('uin'),
+        customer_name=data.get('customer_name'), customer_id_type=data.get('customer_id_type'),
+        customer_id=data.get('customer_id'),
+        total_incl_tax_cents=to_cents(data.get('total_amount')),
+        total_excl_tax_cents=to_cents(data.get('total_excl_tax')),
+        total_tax_cents=to_cents(data.get('vat_amount')),
+        receipt_date=_parse_iso_date(data.get('receipt_date')),
+        receipt_time=_parse_iso_time(data.get('receipt_time')),
+        is_cancelled=bool(data.get('is_cancelled')),
+        extraction_source='llm_vision', llm_status='ok',
+        category=category, raw_llm_response=json.dumps(judgment),
+        device_id=submission.device_id, submission_id=submission.id,
+    )
+
+    for index, item in enumerate(data.get('items') or [], start=1):
+        if not isinstance(item, dict) or not item.get('description'):
+            continue
+        receipt.items.append(ReceiptItem(
+            line_number=index, description=item.get('description'),
+            quantity=to_decimal(item.get('quantity')),
+            amount_cents=to_cents(item.get('amount')), tax_code=item.get('tax_code'),
+        ))
+
+    return receipt
+
+def _judge_receipt(parsed, submission, config):
+    """
+    Asks the LLM for a category and a deductibility note. Returns (judgment, status).
+
+    Every failure mode here is survivable: the facts are already established, so a
+    missing key, an outage or a cancelled receipt just means the analysis is filled in
+    locally and the receipt is stored regardless.
+    """
+    if not parsed.is_expense:
+        reason = 'cancelled by the vendor' if parsed.is_cancelled else 'printed by an EFD in test mode'
+        return {
+            'category': None,
+            'llm_extracted_description': f'{_describe(parsed)} - not an expense, {reason}.',
+            'llm_tax_analysis': (
+                f'This receipt was {reason}, so it is not deductible and no input VAT '
+                'may be claimed on it. It is excluded from all spending totals.'
+            ),
+        }, 'skipped'
+
+    if not config.is_configured():
+        return _unanalysed(parsed, 'no LLM provider is configured'), 'skipped'
+
+    try:
+        return analyse_receipt(parsed.as_llm_facts(), config, user_note=submission.description), 'ok'
+    except LlmUnavailable as e:
+        print(f"[LLM] Storing submission {submission.id} without analysis: {e}")
+        return _unanalysed(parsed, f'the analysis step was unavailable ({e})'), 'unavailable'
+
+def _unanalysed(parsed, reason):
+    """The judgment stand-in used when the model was not consulted."""
+    return {
+        'category': None,
+        'llm_extracted_description': _describe(parsed),
+        'llm_tax_analysis': f'Not analysed: {reason}. The receipt itself is recorded exactly as TRA verified it.',
+    }
+
+def _describe(parsed):
+    """A description built from the receipt itself, with no model involved."""
+    vendor = parsed.vendor_name or 'an unnamed vendor'
+    if not parsed.items:
+        return f'Purchase from {vendor}'
+
+    first = parsed.items[0].description
+    others = len(parsed.items) - 1
+    return f'{first}{f" and {others} more item(s)" if others else ""} from {vendor}'
+
+def _register_duplicate(submission, verification_code, config):
+    """
+    Marks the submission as a duplicate if this receipt is already stored.
+
+    Runs before the LLM is called: a receipt we already hold is not worth a token.
+    """
+    if not verification_code or not verification_code.strip():
+        return False
+
+    existing = Receipt.query.filter_by(receipt_verification_code=verification_code).first()
+    if not existing:
+        return False
+
+    print(f"[TaskSkip] Duplicate receipt {verification_code}. Original sub ID: {existing.submission_id}")
+    submission.status = 'duplicate'
+    submission.error_message = f"Duplicate of submission ID {existing.submission_id}"
+    db.session.commit()
+
+    payload = {"submission_id": submission.id, "status": "duplicate", "error_message": submission.error_message}
+    dispatch_event('submission.duplicate', payload, config)
+    return True
+
+def _complete_submission(submission, receipt, config):
+    """Stores the receipt, marks the submission done and announces it."""
+    description = json.loads(receipt.raw_llm_response or '{}').get('llm_extracted_description')
+    if description:
+        submission.description = description
+
+    db.session.add(receipt)
+    submission.status = 'completed'
+    db.session.commit()
+
+    payload = {
+        "submission_id": submission.id, "status": submission.status,
+        "processed_at": receipt.processed_at.isoformat(),
+        "data": receipt_to_dict(receipt),
+        "stats": calculate_dashboard_stats(),
+    }
+    dispatch_event('submission.processed', payload, config)
+    print(f"[TaskSuccess] Submission {submission.id} completed.")
+
+def _parse_iso_date(value):
+    try:
+        return date.fromisoformat(value) if value else None
+    except (ValueError, TypeError):
+        print(f"Warning: Could not parse date '{value}'")
+        return None
+
+def _parse_iso_time(value):
+    for fmt in ('%H:%M:%S', '%H:%M'):
+        try:
+            return datetime.strptime(value, fmt).time()
+        except (ValueError, TypeError):
+            continue
+    if value:
+        print(f"Warning: Could not parse time '{value}'")
+    return None
 
 def process_submission(submission):
     """
-    Processes a single submission with deduplication logic and updates description from LLM.
+    Turns one submission into a stored Receipt.
+
+    A receipt submitted as a TRA URL has its facts *parsed* from the verified page,
+    never inferred: see utils/tra_parser. The LLM is asked only to categorise the
+    purchase and comment on it, so an LLM outage costs the analysis and nothing else.
+    Photographed receipts have no machine-readable source and still go through vision.
     """
     print(f"[TaskStart] Processing submission {submission.id} (Type: {submission.input_type})")
     try:
         config = get_instance_config()
-        if not config or not config.is_configured():
-            raise ValueError("Instance is not configured with LLM provider and API key.")
+        if not config:
+            raise ValueError("Instance has not been set up yet.")
 
-        content_for_llm, is_image = (None, False)
         if submission.input_type == 'url':
-            try:
-                content_for_llm = fetch_receipt_text_from_tra(submission)
-            except TraError as e:
-                schedule_retry_or_fail(submission, e)
-                return
+            receipt = _receipt_from_tra_url(submission, config)
         elif submission.input_type == 'photo':
-            content_for_llm = submission.input_data
-            is_image = True
-        
-        if content_for_llm is None: return
+            receipt = _receipt_from_photo(submission, config)
+        else:
+            raise ValueError(f"Unsupported submission type '{submission.input_type}'.")
 
-        # --- Call LLM Processor ---
-        extracted_data = extract_receipt_details(content_for_llm, is_image, config)
-        
-        # --- Deduplication Logic ---
-        verification_code = extracted_data.get('receipt_verification_code')
-        # Only check for duplicates if the code is a meaningful, non-empty string.
-        if verification_code and verification_code.strip():
-            existing_receipt = Receipt.query.filter_by(receipt_verification_code=verification_code).first()
-            if existing_receipt:
-                print(f"[TaskSkip] Duplicate receipt found with code {verification_code}. Original sub ID: {existing_receipt.submission_id}")
-                submission.status = 'duplicate'
-                submission.error_message = f"Duplicate of submission ID {existing_receipt.submission_id}"
-                db.session.commit()
-                # Dispatch duplicate event and exit cleanly
-                payload = {"submission_id": submission.id, "status": "duplicate", "error_message": submission.error_message}
-                dispatch_event('submission.duplicate', payload, config)
-                return
-        
-       # --- Update Description, Parse Date, etc. ---
-        llm_desc = extracted_data.get('llm_extracted_description')
-        if llm_desc:
-            submission.description = llm_desc
-        
-        receipt_date_obj = None
-        if extracted_data.get('receipt_date'):
-            try:
-                receipt_date_obj = date.fromisoformat(extracted_data['receipt_date'])
-            except (ValueError, TypeError):
-                print(f"Warning: Could not parse date '{extracted_data.get('receipt_date')}'")
+        # The submission was a duplicate, or a retry has been scheduled. Either way it
+        # has already been committed and announced.
+        if receipt is None:
+            return
 
-        # Convert empty verification code string to None to avoid UNIQUE constraint violation on ""
-        db_verification_code = verification_code if (verification_code and verification_code.strip()) else None
+        _complete_submission(submission, receipt, config)
 
-        new_receipt = Receipt(
-            vendor_name=extracted_data.get('vendor_name'), vendor_tin=extracted_data.get('vendor_tin'),
-            vendor_phone=extracted_data.get('vendor_phone'), vrn=extracted_data.get('vrn'),
-            receipt_verification_code=db_verification_code, receipt_number=extracted_data.get('receipt_number'),
-            uin=extracted_data.get('uin'), customer_name=extracted_data.get('customer_name'),
-            customer_id_type=extracted_data.get('customer_id_type'), customer_id=extracted_data.get('customer_id'),
-            total_amount=clean_amount(extracted_data.get('total_amount')), vat_amount=clean_amount(extracted_data.get('vat_amount')),
-            receipt_date=receipt_date_obj, raw_llm_response=json.dumps(extracted_data),
-            device_id=submission.device_id, submission_id=submission.id
-        )
-        db.session.add(new_receipt)
-        submission.status = 'completed'
-        db.session.commit()
-        # --- Dispatch COMPLETED event ---
-        updated_stats = calculate_dashboard_stats()
-        payload = {
-            "submission_id": submission.id, "status": submission.status, 
-            "processed_at": new_receipt.processed_at.isoformat(), "data": extracted_data,
-            "stats": updated_stats
-        }
-        dispatch_event('submission.processed', payload, config)
-
-        print(f"[TaskSuccess] Submission {submission.id} completed.")
+    except TraParseError as e:
+        # TRA served a page we could not read. Retrying gets the same HTML, and the
+        # alternative - handing it to the LLM to guess the numbers from - is exactly
+        # what this pipeline exists to avoid. Fail it and fix the parser.
+        print(f"[ParseError] Submission {submission.id}: {e}")
+        _fail_submission(submission.id, f"Could not parse the TRA receipt page: {e}")
 
     except Exception as e:
         # --- FIX #2: Resilient Error Handling ---
         # This block ensures a single failed job doesn't kill the whole queue runner.
         print(f"[TaskError] Unhandled exception in process_submission {submission.id}: {e}")
-        db.session.rollback()  # IMPORTANT: Rollback the failed transaction to clean the session
-        
-        # We need to re-fetch the submission object as the session was rolled back
-        submission_to_update = Submission.query.get(submission.id)
-        if submission_to_update:
-            submission_to_update.status = 'failed'
-            submission_to_update.error_message = str(e)
-            db.session.commit()
-            
-            # Dispatch failed event
-            payload = {"submission_id": submission.id, "status": "failed", "error_message": submission_to_update.error_message}
-            dispatch_event('submission.failed', payload, get_instance_config())
+        _fail_submission(submission.id, str(e))
+
+def _fail_submission(submission_id, message):
+    """Rolls back, marks the submission failed and announces it."""
+    db.session.rollback()  # IMPORTANT: clean the session before touching it again.
+
+    # The session was rolled back, so the submission has to be re-fetched.
+    submission = Submission.query.get(submission_id)
+    if not submission:
+        return
+
+    submission.status = 'failed'
+    submission.error_message = message
+    db.session.commit()
+
+    payload = {"submission_id": submission_id, "status": "failed", "error_message": message}
+    dispatch_event('submission.failed', payload, get_instance_config())
 
 # --- WEB ROUTES & AUTH ---
 
@@ -537,126 +829,6 @@ def add_device():
     db.session.commit()
     flash(f'Device "{device_name}" added successfully.', 'success')
     return redirect(url_for('configure_instance'))
-
-@app.route('/admin/receipt/<int:submission_id>/reanalyze', methods=['POST'])
-@login_required
-def reanalyze_receipt(submission_id):
-    """
-    Re-analyzes a receipt by re-fetching from TRA (if URL) or re-using photo,
-    then sending to LLM again and updating the receipt data.
-    """
-    submission = Submission.query.get(submission_id)
-    if not submission:
-        return jsonify({'error': 'Submission not found'}), 404
-    
-    try:
-        config = get_instance_config()
-        if not config or not config.is_configured():
-            return jsonify({'error': 'Instance is not configured with LLM provider and API key'}), 500
-
-        # Fetch content based on input type
-        content_for_llm, is_image = (None, False)
-        if submission.input_type == 'url':
-            print(f"[Reanalyze] Re-fetching URL for submission {submission_id}")
-            content_for_llm = fetch_receipt_html_from_tra(submission)
-            if content_for_llm is None:
-                return jsonify({'error': 'Could not fetch receipt from TRA. It may be temporarily unavailable.'}), 500
-        elif submission.input_type == 'photo':
-            print(f"[Reanalyze] Re-using photo for submission {submission_id}")
-            content_for_llm = submission.input_data
-            is_image = True
-        
-        # Call LLM to extract fresh data
-        print(f"[Reanalyze] Sending to LLM for analysis...")
-        extracted_data = extract_receipt_details(content_for_llm, is_image, config)
-        
-        # Update submission description
-        llm_desc = extracted_data.get('llm_extracted_description')
-        if llm_desc:
-            submission.description = llm_desc
-        
-        # Parse receipt date
-        receipt_date_obj = None
-        if extracted_data.get('receipt_date'):
-            try:
-                receipt_date_obj = date.fromisoformat(extracted_data['receipt_date'])
-            except (ValueError, TypeError):
-                print(f"Warning: Could not parse date '{extracted_data.get('receipt_date')}'")
-        
-        # Convert empty verification code string to None
-        verification_code = extracted_data.get('receipt_verification_code')
-        db_verification_code = verification_code if (verification_code and verification_code.strip()) else None
-        
-        # Update or create receipt
-        existing_receipt = Receipt.query.filter_by(submission_id=submission_id).first()
-        
-        if existing_receipt:
-            # Update existing receipt
-            print(f"[Reanalyze] Updating existing receipt for submission {submission_id}")
-            existing_receipt.vendor_name = extracted_data.get('vendor_name')
-            existing_receipt.vendor_tin = extracted_data.get('vendor_tin')
-            existing_receipt.vendor_phone = extracted_data.get('vendor_phone')
-            existing_receipt.vrn = extracted_data.get('vrn')
-            existing_receipt.receipt_verification_code = db_verification_code
-            existing_receipt.receipt_number = extracted_data.get('receipt_number')
-            existing_receipt.uin = extracted_data.get('uin')
-            existing_receipt.customer_name = extracted_data.get('customer_name')
-            existing_receipt.customer_id_type = extracted_data.get('customer_id_type')
-            existing_receipt.customer_id = extracted_data.get('customer_id')
-            existing_receipt.total_amount = clean_amount(extracted_data.get('total_amount'))
-            existing_receipt.vat_amount = clean_amount(extracted_data.get('vat_amount'))
-            existing_receipt.receipt_date = receipt_date_obj
-            existing_receipt.raw_llm_response = json.dumps(extracted_data)
-            existing_receipt.processed_at = datetime.utcnow()
-        else:
-            # Create new receipt
-            print(f"[Reanalyze] Creating new receipt for submission {submission_id}")
-            new_receipt = Receipt(
-                vendor_name=extracted_data.get('vendor_name'),
-                vendor_tin=extracted_data.get('vendor_tin'),
-                vendor_phone=extracted_data.get('vendor_phone'),
-                vrn=extracted_data.get('vrn'),
-                receipt_verification_code=db_verification_code,
-                receipt_number=extracted_data.get('receipt_number'),
-                uin=extracted_data.get('uin'),
-                customer_name=extracted_data.get('customer_name'),
-                customer_id_type=extracted_data.get('customer_id_type'),
-                customer_id=extracted_data.get('customer_id'),
-                total_amount=clean_amount(extracted_data.get('total_amount')),
-                vat_amount=clean_amount(extracted_data.get('vat_amount')),
-                receipt_date=receipt_date_obj,
-                raw_llm_response=json.dumps(extracted_data),
-                device_id=submission.device_id,
-                submission_id=submission.id
-            )
-            db.session.add(new_receipt)
-        
-        # Update submission status
-        submission.status = 'completed'
-        submission.error_message = None
-        db.session.commit()
-        
-        # Dispatch event
-        updated_stats = calculate_dashboard_stats()
-        payload = {
-            "submission_id": submission.id,
-            "status": submission.status,
-            "processed_at": datetime.utcnow().isoformat(),
-            "data": extracted_data,
-            "stats": updated_stats
-        }
-        dispatch_event('submission.processed', payload, config)
-        
-        print(f"[Reanalyze] Successfully re-analyzed submission {submission_id}")
-        return jsonify({
-            'message': 'Receipt re-analyzed successfully',
-            'data': extracted_data
-        }), 200
-        
-    except Exception as e:
-        print(f"[Reanalyze Error] Failed to re-analyze submission {submission_id}: {e}")
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
@@ -857,7 +1029,7 @@ def export_csv():
         return redirect(url_for('index'))
     
     # --- MODIFIED: Added .options() for eager loading of the 'submission' relationship ---
-    query = query.options(joinedload(Receipt.submission))
+    query = query.options(joinedload(Receipt.submission), joinedload(Receipt.items), joinedload(Receipt.tax_lines))
 
     receipts = query.order_by(Receipt.receipt_date.desc()).all()
     
@@ -875,8 +1047,11 @@ def export_csv():
         writer = csv.writer(data)
         header = [
             'ID', 'Status', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
-            'Receipt No', 'Verification Code', 'Receipt Date', 'Total Amount', 'VAT Amount', 
-            'LLM Description', 'Tax Analysis', 'Customer Name', 'Customer ID'
+            'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
+            'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
+            'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
+            'Category', 'Source', 'Items', 'LLM Description', 'Tax Analysis',
+            'Customer Name', 'Customer ID',
         ]
         writer.writerow(header)
         yield data.getvalue()
@@ -886,11 +1061,22 @@ def export_csv():
         # This will now work because receipt.submission was pre-loaded.
         for receipt in receipts:
             raw_response = json.loads(receipt.raw_llm_response or '{}')
+            by_code = {line.code: format_cents(line.amount_cents) for line in receipt.tax_lines}
+            items = '; '.join(
+                f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
+                f"{f' [{item.tax_code}]' if item.tax_code else ''}"
+                for item in receipt.items
+            )
             row = [
                 receipt.submission_id, 'completed', receipt.submission.received_at.strftime('%Y-%m-%d %H:%M:%S'),
                 receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
-                receipt.vrn, receipt.receipt_number, receipt.receipt_verification_code, receipt.receipt_date,
-                receipt.total_amount, receipt.vat_amount, receipt.submission.description,
+                receipt.vrn, receipt.tax_office, receipt.efd_serial, receipt.receipt_number,
+                receipt.z_number, receipt.receipt_verification_code, receipt.receipt_date,
+                receipt.receipt_time, format_cents(receipt.total_excl_tax_cents),
+                format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
+                format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
+                'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
+                receipt.category, receipt.extraction_source, items, receipt.submission.description,
                 raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id
             ]
             writer.writerow(row)

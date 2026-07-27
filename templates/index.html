@@ -2,8 +2,8 @@
 
 {% block content %}
 <script>
-    const submissionsData = {{ submissions_json| safe }};
-    const initialStats = {{ stats| tojson | safe }};
+    const submissionsData = {{ submissions_json|safe }};
+    const initialStats = {{ stats|tojson|safe }};
     const initialFilters = {
         search: "{{ search_query }}",
         startDate: "{{ start_date }}",
@@ -12,624 +12,497 @@
 </script>
 
 {% if not submissions_json or submissions_json == '[]' %}
-{# --- EMPTY STATE (Unchanged) --- #}
-<div class="text-center py-12 px-4 sm:px-6 lg:px-8">
-    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-        stroke="currentColor" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round"
-            d="M3 13.125C3 12.504 3.504 12 4.125 12h15.75c.621 0 1.125.504 1.125 1.125v6.75C21 20.496 20.496 21 19.875 21H4.125A1.125 1.125 0 013 19.875v-6.75zM3 8.625c0-.621.504-1.125 1.125-1.125h15.75c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H4.125A1.125 1.125 0 013 10.875V8.625zM12 3c-1.105 0-2 .895-2 2s.895 2 2 2 2-.895 2-2-.895-2-2-2z">
-        </path>
-    </svg>
-    <h3 class="mt-2 text-lg font-semibold text-gray-900">No receipts submitted yet</h3>
-    <p class="mt-1 text-sm text-gray-500">Get started by sending receipts to your secure endpoint.</p>
-</div>
+    {# --- EMPTY STATE (Unchanged) --- #}
+    <div class="text-center py-12 px-4 sm:px-6 lg:px-8">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h15.75c.621 0 1.125.504 1.125 1.125v6.75C21 20.496 20.496 21 19.875 21H4.125A1.125 1.125 0 013 19.875v-6.75zM3 8.625c0-.621.504-1.125 1.125-1.125h15.75c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H4.125A1.125 1.125 0 013 10.875V8.625zM12 3c-1.105 0-2 .895-2 2s.895 2 2 2 2-.895 2-2-.895-2-2-2z"></path></svg>
+        <h3 class="mt-2 text-lg font-semibold text-gray-900">No receipts submitted yet</h3>
+        <p class="mt-1 text-sm text-gray-500">Get started by sending receipts to your secure endpoint.</p>
+    </div>
 {% else %}
-<div x-data="dashboard()" x-init="init()">
+    <div x-data="dashboard()" x-init="init()">
 
-    <!-- In-App Notification Sliders (Unchanged) -->
-    <div aria-live="assertive" class="pointer-events-none fixed inset-0 flex items-start px-4 py-6 sm:p-6 z-50">
-        <div class="flex w-full flex-col items-start space-y-4">
-            <template x-for="notification in notifications" :key="notification.id">
-                <div x-show="notification.show" x-transition:enter="transform ease-out duration-300 transition"
-                    x-transition:enter-start="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
-                    x-transition:enter-end="translate-y-0 opacity-100 sm:translate-x-0"
-                    x-transition:leave="transition ease-in duration-100" x-transition:leave-start="opacity-100"
-                    x-transition:leave-end="opacity-0"
-                    class="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg bg-white shadow-lg ring-1 ring-black ring-opacity-5">
-                    <div class="p-4">
-                        <div class="flex items-start">
-                            <div class="flex-shrink-0" x-html="notification.icon"></div>
-                            <div class="ml-3 w-0 flex-1 pt-0.5">
-                                <p class="text-sm font-medium text-gray-900" x-text="notification.title"></p>
-                                <p class="mt-1 text-sm text-gray-500" x-text="notification.message"></p>
+        <!-- In-App Notification Sliders (Unchanged) -->
+        <div aria-live="assertive" class="pointer-events-none fixed inset-0 flex items-start px-4 py-6 sm:p-6 z-50">
+            <div class="flex w-full flex-col items-start space-y-4">
+                <template x-for="notification in notifications" :key="notification.id">
+                    <div x-show="notification.show"
+                         x-transition:enter="transform ease-out duration-300 transition"
+                         x-transition:enter-start="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
+                         x-transition:enter-end="translate-y-0 opacity-100 sm:translate-x-0"
+                         x-transition:leave="transition ease-in duration-100"
+                         x-transition:leave-start="opacity-100"
+                         x-transition:leave-end="opacity-0"
+                         class="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg bg-white shadow-lg ring-1 ring-black ring-opacity-5">
+                        <div class="p-4">
+                            <div class="flex items-start">
+                                <div class="flex-shrink-0" x-html="notification.icon"></div>
+                                <div class="ml-3 w-0 flex-1 pt-0.5">
+                                    <p class="text-sm font-medium text-gray-900" x-text="notification.title"></p>
+                                    <p class="mt-1 text-sm text-gray-500" x-text="notification.message"></p>
+                                </div>
+                                <div class="ml-4 flex flex-shrink-0">
+                                    <button @click="notification.show = false" type="button" class="inline-flex rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                                        <span class="sr-only">Close</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" /></svg>
+                                    </button>
+                                </div>
                             </div>
-                            <div class="ml-4 flex flex-shrink-0">
-                                <button @click="notification.show = false" type="button"
-                                    class="inline-flex rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
-                                    <span class="sr-only">Close</span>
-                                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                        <path
-                                            d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
-                                    </svg>
-                                </button>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- Header (Unchanged) -->
+        <div class="md:flex md:items-center md:justify-between">
+            <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
+            <div class="mt-4 flex flex-shrink-0 md:ml-4 md:mt-0">
+                 <button @click="enableBrowserNotifications()" type="button" class="inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm" :class="browserNotificationsEnabled ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20' : 'bg-white text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50'">
+                    <svg x-show="!browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor"><path d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-3a1 1 0 00-1-1H9a1 1 0 00-1 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-6H3a1 1 0 01-.707-1.707l7-7z" /></svg>
+                    <svg x-show="browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>
+                    <span x-text="browserNotificationsEnabled ? 'Notifications On' : 'Enable Notifications'"></span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Stats Cards: spending by the date on the receipt, not the date we scanned it. -->
+        <p class="mt-6 text-sm text-gray-500">Spending by receipt date. Cancelled and test receipts are excluded.</p>
+        <div class="mt-2 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            <template x-for="card in statCards" :key="card.name">
+                 <div :class="card.bg" class="relative overflow-hidden rounded-lg shadow">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0" x-html="card.icon"></div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-white truncate" x-text="card.name"></dt>
+                                    <dd>
+                                        <div class="text-lg font-medium text-white" x-text="`${card.count} receipts`"></div>
+                                        <div class="text-sm font-medium text-gray-200" x-text="`Total: ${card.total} TZS`"></div>
+                                    </dd>
+                                </dl>
                             </div>
                         </div>
                     </div>
                 </div>
             </template>
         </div>
-    </div>
-
-    <!-- Header (Unchanged) -->
-    <div class="md:flex md:items-center md:justify-between">
-        <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
-        <div class="mt-4 flex flex-shrink-0 md:ml-4 md:mt-0">
-            <button @click="enableBrowserNotifications()" type="button"
-                class="inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm"
-                :class="browserNotificationsEnabled ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20' : 'bg-white text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50'">
-                <svg x-show="!browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-gray-400"
-                    viewBox="0 0 20 20" fill="currentColor">
-                    <path
-                        d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-3a1 1 0 00-1-1H9a1 1 0 00-1 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-6H3a1 1 0 01-.707-1.707l7-7z" />
-                </svg>
-                <svg x-show="browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-green-600"
-                    viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd"
-                        d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                        clip-rule="evenodd" />
-                </svg>
-                <span x-text="browserNotificationsEnabled ? 'Notifications On' : 'Enable Notifications'"></span>
-            </button>
-        </div>
-    </div>
-
-    <!-- Stats Cards (Unchanged) -->
-    <div class="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        <template x-for="card in statCards" :key="card.name">
-            <div :class="card.bg" class="relative overflow-hidden rounded-lg shadow">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0" x-html="card.icon"></div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-white truncate" x-text="card.name"></dt>
-                                <dd>
-                                    <div class="text-lg font-medium text-white" x-text="`${card.count} receipts`"></div>
-                                    <div class="text-sm font-medium text-gray-200" x-text="`Total: ${card.total} TZS`">
-                                    </div>
-                                </dd>
-                            </dl>
-                        </div>
+        
+        <!-- Controls & Table Section -->
+        <div class="mt-8">
+             <div class="sm:flex sm:items-center sm:justify-between">
+                <div class="border-b border-gray-200">
+                    <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                        <button @click="changeTab('processed')" :class="getTabClass('processed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Processed</button>
+                        <button @click="changeTab('with_vat')" :class="getTabClass('with_vat')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center">With VAT <svg xmlns="http://www.w3.org/2000/svg" class="ml-1.5 h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg></button>
+                        <button @click="changeTab('queued')" :class="getTabClass('queued')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Queued</button>
+                        <button @click="changeTab('failed')" :class="getTabClass('failed')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Failed</button>
+                        <button @click="changeTab('duplicates')" :class="getTabClass('duplicates')" class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Duplicates</button>
+                    </nav>
+                </div>
+                 <div class="mt-3 sm:ml-4 sm:mt-0 flex items-center space-x-4">
+                    <button @click="toggleAdvanced()" type="button" class="inline-flex items-center gap-x-1.5 rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                        Filters & Insights
+                        <svg class="h-5 w-5 text-gray-400 transition-transform" :class="{'rotate-180': showAdvanced}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" /></svg>
+                    </button>
+                    <div class="relative rounded-md shadow-sm">
+                        <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clip-rule="evenodd" /></svg></div>
+                        <input type="search" x-model.debounce.300ms="filters.search" id="search_receipts" class="block w-full rounded-md border-0 py-1.5 pl-10 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" placeholder="Search receipts...">
                     </div>
                 </div>
             </div>
-        </template>
-    </div>
 
-    <!-- Controls & Table Section -->
-    <div class="mt-8">
-        <div class="sm:flex sm:items-center sm:justify-between">
-            <div class="border-b border-gray-200">
-                <nav class="-mb-px flex space-x-8" aria-label="Tabs">
-                    <button @click="changeTab('processed')" :class="getTabClass('processed')"
-                        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Processed</button>
-                    <button @click="changeTab('with_vat')" :class="getTabClass('with_vat')"
-                        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center">With VAT
-                        <svg xmlns="http://www.w3.org/2000/svg" class="ml-1.5 h-4 w-4 text-teal-600" viewBox="0 0 20 20"
-                            fill="currentColor">
-                            <path fill-rule="evenodd"
-                                d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                                clip-rule="evenodd" />
-                        </svg></button>
-                    <button @click="changeTab('queued')" :class="getTabClass('queued')"
-                        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Queued</button>
-                    <button @click="changeTab('failed')" :class="getTabClass('failed')"
-                        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Failed</button>
-                    <button @click="changeTab('duplicates')" :class="getTabClass('duplicates')"
-                        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">Duplicates</button>
-                </nav>
-            </div>
-            <div class="mt-3 sm:ml-4 sm:mt-0 flex items-center space-x-4">
-                <button @click="toggleAdvanced()" type="button"
-                    class="inline-flex items-center gap-x-1.5 rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
-                    Filters & Insights
-                    <svg class="h-5 w-5 text-gray-400 transition-transform" :class="{'rotate-180': showAdvanced}"
-                        xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd"
-                            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                            clip-rule="evenodd" />
-                    </svg>
-                </button>
-                <div class="relative rounded-md shadow-sm">
-                    <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3"><svg
-                            class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                            fill="currentColor" aria-hidden="true">
-                            <path fill-rule="evenodd"
-                                d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z"
-                                clip-rule="evenodd" />
-                        </svg></div>
-                    <input type="search" x-model.debounce.300ms="filters.search" id="search_receipts"
-                        class="block w-full rounded-md border-0 py-1.5 pl-10 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
-                        placeholder="Search receipts...">
-                </div>
-            </div>
-        </div>
-
-        <!-- IMPROVED & COLLAPSIBLE: Filters, Actions, and Insights Panel -->
-        <div x-show="showAdvanced" x-collapse>
-            <div class="mt-4 rounded-lg bg-gray-50/75 border p-5">
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-x-8 gap-y-6">
-                    <div>
-                        <h3 class="text-base font-semibold leading-6 text-gray-900">Filter by Date</h3>
-                        <div class="mt-4 space-y-4">
-                            <div>
-                                <label for="start_date" class="block text-sm font-medium leading-6 text-gray-900">Start
-                                    Date</label>
-                                <input type="date" x-model="filters.startDate" id="start_date"
-                                    class="mt-1 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
-                            </div>
-                            <div>
-                                <label for="end_date" class="block text-sm font-medium leading-6 text-gray-900">End
-                                    Date</label>
-                                <input type="date" x-model="filters.endDate" id="end_date"
-                                    class="mt-1 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
-                            </div>
-                        </div>
-                    </div>
-                    <div>
-                        <h3 class="text-base font-semibold leading-6 text-gray-900">Actions</h3>
-                        <div class="mt-4 flex items-start space-x-3">
-                            <button @click="resetFilters()" type="button"
-                                class="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Clear
-                                Filters</button>
-                            <a :href="csvDownloadUrl"
-                                class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Download
-                                CSV</a>
-                        </div>
-                    </div>
-                    <div>
-                        <h3 class="text-base font-semibold leading-6 text-gray-900">Filtered Insights</h3>
-                        <dl class="mt-4 space-y-4">
-                            <div class="flex items-center justify-between">
-                                <dt class="text-sm text-gray-600">Total Amount</dt>
-                                <dd class="text-sm font-medium text-gray-900"
-                                    x-text="formatCurrency(insights.totalAmount)"></dd>
-                            </div>
-                            <div class="flex items-center justify-between pb-4 border-b border-gray-200">
-                                <dt class="text-sm text-gray-600">Total VAT</dt>
-                                <dd class="text-sm font-medium text-gray-900"
-                                    x-text="formatCurrency(insights.totalVat)"></dd>
-                            </div>
-                            <div class="pt-1">
-                                <dt class="text-sm font-medium text-gray-900">Top Vendors</dt>
-                                <dd class="mt-2 text-sm text-gray-700">
-                                    <ul class="space-y-2">
-                                        <template x-if="insights.topVendors.length === 0">
-                                            <li class="italic text-gray-500">None</li>
-                                        </template>
-                                        <template x-for="vendor in insights.topVendors" :key="vendor.name">
-                                            <li class="flex justify-between items-center">
-                                                <span class="truncate pr-4" x-text="vendor.name"></span>
-                                                <span
-                                                    class="font-mono bg-gray-200 rounded-md px-2 py-0.5 text-xs font-semibold text-gray-700"
-                                                    x-text="vendor.count"></span>
-                                            </li>
-                                        </template>
-                                    </ul>
-                                </dd>
-                            </div>
-                        </dl>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Table View (Unchanged) -->
-    <div class="mt-8 flow-root">
-        <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-            <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
-                <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
-                    <table class="min-w-full divide-y divide-gray-300">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th scope="col"
-                                    class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">
-                                    <button @click="sortBy('status')" class="group inline-flex">Status <span
-                                            x-html="getSortIcon('status')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('vendor_name')" class="group inline-flex">Vendor /
-                                        Description <span x-html="getSortIcon('vendor_name')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('total_amount')" class="group inline-flex">Amount <span
-                                            x-html="getSortIcon('total_amount')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                                    <button @click="sortBy('receipt_date')" class="group inline-flex">Date <span
-                                            x-html="getSortIcon('receipt_date')"></span></button>
-                                </th>
-                                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Tax
-                                    Analysis</th>
-                                <th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span
-                                        class="sr-only">View</span></th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-gray-200 bg-white">
-                            <template x-for="sub in view" :key="sub.id">
-                                <tr>
-                                    <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm sm:pl-6"><span
-                                            x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span></td>
-                                    <td class="px-3 py-4 text-sm text-gray-900">
-                                        <div class="font-medium" x-text="sub.receipt.vendor_name || 'Processing...'">
-                                        </div>
-                                        <div class="text-gray-500" x-text="sub.description || 'Awaiting processing'">
-                                        </div>
-                                    </td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                                        <div class="flex items-center">
-                                            <span
-                                                x-text="(sub.receipt.total_amount !== null ? (sub.receipt.total_amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' TZS' : '---')"></span>
-                                            <span x-show="sub.receipt && sub.receipt.vat_amount > 0"
-                                                class="ml-2 inline-flex items-center rounded-md bg-teal-50 px-2 py-1 text-xs font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20">VAT</span>
-                                        </div>
-                                    </td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500"
-                                        x-text="sub.receipt.receipt_date || '---'"></td>
-                                    <td class="px-3 py-4 text-sm text-gray-500">
-                                        <div class="flex items-start">
-                                            <svg x-show="sub.receipt && sub.receipt.raw_llm_response"
-                                                class="h-5 w-5 text-blue-500 mr-2 flex-shrink-0"
-                                                xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                                                fill="currentColor">
-                                                <path fill-rule="evenodd"
-                                                    d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                                    clip-rule="evenodd" />
-                                            </svg>
-                                            <span x-text="getTaxAnalysisText(sub)"></span>
-                                        </div>
-                                    </td>
-                                    <td
-                                        class="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6">
-                                        <button @click="openModal(sub.id)"
-                                            class="text-indigo-600 hover:text-indigo-900">View</button>
-                                    </td>
-                                </tr>
-                            </template>
-                            <tr x-show="view.length === 0">
-                                <td colspan="6" class="text-center py-12 text-sm text-gray-500">No submissions match
-                                    your criteria.</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Details Modal (Unchanged) -->
-    <div x-show="modal.open" class="relative z-10" style="display: none;">
-        <div @click="closeModal()" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm">
-        </div>
-        <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
-            <div @keydown.escape.window="closeModal()"
-                class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
-                <div @click.outside="closeModal()"
-                    class="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-4xl sm:p-6">
-                    <h3 class="text-lg font-semibold leading-6 text-gray-900" id="modal-title">Submission Details (<span
-                            x-text="`ID: ${modal.data.id}`"></span>)</h3>
-                    <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                        <div class="space-y-4">
-                            <h4 class="text-md font-medium text-gray-700">Input Data</h4>
-                            <template x-if="modal.data.input_type === 'photo'">
-                                <div class="p-2 border rounded-lg"><img
-                                        :src="getPublicUploadPath(modal.data.input_data)" alt="Receipt Photo"
-                                        class="w-full rounded-md"></div>
-                            </template>
-                            <template x-if="modal.data.input_type === 'url'">
-                                <div
-                                    class="w-full h-24 border rounded-md bg-gray-50 flex flex-col items-center justify-center p-4 text-center">
-                                    <p class="text-sm text-gray-600">Live preview blocked by source.</p><a
-                                        :href="modal.data.input_data" target="_blank"
-                                        class="mt-2 text-sm font-medium text-indigo-600 hover:underline">Open Receipt in
-                                        New Tab <svg xmlns="http://www.w3.org/2000/svg" class="inline h-4 w-4"
-                                            fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14">
-                                            </path>
-                                        </svg></a>
+            <!-- IMPROVED & COLLAPSIBLE: Filters, Actions, and Insights Panel -->
+            <div x-show="showAdvanced" x-collapse>
+                <div class="mt-4 rounded-lg bg-gray-50/75 border p-5">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-x-8 gap-y-6">
+                        <div>
+                            <h3 class="text-base font-semibold leading-6 text-gray-900">Filter by Date</h3>
+                            <div class="mt-4 space-y-4">
+                                <div>
+                                    <label for="start_date" class="block text-sm font-medium leading-6 text-gray-900">Start Date</label>
+                                    <input type="date" x-model="filters.startDate" id="start_date" class="mt-1 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
                                 </div>
-                            </template>
-                            <dl class="divide-y divide-gray-100">
-                                <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4">
-                                    <dt class="text-sm font-medium leading-6 text-gray-900">Submitted At</dt>
-                                    <dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0"
-                                        x-text="modal.data.received_at + ' UTC'"></dd>
+                                <div>
+                                    <label for="end_date" class="block text-sm font-medium leading-6 text-gray-900">End Date</label>
+                                    <input type="date" x-model="filters.endDate" id="end_date" class="mt-1 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
                                 </div>
-                                <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4">
-                                    <dt class="text-sm font-medium leading-6 text-gray-900">Submitted By</dt>
-                                    <dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0"
-                                        x-text="modal.data.device_name"></dd>
-                                </div>
-                                <template x-if="modal.data.location">
-                                    <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4">
-                                        <dt class="text-sm font-medium leading-6 text-gray-900">Location</dt>
-                                        <dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0"><a
-                                                :href="formatLocationUrl(modal.data.location)" target="_blank"
-                                                class="text-indigo-600 hover:underline"
-                                                x-text="modal.data.location"></a></dd>
-                                    </div>
-                                </template>
-                            </dl>
+                            </div>
                         </div>
                         <div>
-                            <h4 class="text-md font-medium text-gray-700">LLM Output / Error</h4>
-                            <div class="mt-2 h-96 overflow-y-auto rounded-md bg-gray-50 border p-3 text-sm space-y-3">
-                                <template x-if="modal.data.receipt?.raw_llm_response">
-                                    <div class="prose prose-sm max-w-none"
-                                        x-html="renderLlmOutput(modal.data.receipt.raw_llm_response)"></div>
-                                </template>
-                                <template x-if="!modal.data.receipt?.raw_llm_response && modal.data.error_message">
-                                    <div class="text-red-700 whitespace-pre-wrap" x-text="modal.data.error_message">
-                                    </div>
-                                </template>
+                            <h3 class="text-base font-semibold leading-6 text-gray-900">Actions</h3>
+                            <div class="mt-4 flex items-start space-x-3">
+                                <button @click="resetFilters()" type="button" class="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Clear Filters</button>
+                                <a :href="csvDownloadUrl" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Download CSV</a>
                             </div>
                         </div>
-                    </div>
-                    <div class="mt-5 sm:mt-6 sm:grid sm:grid-flow-row-dense sm:grid-cols-2 sm:gap-3">
-                        <button @click="reanalyzeReceipt(modal.data.id)" :disabled="modal.reanalyzing" type="button"
-                            class="inline-flex w-full justify-center items-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm sm:col-start-1"
-                            :class="modal.reanalyzing ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-yellow-600 text-white hover:bg-yellow-500'">
-                            <svg x-show="modal.reanalyzing" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white"
-                                xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
-                                    stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor"
-                                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
-                                </path>
-                            </svg>
-                            <span x-text="modal.reanalyzing ? 'Re-analyzing...' : 'Re-analyze Receipt'"></span>
-                        </button>
-                        <button @click="closeModal()" type="button"
-                            class="inline-flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 sm:col-start-2">Close</button>
+                        <div>
+                             <h3 class="text-base font-semibold leading-6 text-gray-900">Filtered Insights</h3>
+                            <dl class="mt-4 space-y-4">
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-sm text-gray-600">Total Amount</dt>
+                                    <dd class="text-sm font-medium text-gray-900" x-text="formatCurrency(insights.totalAmount)"></dd>
+                                </div>
+                                <div class="flex items-center justify-between pb-4 border-b border-gray-200">
+                                    <dt class="text-sm text-gray-600">Total VAT</dt>
+                                    <dd class="text-sm font-medium text-gray-900" x-text="formatCurrency(insights.totalVat)"></dd>
+                                </div>
+                                <div class="pt-1">
+                                   <dt class="text-sm font-medium text-gray-900">Top Vendors</dt>
+                                   <dd class="mt-2 text-sm text-gray-700">
+                                        <ul class="space-y-2">
+                                            <template x-if="insights.topVendors.length === 0"><li class="italic text-gray-500">None</li></template>
+                                            <template x-for="vendor in insights.topVendors" :key="vendor.tin || vendor.name">
+                                                <li class="flex justify-between items-center">
+                                                    <span class="truncate pr-4">
+                                                        <span x-text="vendor.name"></span>
+                                                        <span class="block text-xs text-gray-500 font-mono" x-text="vendor.tin ? `TIN ${vendor.tin}` : 'no TIN'"></span>
+                                                    </span>
+                                                    <span class="text-right">
+                                                        <span class="block text-xs font-medium text-gray-900" x-text="formatCurrency(vendor.cents / 100)"></span>
+                                                        <span class="font-mono bg-gray-200 rounded-md px-2 py-0.5 text-xs font-semibold text-gray-700" x-text="`${vendor.count} receipts`"></span>
+                                                    </span>
+                                                </li>
+                                            </template>
+                                        </ul>
+                                   </dd>
+                                </div>
+                            </dl>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
+
+        <!-- Table View (Unchanged) -->
+        <div class="mt-8 flow-root">
+            <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                <div class="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
+                    <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+                        <table class="min-w-full divide-y divide-gray-300">
+                            <thead class="bg-gray-50"><tr><th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6"><button @click="sortBy('status')" class="group inline-flex">Status <span x-html="getSortIcon('status')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('vendor_name')" class="group inline-flex">Vendor / Description <span x-html="getSortIcon('vendor_name')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('total_amount')" class="group inline-flex">Amount <span x-html="getSortIcon('total_amount')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"><button @click="sortBy('receipt_date')" class="group inline-flex">Date <span x-html="getSortIcon('receipt_date')"></span></button></th><th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Tax Analysis</th><th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span class="sr-only">View</span></th></tr></thead>
+                            <tbody class="divide-y divide-gray-200 bg-white">
+                                <template x-for="sub in view" :key="sub.id">
+                                    <tr>
+                                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm sm:pl-6"><span x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span></td>
+                                        <td class="px-3 py-4 text-sm text-gray-900">
+                                            <div class="font-medium">
+                                                <span x-text="sub.receipt.vendor_name || 'Processing...'"></span>
+                                                <span x-show="sub.receipt.vendor_tin" class="ml-1 text-xs font-mono font-normal text-gray-500" x-text="`TIN ${sub.receipt.vendor_tin}`"></span>
+                                            </div>
+                                            <div class="text-gray-500" x-text="sub.description || 'Awaiting processing'"></div>
+                                            <div class="mt-1 flex gap-1">
+                                                <span x-show="sub.receipt.category" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="(sub.receipt.category || '').replace(/_/g, ' ')"></span>
+                                                <span x-show="sub.receipt.items?.length > 1" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="`${sub.receipt.items.length} items`"></span>
+                                            </div>
+                                        </td>
+                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                            <div class="flex items-center">
+                                                <span :class="sub.receipt.is_expense === false ? 'line-through text-gray-400' : ''" x-text="(sub.receipt.total_amount !== null && sub.receipt.total_amount !== undefined ? (sub.receipt.total_amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' TZS' : '---')"></span>
+                                                <span x-show="sub.receipt && sub.receipt.vat_amount > 0" class="ml-2 inline-flex items-center rounded-md bg-teal-50 px-2 py-1 text-xs font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20">VAT</span>
+                                                <span x-show="sub.receipt.is_cancelled" class="ml-2 inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">Cancelled</span>
+                                                <span x-show="sub.receipt.is_test" class="ml-2 inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Test</span>
+                                            </div>
+                                        </td>
+                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt.receipt_date || '---'"></td>
+                                        <td class="px-3 py-4 text-sm text-gray-500">
+                                            <div class="flex items-start">
+                                                <svg x-show="sub.receipt && sub.receipt.llm_tax_analysis" class="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
+                                                <span x-text="getTaxAnalysisText(sub)"></span>
+                                            </div>
+                                        </td>
+                                        <td class="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6"><button @click="openModal(sub.id)" class="text-indigo-600 hover:text-indigo-900">View</button></td>
+                                    </tr>
+                                </template>
+                                <tr x-show="view.length === 0"><td colspan="6" class="text-center py-12 text-sm text-gray-500">No submissions match your criteria.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Details Modal (Unchanged) -->
+        <div x-show="modal.open" class="relative z-10" style="display: none;">
+             <div @click="closeModal()" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm"></div>
+             <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
+                 <div @keydown.escape.window="closeModal()" class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                     <div @click.outside="closeModal()" class="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-4xl sm:p-6">
+                         <h3 class="text-lg font-semibold leading-6 text-gray-900" id="modal-title">Submission Details (<span x-text="`ID: ${modal.data.id}`"></span>)</h3>
+                         <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                             <div class="space-y-4">
+                                 <h4 class="text-md font-medium text-gray-700">Input Data</h4>
+                                 <template x-if="modal.data.input_type === 'photo'"><div class="p-2 border rounded-lg"><img :src="getPublicUploadPath(modal.data.input_data)" alt="Receipt Photo" class="w-full rounded-md"></div></template>
+                                 <template x-if="modal.data.input_type === 'url'"><div class="w-full h-24 border rounded-md bg-gray-50 flex flex-col items-center justify-center p-4 text-center"><p class="text-sm text-gray-600">Live preview blocked by source.</p><a :href="modal.data.input_data" target="_blank" class="mt-2 text-sm font-medium text-indigo-600 hover:underline">Open Receipt in New Tab <svg xmlns="http://www.w3.org/2000/svg" class="inline h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg></a></div></template>
+                                 <dl class="divide-y divide-gray-100">
+                                     <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted At</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.received_at + ' UTC'"></dd></div>
+                                     <div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Submitted By</dt><dd class="mt-1 text-sm leading-6 text-gray-700 sm:col-span-2 sm:mt-0" x-text="modal.data.device_name"></dd></div>
+                                     <template x-if="modal.data.location"><div class="px-2 py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium leading-6 text-gray-900">Location</dt><dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0"><a :href="formatLocationUrl(modal.data.location)" target="_blank" class="text-indigo-600 hover:underline" x-text="modal.data.location"></a></dd></div></template>
+                                 </dl>
+                             </div>
+                             <div>
+                                 <h4 class="text-md font-medium text-gray-700">
+                                     Receipt Data
+                                     <span x-show="modal.data.receipt?.extraction_source === 'tra_html'" class="ml-1 inline-flex items-center rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Verified by TRA</span>
+                                     <span x-show="modal.data.receipt?.extraction_source === 'llm_vision'" class="ml-1 inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from photo</span>
+                                 </h4>
+                                 <div class="mt-2 h-96 overflow-y-auto rounded-md bg-gray-50 border p-3 text-sm space-y-3">
+                                     <template x-if="modal.data.receipt?.receipt_verification_code"><div x-html="renderReceiptFacts(modal.data.receipt)"></div></template>
+                                     <template x-if="modal.data.receipt?.llm_tax_analysis">
+                                         <div class="pt-2 border-t border-gray-200">
+                                             <p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Tax analysis <span class="font-normal normal-case" x-text="modal.data.receipt?.llm_status === 'ok' ? '(LLM judgment)' : '(not analysed)'"></span></p>
+                                             <p class="mt-1 text-gray-900" x-text="modal.data.receipt.llm_tax_analysis"></p>
+                                         </div>
+                                     </template>
+                                     <template x-if="!modal.data.receipt?.receipt_verification_code && modal.data.error_message"><div class="text-red-700 whitespace-pre-wrap" x-text="modal.data.error_message"></div></template>
+                                 </div>
+                             </div>
+                         </div>
+                         <div class="mt-5 sm:mt-6"><button @click="closeModal()" type="button" class="inline-flex w-full justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">Close</button></div>
+                     </div>
+                 </div>
+             </div>
+        </div>
     </div>
-</div>
 {% endif %}
 
 <script>
-    // --- RESTORED & IMPROVED: SoundGenerator based on your original complex version ---
-    class SoundGenerator {
-        constructor() {
-            this.audioContext = null;
-            this.maxPolyphony = 5;
-            this.voicePool = Array(this.maxPolyphony).fill(null);
+// --- RESTORED & IMPROVED: SoundGenerator based on your original complex version ---
+class SoundGenerator {
+  constructor() {
+    this.audioContext = null;
+    this.maxPolyphony = 5;
+    this.voicePool = Array(this.maxPolyphony).fill(null);
+  }
+  init() {
+    if (!this.audioContext) {
+      try { this.audioContext = new (window.AudioContext || window.webkitAudioContext)(); } 
+      catch (e) { console.error("Web Audio API is not supported."); }
+    }
+  }
+  findFreeVoice() {
+    for (let i = 0; i < this.maxPolyphony; i++) { if (!this.voicePool[i]) return i; } return -1;
+  }
+  createNoiseBuffer(duration, type = 'pink') {
+    if (!this.audioContext) return null;
+    const bufferSize = Math.floor(duration * this.audioContext.sampleRate);
+    const buffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
+    const data = buffer.getChannelData(0);
+    if (type === 'pink') {
+        let b0=0, b1=0, b2=0;
+        for (let i = 0; i < bufferSize; i++) {
+            const white = Math.random() * 2 - 1;
+            b0 = 0.99886 * b0 + white * 0.0555179; b1 = 0.99332 * b1 + white * 0.0750759; b2 = 0.96900 * b2 + white * 0.1538520;
+            data[i] = (b0 + b1 + b2) * 0.3;
         }
+    } else { for (let i = 0; i < bufferSize; i++) { data[i] = Math.random() * 2 - 1; } }
+    return buffer;
+  }
+  _play(duration, ...soundParts) {
+    if (!this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    const voiceIndex = this.findFreeVoice();
+    if (voiceIndex === -1) return;
+    this.voicePool[voiceIndex] = true;
+    setTimeout(() => { this.voicePool[voiceIndex] = null; }, duration * 1000);
+    soundParts.forEach(part => part(now, this.audioContext));
+  }
+  
+  playSuccess() {
+    this._play(1.5, (now, ctx) => { // Ascending pleasant chime
+        const chime1 = ctx.createOscillator(); chime1.type = 'sine'; chime1.frequency.setValueAtTime(783.99, now); // G5
+        const gain1 = ctx.createGain(); gain1.gain.setValueAtTime(0.2, now); gain1.gain.exponentialRampToValueAtTime(0.001, now + 1);
+        chime1.connect(gain1).connect(ctx.destination);
+        const chime2 = ctx.createOscillator(); chime2.type = 'sine'; chime2.frequency.setValueAtTime(1046.50, now + 0.1); // C6
+        const gain2 = ctx.createGain(); gain2.gain.setValueAtTime(0.15, now + 0.1); gain2.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+        chime2.connect(gain2).connect(ctx.destination);
+        chime1.start(now); chime2.start(now + 0.1); chime1.stop(now + 1); chime2.stop(now + 1.2);
+    });
+  }
+  playQueued() {
+    this._play(0.3, (now, ctx) => { // Quick techy "bloop"
+        const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.setValueAtTime(600, now); osc.frequency.exponentialRampToValueAtTime(1200, now + 0.2);
+        const gain = ctx.createGain(); gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.3);
+    });
+  }
+  playFailed() {
+    this._play(1, (now, ctx) => { // Descending error buzz with noise
+        const noise = ctx.createBufferSource(); noise.buffer = this.createNoiseBuffer(0.8, 'white');
+        const noiseGain = ctx.createGain(); noiseGain.gain.setValueAtTime(0.02, now); noiseGain.gain.linearRampToValueAtTime(0, now + 0.8);
+        noise.connect(noiseGain).connect(ctx.destination);
+        const osc = ctx.createOscillator(); osc.type = 'sawtooth'; osc.frequency.setValueAtTime(220, now); osc.frequency.exponentialRampToValueAtTime(80, now + 1);
+        const gain = ctx.createGain(); gain.gain.setValueAtTime(0.15, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 1);
+        osc.connect(gain).connect(ctx.destination);
+        noise.start(now); osc.start(now); noise.stop(now + 0.8); osc.stop(now + 1);
+    });
+  }
+  playDuplicate() {
+    this._play(0.5, (now, ctx) => { // Flat, neutral "thump"
+        const osc = ctx.createOscillator(); osc.type = 'square'; osc.frequency.setValueAtTime(150, now);
+        const gain = ctx.createGain(); gain.gain.setValueAtTime(0.15, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now); osc.stop(now + 0.4);
+    });
+  }
+}
+
+function dashboard() {
+    return {
+        // --- State ---
+        allSubmissions: submissionsData,
+        stats: initialStats,
+        notifications: [],
+        browserNotificationsEnabled: false,
+        view: [],
+        tab: 'processed',
+        filters: { search: '', startDate: '', endDate: '' },
+        sort: { column: 'received_at', direction: 'desc' },
+        modal: { open: false, data: {} },
+        soundGenerator: new SoundGenerator(),
+        showAdvanced: false,
+
+        // --- Getters for Dynamic UI ---
+        get statCards() { /* Unchanged from your version */
+            const styles = [
+                {bg: 'bg-blue-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>'},
+                {bg: 'bg-green-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>'},
+                {bg: 'bg-yellow-500', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5V4H4zm0 11h5v5H4v-5zm11 0h5v5h-5v-5zm0-11h5v5h-5V4z" /></svg>'},
+                {bg: 'bg-red-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h.5A2.5 2.5 0 0020 5.5V3.935m-14 0A2.5 2.5 0 018.5 2h7A2.5 2.5 0 0118 4.5v-1.065" /></svg>'}
+            ];
+            const periods = [ { name: 'Spent Today', data: this.stats['today'] }, { name: 'Last 7 Days', data: this.stats['7d'] }, { name: 'Last 4 Weeks', data: this.stats['4w'] }, { name: 'Last 12 Months', data: this.stats['1y'] } ];
+            return periods.map((p, i) => ({ name: p.name, count: p.data?.count || 0, total: (p.data?.total || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}), ...styles[i] }));
+        },
+        get insights() {
+            // Summed in cents, then divided once: adding 0.1 + 0.2 in floats is not 0.3.
+            let totalCents = 0, vatCents = 0; const vendors = new Map();
+            this.view.forEach(sub => {
+                const r = sub.receipt;
+                // A cancelled or test receipt is not money spent.
+                if (sub.status !== 'completed' || !r || r.is_expense === false) return;
+                totalCents += r.total_amount_cents || 0;
+                vatCents += r.vat_amount_cents || 0;
+                // Grouped on the TIN TRA issued, so one vendor spelled three ways stays one vendor.
+                const key = r.vendor_key || r.vendor_tin || r.vendor_name;
+                if (!key) return;
+                const entry = vendors.get(key) || { name: r.vendor_name || 'Unnamed vendor', tin: r.vendor_tin, count: 0, cents: 0 };
+                entry.count += 1; entry.cents += r.total_amount_cents || 0;
+                vendors.set(key, entry);
+            });
+            const topVendors = [...vendors.values()].sort((a, b) => b.cents - a.cents).slice(0, 3);
+            return { totalAmount: totalCents / 100, totalVat: vatCents / 100, topVendors };
+        },
+        get csvDownloadUrl() {
+            const params = new URLSearchParams();
+            if (this.filters.search) params.append('search', this.filters.search); if (this.filters.startDate) params.append('start_date', this.filters.startDate); if (this.filters.endDate) params.append('end_date', this.filters.endDate);
+            return `/export/csv?${params.toString()}`;
+        },
+
+        // --- Init & Listeners ---
         init() {
-            if (!this.audioContext) {
-                try { this.audioContext = new (window.AudioContext || window.webkitAudioContext)(); }
-                catch (e) { console.error("Web Audio API is not supported."); }
+            this.filters = { ...initialFilters };
+            if (localStorage.getItem('showAdvancedFilters') === 'true') { this.showAdvanced = true; }
+            this.browserNotificationsEnabled = (window.Notification && Notification.permission === 'granted');
+            this.listenForUpdates(); this.updateView();
+            this.$watch('filters', () => { this.updateView(); this.updateUrlState(); });
+            window.addEventListener('click', () => { this.soundGenerator.init(); }, { once: true });
+        },
+        listenForUpdates() {
+            const eventSource = new EventSource("{{ url_for('stream') }}");
+            eventSource.onmessage = (event) => { if (!event.data.startsWith(':')) this.handleSseUpdate(JSON.parse(event.data)); };
+            eventSource.onerror = (err) => { console.error("EventSource failed:", err); };
+        },
+
+        // --- Core Methods ---
+        handleSseUpdate({ event_type, data: payload }) {
+            const submissionId = payload.submission_id || payload.id; if (!submissionId) return;
+            const index = this.allSubmissions.findIndex(s => s.id === submissionId);
+            let notification = {}; let soundToPlay = null;
+            if (index !== -1) {
+                // payload.data is already the canonical receipt shape the page was bootstrapped with.
+                Object.assign(this.allSubmissions[index], { status: payload.status, description: payload.data?.llm_extracted_description || this.allSubmissions[index].description, receipt: payload.data || this.allSubmissions[index].receipt, error_message: payload.error_message || null, is_duplicate: payload.status === 'duplicate' });
+                if (event_type === 'submission.processed') { this.stats = payload.stats; soundToPlay = 'playSuccess'; notification = { title: 'Receipt Processed!', message: `ID ${submissionId} processed.`, type: 'success' };
+                } else if (event_type === 'submission.failed') { soundToPlay = 'playFailed'; notification = { title: 'Processing Failed', message: `ID ${submissionId} failed.`, type: 'error' };
+                } else if (event_type === 'submission.duplicate') { soundToPlay = 'playDuplicate'; notification = { title: 'Duplicate Detected', message: `ID ${submissionId} is a duplicate.`, type: 'warning' }; }
+            } else if (event_type === 'submission.queued') {
+                soundToPlay = 'playQueued';
+                this.allSubmissions.unshift({ ...payload, receipt: {}, is_duplicate: false });
+                notification = { title: 'New Receipt Queued', message: `Submission ID ${payload.id} is waiting.`, type: 'info' };
             }
-        }
-        findFreeVoice() {
-            for (let i = 0; i < this.maxPolyphony; i++) { if (!this.voicePool[i]) return i; } return -1;
-        }
-        createNoiseBuffer(duration, type = 'pink') {
-            if (!this.audioContext) return null;
-            const bufferSize = Math.floor(duration * this.audioContext.sampleRate);
-            const buffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
-            const data = buffer.getChannelData(0);
-            if (type === 'pink') {
-                let b0 = 0, b1 = 0, b2 = 0;
-                for (let i = 0; i < bufferSize; i++) {
-                    const white = Math.random() * 2 - 1;
-                    b0 = 0.99886 * b0 + white * 0.0555179; b1 = 0.99332 * b1 + white * 0.0750759; b2 = 0.96900 * b2 + white * 0.1538520;
-                    data[i] = (b0 + b1 + b2) * 0.3;
-                }
-            } else { for (let i = 0; i < bufferSize; i++) { data[i] = Math.random() * 2 - 1; } }
-            return buffer;
-        }
-        _play(duration, ...soundParts) {
-            if (!this.audioContext) return;
-            const now = this.audioContext.currentTime;
-            const voiceIndex = this.findFreeVoice();
-            if (voiceIndex === -1) return;
-            this.voicePool[voiceIndex] = true;
-            setTimeout(() => { this.voicePool[voiceIndex] = null; }, duration * 1000);
-            soundParts.forEach(part => part(now, this.audioContext));
-        }
+            if (soundToPlay) this.soundGenerator[soundToPlay]();
+            if (notification.title) { this.addNotification(notification.title, notification.message, notification.type); this.showBrowserNotification(notification.title, notification.message); }
+            this.updateView();
+        },
+        updateView() {
+            const search = this.filters.search.toLowerCase(); const start = this.filters.startDate ? new Date(this.filters.startDate) : null; const end = this.filters.endDate ? new Date(new Date(this.filters.endDate).setDate(new Date(this.filters.endDate).getDate() + 1)) : null;
+            this.view = this.sortData(this.allSubmissions.filter(sub => {
+                if (this.tab === 'with_vat') { if (!(sub.status === 'completed' && sub.receipt?.vat_amount > 0)) return false; }
+                else if (this.tab === 'processed') { if (sub.status !== 'completed') return false; }
+                else if (this.tab === 'queued') { if (sub.status !== 'queued' && sub.status !== 'processing') return false; }
+                else if (this.tab === 'failed') { if (sub.status !== 'failed') return false; }
+                else if (this.tab === 'duplicates') { if (!sub.is_duplicate) return false; }
+                if (search && !((sub.receipt?.vendor_name?.toLowerCase().includes(search)) || (sub.description?.toLowerCase().includes(search)))) return false;
+                if (start || end) { const receiptDate = sub.receipt?.receipt_date ? new Date(sub.receipt.receipt_date) : null; if (!receiptDate || (start && receiptDate < start) || (end && receiptDate >= end)) return false; }
+                return true;
+            }));
+        },
+        updateUrlState() { const params = new URLSearchParams(this.filters); window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`); },
+        resetFilters() { this.filters = { search: '', startDate: '', endDate: '' }; },
+        toggleAdvanced() { this.showAdvanced = !this.showAdvanced; localStorage.setItem('showAdvancedFilters', this.showAdvanced); },
+        formatCurrency(value) { return (value === null || typeof value === 'undefined') ? '---' : value.toLocaleString('en-US', { style: 'currency', currency: 'TZS', minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+        addNotification(title, message, type = 'info') { const icons = { success: '<svg class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>', error: '<svg class="h-6 w-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>', warning: '<svg class="h-6 w-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>', info: '<svg class="h-6 w-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>' }; const id = Date.now(); this.notifications.unshift({ id, title, message, show: true, icon: icons[type] }); setTimeout(() => { const index = this.notifications.findIndex(n => n.id === id); if (index > -1) this.notifications[index].show = false; }, 5000); },
+        enableBrowserNotifications() { if (!window.Notification) return; if (Notification.permission === 'granted') { this.browserNotificationsEnabled = true; this.addNotification('Already Enabled', 'Browser notifications are active.', 'success'); this.soundGenerator.playSuccess(); } else if (Notification.permission !== 'denied') { Notification.requestPermission().then(p => { if (p === 'granted') { this.browserNotificationsEnabled = true; this.addNotification('Notifications Enabled!', 'You will now receive system notifications.', 'success'); this.soundGenerator.playSuccess(); } }); } },
+        // --- Remaining methods are unchanged from your original version ---
+        showBrowserNotification(title, body) { if (this.browserNotificationsEnabled) { new Notification(title, { body, icon: '/static/logo.png' }); } },
+        sortData(data) { const col = this.sort.column; const dir = this.sort.direction === 'asc' ? 1 : -1; return [...data].sort((a, b) => { let valA = this.getSortValue(a, col); let valB = this.getSortValue(b, col); if (valA < valB) return -1 * dir; if (valA > valB) return 1 * dir; return 0; }); },
+        getSortValue(sub, col) { switch(col) { case 'vendor_name': return sub.receipt?.vendor_name?.toLowerCase() || 'z'; case 'total_amount': return sub.receipt?.total_amount || -1; case 'receipt_date': return sub.receipt?.receipt_date || sub.received_at; default: return sub[col]?.toLowerCase() || ''; } },
+        sortBy(column) { if (this.sort.column === column) { this.sort.direction = this.sort.direction === 'asc' ? 'desc' : 'asc'; } else { this.sort.column = column; this.sort.direction = 'asc'; } this.updateView(); },
+        changeTab(newTab) { this.tab = newTab; this.updateView(); },
+        openModal(subId) { this.modal.data = this.allSubmissions.find(s => s.id === subId) || {}; this.modal.open = true; },
+        closeModal() { this.modal.open = false; },
+        getPublicUploadPath(serverPath) { if (!serverPath) return ''; return serverPath.replace('/app/data', ''); },
+        formatLocationUrl(locationString) { if (!locationString) return '#'; const coords = locationString.split(' - ')[0]; return `https://www.google.com/maps/place/${coords}`; },
+        escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); },
+        renderReceiptFacts(receipt) {
+            // Rendered from the parsed fields, so what is shown here is what TRA printed.
+            const money = v => (v === null || v === undefined) ? '---' : Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            const rows = [
+                ['Vendor', receipt.vendor_name], ['Vendor TIN', receipt.vendor_tin], ['VRN', receipt.vrn],
+                ['Tax office', receipt.tax_office], ['EFD serial', receipt.efd_serial],
+                ['Receipt no.', receipt.receipt_number], ['Z number', receipt.z_number],
+                ['Date', [receipt.receipt_date, receipt.receipt_time].filter(Boolean).join(' ')],
+                ['Customer', receipt.customer_name],
+                ['Customer ID', [receipt.customer_id_type, receipt.customer_id].filter(Boolean).join(' ')],
+                ['Verification code', receipt.receipt_verification_code],
+            ].filter(([, value]) => value);
 
-        playSuccess() {
-            this._play(1.5, (now, ctx) => { // Ascending pleasant chime
-                const chime1 = ctx.createOscillator(); chime1.type = 'sine'; chime1.frequency.setValueAtTime(783.99, now); // G5
-                const gain1 = ctx.createGain(); gain1.gain.setValueAtTime(0.2, now); gain1.gain.exponentialRampToValueAtTime(0.001, now + 1);
-                chime1.connect(gain1).connect(ctx.destination);
-                const chime2 = ctx.createOscillator(); chime2.type = 'sine'; chime2.frequency.setValueAtTime(1046.50, now + 0.1); // C6
-                const gain2 = ctx.createGain(); gain2.gain.setValueAtTime(0.15, now + 0.1); gain2.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
-                chime2.connect(gain2).connect(ctx.destination);
-                chime1.start(now); chime2.start(now + 0.1); chime1.stop(now + 1); chime2.stop(now + 1.2);
-            });
-        }
-        playQueued() {
-            this._play(0.3, (now, ctx) => { // Quick techy "bloop"
-                const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.setValueAtTime(600, now); osc.frequency.exponentialRampToValueAtTime(1200, now + 0.2);
-                const gain = ctx.createGain(); gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-                osc.connect(gain).connect(ctx.destination);
-                osc.start(now); osc.stop(now + 0.3);
-            });
-        }
-        playFailed() {
-            this._play(1, (now, ctx) => { // Descending error buzz with noise
-                const noise = ctx.createBufferSource(); noise.buffer = this.createNoiseBuffer(0.8, 'white');
-                const noiseGain = ctx.createGain(); noiseGain.gain.setValueAtTime(0.02, now); noiseGain.gain.linearRampToValueAtTime(0, now + 0.8);
-                noise.connect(noiseGain).connect(ctx.destination);
-                const osc = ctx.createOscillator(); osc.type = 'sawtooth'; osc.frequency.setValueAtTime(220, now); osc.frequency.exponentialRampToValueAtTime(80, now + 1);
-                const gain = ctx.createGain(); gain.gain.setValueAtTime(0.15, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 1);
-                osc.connect(gain).connect(ctx.destination);
-                noise.start(now); osc.start(now); noise.stop(now + 0.8); osc.stop(now + 1);
-            });
-        }
-        playDuplicate() {
-            this._play(0.5, (now, ctx) => { // Flat, neutral "thump"
-                const osc = ctx.createOscillator(); osc.type = 'square'; osc.frequency.setValueAtTime(150, now);
-                const gain = ctx.createGain(); gain.gain.setValueAtTime(0.15, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
-                osc.connect(gain).connect(ctx.destination);
-                osc.start(now); osc.stop(now + 0.4);
-            });
-        }
+            let html = '<dl class="divide-y divide-gray-200">';
+            for (const [label, value] of rows) { html += `<div class="py-1.5 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-xs font-medium text-gray-500">${label}</dt><dd class="text-sm text-gray-900 sm:col-span-2">${this.escapeHtml(value)}</dd></div>`; }
+            html += '</dl>';
+
+            if (receipt.items?.length) {
+                html += '<p class="mt-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Line items</p><table class="mt-1 w-full text-sm"><tbody>';
+                for (const item of receipt.items) { html += `<tr class="border-t border-gray-100"><td class="py-1 pr-2">${this.escapeHtml(item.description)}</td><td class="py-1 text-center text-gray-500">${this.escapeHtml(item.quantity ?? '')}</td><td class="py-1 text-right font-mono">${money(item.amount)}</td><td class="py-1 pl-2 text-center text-xs text-gray-500">${this.escapeHtml(item.tax_code ?? '')}</td></tr>`; }
+                html += '</tbody></table>';
+            }
+
+            html += '<table class="mt-3 w-full text-sm border-t border-gray-200"><tbody>';
+            html += `<tr><td class="py-1 text-gray-500">Total excl. tax</td><td class="py-1 text-right font-mono">${money(receipt.total_excl_tax)}</td></tr>`;
+            for (const line of receipt.tax_lines || []) { html += `<tr><td class="py-1 text-gray-500">Tax ${this.escapeHtml(line.code)} (${this.escapeHtml(line.rate ?? 0)}%)</td><td class="py-1 text-right font-mono">${money(line.amount)}</td></tr>`; }
+            html += `<tr class="font-semibold"><td class="py-1">Total incl. tax</td><td class="py-1 text-right font-mono">${money(receipt.total_amount)}</td></tr>`;
+            html += '</tbody></table>';
+
+            if (receipt.is_cancelled || receipt.is_test) { html += `<p class="mt-2 text-sm font-medium text-red-700">${receipt.is_cancelled ? 'Cancelled receipt' : 'Test receipt'} - excluded from all spending totals.</p>`; }
+            return html;
+        },
+        getTaxAnalysisText(sub) { if (!sub.receipt || !sub.receipt.llm_tax_analysis) { return sub.error_message || '---'; } return sub.receipt.llm_tax_analysis; },
+        getTabClass(tabName) { return this.tab === tabName ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'; },
+        getSortIcon(column) { if (this.sort.column !== column) return '<svg class="h-5 w-5 ml-2 text-gray-400 invisible group-hover:visible" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4"></path></svg>'; if (this.sort.direction === 'asc') return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>'; return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>'; },
+        getStatusClass(sub) { if (sub.is_duplicate) return 'inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800'; if (sub.status === 'completed') return 'inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800'; if (sub.status === 'queued' || sub.status === 'processing') return 'inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800'; if (sub.status === 'failed') return 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800'; return 'inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800'; },
+        getStatusText(sub) { if (sub.is_duplicate) return 'Duplicate'; return sub.status.charAt(0).toUpperCase() + sub.status.slice(1); }
     }
-
-    function dashboard() {
-        return {
-            // --- State ---
-            allSubmissions: submissionsData,
-            stats: initialStats,
-            notifications: [],
-            browserNotificationsEnabled: false,
-            view: [],
-            tab: 'processed',
-            filters: { search: '', startDate: '', endDate: '' },
-            sort: { column: 'received_at', direction: 'desc' },
-            modal: { open: false, data: {}, reanalyzing: false },
-            soundGenerator: new SoundGenerator(),
-            showAdvanced: false,
-
-            // --- Getters for Dynamic UI ---
-            get statCards() { /* Unchanged from your version */
-                const styles = [
-                    { bg: 'bg-blue-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>' },
-                    { bg: 'bg-green-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>' },
-                    { bg: 'bg-yellow-500', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5V4H4zm0 11h5v5H4v-5zm11 0h5v5h-5v-5zm0-11h5v5h-5V4z" /></svg>' },
-                    { bg: 'bg-red-600', icon: '<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h.5A2.5 2.5 0 0020 5.5V3.935m-14 0A2.5 2.5 0 018.5 2h7A2.5 2.5 0 0118 4.5v-1.065" /></svg>' }
-                ];
-                const periods = [{ name: 'Last 24 Hours', data: this.stats['24h'] }, { name: 'Last 7 Days', data: this.stats['7d'] }, { name: 'Last 4 Weeks', data: this.stats['4w'] }, { name: 'Last 1 Year', data: this.stats['1y'] }];
-                return periods.map((p, i) => ({ name: p.name, count: p.data.count || 0, total: (p.data.total || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), ...styles[i] }));
-            },
-            get insights() {
-                let totalAmount = 0, totalVat = 0; const vendorCounts = new Map();
-                this.view.forEach(sub => { if (sub.status === 'completed' && sub.receipt) { totalAmount += sub.receipt.total_amount || 0; totalVat += sub.receipt.vat_amount || 0; if (sub.receipt.vendor_name) { vendorCounts.set(sub.receipt.vendor_name, (vendorCounts.get(sub.receipt.vendor_name) || 0) + 1); } } });
-                const topVendors = [...vendorCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
-                return { totalAmount, totalVat, topVendors };
-            },
-            get csvDownloadUrl() {
-                const params = new URLSearchParams();
-                if (this.filters.search) params.append('search', this.filters.search); if (this.filters.startDate) params.append('start_date', this.filters.startDate); if (this.filters.endDate) params.append('end_date', this.filters.endDate);
-                return `/export/csv?${params.toString()}`;
-            },
-
-            // --- Init & Listeners ---
-            init() {
-                this.filters = { ...initialFilters };
-                if (localStorage.getItem('showAdvancedFilters') === 'true') { this.showAdvanced = true; }
-                this.browserNotificationsEnabled = (window.Notification && Notification.permission === 'granted');
-                this.listenForUpdates(); this.updateView();
-                this.$watch('filters', () => { this.updateView(); this.updateUrlState(); });
-                window.addEventListener('click', () => { this.soundGenerator.init(); }, { once: true });
-            },
-            listenForUpdates() {
-                const eventSource = new EventSource("{{ url_for('stream') }}");
-                eventSource.onmessage = (event) => { if (!event.data.startsWith(':')) this.handleSseUpdate(JSON.parse(event.data)); };
-                eventSource.onerror = (err) => { console.error("EventSource failed:", err); };
-            },
-
-            // --- Core Methods ---
-            handleSseUpdate({ event_type, data: payload }) {
-                const submissionId = payload.submission_id || payload.id; if (!submissionId) return;
-                const index = this.allSubmissions.findIndex(s => s.id === submissionId);
-                let notification = {}; let soundToPlay = null;
-                if (index !== -1) {
-                    Object.assign(this.allSubmissions[index], { status: payload.status, description: payload.data?.llm_extracted_description || this.allSubmissions[index].description, receipt: payload.data ? { ...payload.data, raw_llm_response: JSON.stringify(payload.data) } : this.allSubmissions[index].receipt, error_message: payload.error_message || null, is_duplicate: payload.status === 'duplicate' });
-                    if (event_type === 'submission.processed') {
-                        this.stats = payload.stats; soundToPlay = 'playSuccess'; notification = { title: 'Receipt Processed!', message: `ID ${submissionId} processed.`, type: 'success' };
-                    } else if (event_type === 'submission.failed') {
-                        soundToPlay = 'playFailed'; notification = { title: 'Processing Failed', message: `ID ${submissionId} failed.`, type: 'error' };
-                    } else if (event_type === 'submission.duplicate') { soundToPlay = 'playDuplicate'; notification = { title: 'Duplicate Detected', message: `ID ${submissionId} is a duplicate.`, type: 'warning' }; }
-                } else if (event_type === 'submission.queued') {
-                    soundToPlay = 'playQueued';
-                    this.allSubmissions.unshift({ ...payload, receipt: {}, is_duplicate: false });
-                    notification = { title: 'New Receipt Queued', message: `Submission ID ${payload.id} is waiting.`, type: 'info' };
-                }
-                if (soundToPlay) this.soundGenerator[soundToPlay]();
-                if (notification.title) { this.addNotification(notification.title, notification.message, notification.type); this.showBrowserNotification(notification.title, notification.message); }
-                this.updateView();
-            },
-            updateView() {
-                const search = this.filters.search.toLowerCase(); const start = this.filters.startDate ? new Date(this.filters.startDate) : null; const end = this.filters.endDate ? new Date(new Date(this.filters.endDate).setDate(new Date(this.filters.endDate).getDate() + 1)) : null;
-                this.view = this.sortData(this.allSubmissions.filter(sub => {
-                    if (this.tab === 'with_vat') { if (!(sub.status === 'completed' && sub.receipt?.vat_amount > 0)) return false; }
-                    else if (this.tab === 'processed') { if (sub.status !== 'completed') return false; }
-                    else if (this.tab === 'queued') { if (sub.status !== 'queued' && sub.status !== 'processing') return false; }
-                    else if (this.tab === 'failed') { if (sub.status !== 'failed') return false; }
-                    else if (this.tab === 'duplicates') { if (!sub.is_duplicate) return false; }
-                    if (search && !((sub.receipt?.vendor_name?.toLowerCase().includes(search)) || (sub.description?.toLowerCase().includes(search)))) return false;
-                    if (start || end) { const receiptDate = sub.receipt?.receipt_date ? new Date(sub.receipt.receipt_date) : null; if (!receiptDate || (start && receiptDate < start) || (end && receiptDate >= end)) return false; }
-                    return true;
-                }));
-            },
-            updateUrlState() { const params = new URLSearchParams(this.filters); window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`); },
-            resetFilters() { this.filters = { search: '', startDate: '', endDate: '' }; },
-            toggleAdvanced() { this.showAdvanced = !this.showAdvanced; localStorage.setItem('showAdvancedFilters', this.showAdvanced); },
-            formatCurrency(value) { return (value === null || typeof value === 'undefined') ? '---' : value.toLocaleString('en-US', { style: 'currency', currency: 'TZS', minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
-            addNotification(title, message, type = 'info') { const icons = { success: '<svg class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>', error: '<svg class="h-6 w-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>', warning: '<svg class="h-6 w-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>', info: '<svg class="h-6 w-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>' }; const id = Date.now(); this.notifications.unshift({ id, title, message, show: true, icon: icons[type] }); setTimeout(() => { const index = this.notifications.findIndex(n => n.id === id); if (index > -1) this.notifications[index].show = false; }, 5000); },
-            enableBrowserNotifications() { if (!window.Notification) return; if (Notification.permission === 'granted') { this.browserNotificationsEnabled = true; this.addNotification('Already Enabled', 'Browser notifications are active.', 'success'); this.soundGenerator.playSuccess(); } else if (Notification.permission !== 'denied') { Notification.requestPermission().then(p => { if (p === 'granted') { this.browserNotificationsEnabled = true; this.addNotification('Notifications Enabled!', 'You will now receive system notifications.', 'success'); this.soundGenerator.playSuccess(); } }); } },
-            // --- Remaining methods are unchanged from your original version ---
-            showBrowserNotification(title, body) { if (this.browserNotificationsEnabled) { new Notification(title, { body, icon: '/static/logo.png' }); } },
-            sortData(data) { const col = this.sort.column; const dir = this.sort.direction === 'asc' ? 1 : -1; return [...data].sort((a, b) => { let valA = this.getSortValue(a, col); let valB = this.getSortValue(b, col); if (valA < valB) return -1 * dir; if (valA > valB) return 1 * dir; return 0; }); },
-            getSortValue(sub, col) { switch (col) { case 'vendor_name': return sub.receipt?.vendor_name?.toLowerCase() || 'z'; case 'total_amount': return sub.receipt?.total_amount || -1; case 'receipt_date': return sub.receipt?.receipt_date || sub.received_at; default: return sub[col]?.toLowerCase() || ''; } },
-            sortBy(column) { if (this.sort.column === column) { this.sort.direction = this.sort.direction === 'asc' ? 'desc' : 'asc'; } else { this.sort.column = column; this.sort.direction = 'asc'; } this.updateView(); },
-            changeTab(newTab) { this.tab = newTab; this.updateView(); },
-            openModal(subId) { this.modal.data = this.allSubmissions.find(s => s.id === subId) || {}; this.modal.open = true; this.modal.reanalyzing = false; },
-            closeModal() { this.modal.open = false; this.modal.reanalyzing = false; },
-            async reanalyzeReceipt(submissionId) {
-                this.modal.reanalyzing = true;
-                try {
-                    const response = await fetch(`/admin/receipt/${submissionId}/reanalyze`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        }
-                    });
-
-                    const result = await response.json();
-
-                    if (!response.ok) {
-                        throw new Error(result.error || 'Failed to re-analyze receipt');
-                    }
-
-                    this.addNotification('Re-analysis Complete', 'Receipt data has been updated successfully.', 'success');
-                    this.soundGenerator.playSuccess();
-
-                    // The SSE will automatically update the UI with the new data
-                    // But we can also manually refresh the modal to show immediate feedback
-                    setTimeout(() => {
-                        const updatedSub = this.allSubmissions.find(s => s.id === submissionId);
-                        if (updatedSub) {
-                            this.modal.data = updatedSub;
-                        }
-                    }, 1000);
-
-                } catch (error) {
-                    console.error('Reanalyze error:', error);
-                    this.addNotification('Re-analysis Failed', error.message, 'error');
-                    this.soundGenerator.playFailed();
-                } finally {
-                    this.modal.reanalyzing = false;
-                }
-            },
-            getPublicUploadPath(serverPath) { if (!serverPath) return ''; return serverPath.replace('/app/data', ''); },
-            formatLocationUrl(locationString) { if (!locationString) return '#'; const coords = locationString.split(' - ')[0]; return `https://www.google.com/maps/place/${coords}`; },
-            renderLlmOutput(rawJson) { if (!rawJson) return '<span>No LLM data available.</span>'; try { const data = (typeof rawJson === 'string') ? JSON.parse(rawJson) : rawJson; let html = '<dl class="divide-y divide-gray-200">'; for (const [key, value] of Object.entries(data)) { if (value) { html += `<div class="py-2 sm:grid sm:grid-cols-3 sm:gap-4"><dt class="text-sm font-medium text-gray-500 capitalize">${key.replace(/_/g, ' ')}</dt><dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0">${String(value)}</dd></div>`; } } html += '</dl>'; return html; } catch (e) { return `<div class="text-red-700">Error parsing LLM response: ${e.message}</div><pre>${String(rawJson)}</pre>`; } },
-            getTaxAnalysisText(sub) { if (!sub.receipt || !sub.receipt.raw_llm_response) { return sub.error_message || '---'; } try { const data = (typeof sub.receipt.raw_llm_response === 'string') ? JSON.parse(sub.receipt.raw_llm_response) : sub.receipt.raw_llm_response; return data.llm_tax_analysis || 'No analysis provided.'; } catch (e) { return 'Error: Malformed LLM data.'; } },
-            getTabClass(tabName) { return this.tab === tabName ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'; },
-            getSortIcon(column) { if (this.sort.column !== column) return '<svg class="h-5 w-5 ml-2 text-gray-400 invisible group-hover:visible" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4"></path></svg>'; if (this.sort.direction === 'asc') return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>'; return '<svg class="h-5 w-5 ml-2 text-gray-600" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>'; },
-            getStatusClass(sub) { if (sub.is_duplicate) return 'inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800'; if (sub.status === 'completed') return 'inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800'; if (sub.status === 'queued' || sub.status === 'processing') return 'inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800'; if (sub.status === 'failed') return 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800'; return 'inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800'; },
-            getStatusText(sub) { if (sub.is_duplicate) return 'Duplicate'; return sub.status.charAt(0).toUpperCase() + sub.status.slice(1); }
-        }
-    }
+}
 </script>
 
 {% endblock %}

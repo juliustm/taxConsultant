@@ -10,13 +10,28 @@ from datetime import datetime
 from .sse_broker import announcer
 import traceback
 
-# Expanded headers for comprehensive logging
+# Expanded headers for comprehensive logging. Appended to, never reordered: a sheet
+# written by an earlier release keeps its columns where they are.
 SHEET_HEADERS = [
-    "Submission ID", "Status", "Received At", "Processed At", "Device", "Input Type", 
-    "User Description", "LLM Description", "Location", "Vendor Name", "Vendor TIN", "Vendor Phone", 
-    "VRN", "Receipt No.", "UIN", "Receipt Date", "Verification Code", "Total Amount", 
-    "VAT Amount", "Customer Name", "Customer ID Type", "Customer ID", "Tax Analysis", "Error"
+    "Submission ID", "Status", "Received At", "Processed At", "Device", "Input Type",
+    "User Description", "LLM Description", "Location", "Vendor Name", "Vendor TIN", "Vendor Phone",
+    "VRN", "Receipt No.", "UIN", "Receipt Date", "Verification Code", "Total Amount",
+    "VAT Amount", "Customer Name", "Customer ID Type", "Customer ID", "Tax Analysis",
+    "Receipt Time", "Tax Office", "EFD Serial", "Z Number", "Total Excl Tax", "Discount",
+    "Cancelled", "Test", "Category", "Source", "Items", "Error"
 ]
+
+def _describe_items(items):
+    """Flattens the receipt's line items into one cell."""
+    parts = []
+    for item in items or []:
+        quantity = item.get('quantity')
+        code = item.get('tax_code')
+        parts.append(
+            f"{item.get('description')} x{quantity if quantity is not None else 1} @ {item.get('amount')}"
+            f"{f' [{code}]' if code else ''}"
+        )
+    return '; '.join(parts)
 
 def dispatch_event(event_type: str, payload: dict, config):
     """
@@ -87,7 +102,12 @@ def log_to_gsheet(event_type, payload, config):
                     data.get('vrn'), data.get('receipt_number'), data.get('uin'),
                     data.get('receipt_date'), data.get('receipt_verification_code'), data.get('total_amount'),
                     data.get('vat_amount'), data.get('customer_name'), data.get('customer_id_type'),
-                    data.get('customer_id'), data.get('llm_tax_analysis'), None # No error
+                    data.get('customer_id'), data.get('llm_tax_analysis'),
+                    data.get('receipt_time'), data.get('tax_office'), data.get('efd_serial'),
+                    data.get('z_number'), data.get('total_excl_tax'), data.get('discount'),
+                    'yes' if data.get('is_cancelled') else '', 'yes' if data.get('is_test') else '',
+                    data.get('category'), data.get('extraction_source'), _describe_items(data.get('items')),
+                    None # No error
                 ]
                 # Update the entire row in one API call
                 worksheet.update(f'A{cell.row}:{gspread.utils.rowcol_to_a1(cell.row, len(full_row_data))}', [full_row_data])

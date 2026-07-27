@@ -3,6 +3,8 @@ from flask_sqlalchemy import SQLAlchemy
 import uuid
 from datetime import datetime
 
+from utils.money import from_cents
+
 db = SQLAlchemy()
 
 class InstanceConfig(db.Model):
@@ -11,7 +13,7 @@ class InstanceConfig(db.Model):
     totp_secret = db.Column(db.String(100), unique=True, nullable=False)
     llm_provider = db.Column(db.String(50), nullable=True)
     llm_api_key = db.Column(db.String(200), nullable=True)
-    
+
     post_callback_url = db.Column(db.String(500), nullable=True)
     s3_bucket_name = db.Column(db.String(200), nullable=True)
     s3_access_key_id = db.Column(db.String(200), nullable=True)
@@ -47,31 +49,198 @@ class Submission(db.Model):
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('submissions', lazy=True))
 
+class Vendor(db.Model):
+    """
+    A supplier, identified by TIN.
+
+    Spending is grouped here rather than on the vendor name printed on the receipt:
+    the same taxpayer appears as 'PLASCO LIMITED', 'Plasco Ltd' and 'PLASCO LIMITED.'
+    across receipts, and grouping on that text splits one vendor into several. The TIN
+    is issued by TRA and is exact.
+
+    Receipts that carry no TIN (a photo the vendor block was cut off from) fall back
+    to a normalised name so they still group with each other, which is why the unique
+    key is `lookup_key` and not `tin` itself.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    lookup_key = db.Column(db.String(220), unique=True, nullable=False, index=True)
+    tin = db.Column(db.String(50), nullable=True, index=True)
+    name = db.Column(db.String(200), nullable=True)
+    vrn = db.Column(db.String(50), nullable=True)
+    phone = db.Column(db.String(50), nullable=True)
+    tax_office = db.Column(db.String(200), nullable=True)
+    first_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    @property
+    def is_vat_registered(self):
+        return bool(self.vrn)
+
+    @staticmethod
+    def make_lookup_key(tin, name):
+        """TIN when there is one, otherwise the normalised name. None if neither."""
+        if tin and tin.strip():
+            return f'tin:{tin.strip()}'
+        if name and name.strip():
+            return f'name:{" ".join(name.split()).lower()}'
+        return None
+
+    @classmethod
+    def upsert(cls, tin=None, name=None, vrn=None, phone=None, tax_office=None):
+        """
+        Returns the vendor for these details, creating it on first sight.
+
+        Details other than the key are refreshed from the newest receipt, so a change
+        of trading name or tax office follows the vendor instead of forking it.
+        """
+        lookup_key = cls.make_lookup_key(tin, name)
+        if lookup_key is None:
+            return None
+
+        vendor = cls.query.filter_by(lookup_key=lookup_key).first()
+        if vendor is None:
+            vendor = cls(lookup_key=lookup_key, tin=tin, name=name)
+            db.session.add(vendor)
+
+        vendor.tin = tin or vendor.tin
+        vendor.name = name or vendor.name
+        vendor.vrn = vrn or vendor.vrn
+        vendor.phone = phone or vendor.phone
+        vendor.tax_office = tax_office or vendor.tax_office
+        vendor.last_seen_at = datetime.utcnow()
+        return vendor
+
 class Receipt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    
-    # --- Core Extracted Fields ---
+
+    # --- Vendor (denormalised for display; vendor_id is what you group by) ---
+    vendor_id = db.Column(db.Integer, db.ForeignKey('vendor.id'), nullable=True, index=True)
+    vendor = db.relationship('Vendor', backref=db.backref('receipts', lazy=True))
     vendor_name = db.Column(db.String(200), nullable=True)
-    vendor_tin = db.Column(db.String(50), nullable=True)
+    vendor_tin = db.Column(db.String(50), nullable=True, index=True)
     vendor_phone = db.Column(db.String(50), nullable=True)
-    vrn = db.Column(db.String(50), nullable=True)  # <-- THIS LINE FIXES THE ERROR
+    vrn = db.Column(db.String(50), nullable=True)
+    tax_office = db.Column(db.String(200), nullable=True)
+
+    # --- Receipt identity ---
     receipt_verification_code = db.Column(db.String(50), nullable=True, index=True, unique=True)
     receipt_number = db.Column(db.String(100), nullable=True)
+    z_number = db.Column(db.String(50), nullable=True)
+    efd_serial = db.Column(db.String(100), nullable=True)
     uin = db.Column(db.String(200), nullable=True)
-    
+
     # --- Customer Fields ---
     customer_name = db.Column(db.String(200), nullable=True)
     customer_id_type = db.Column(db.String(100), nullable=True)
     customer_id = db.Column(db.String(100), nullable=True)
-    
-    total_amount = db.Column(db.Float, nullable=True)
-    vat_amount = db.Column(db.Float, nullable=True)
-    receipt_date = db.Column(db.Date, nullable=True)
-    
+    customer_mobile = db.Column(db.String(50), nullable=True)
+
+    # --- Money, in whole cents. See utils/money.py for why not Float. ---
+    total_incl_tax_cents = db.Column(db.BigInteger, nullable=True)
+    total_excl_tax_cents = db.Column(db.BigInteger, nullable=True)
+    total_tax_cents = db.Column(db.BigInteger, nullable=True)
+    discount_cents = db.Column(db.BigInteger, nullable=True)
+
+    # When the money was spent. Everything that reports on spending keys off this,
+    # never off processed_at, which only says when we happened to scan the receipt.
+    receipt_date = db.Column(db.Date, nullable=True, index=True)
+    receipt_time = db.Column(db.Time, nullable=True)
+
+    # --- Validity ---
+    # A cancelled receipt has been voided by the vendor and a test receipt was printed
+    # by an EFD in test mode. Neither is an expense, both still get stored so the
+    # submission has a visible outcome.
+    is_cancelled = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    is_test = db.Column(db.Boolean, nullable=False, default=False, index=True)
+
     # --- System & Audit Fields ---
+    # 'tra_html' when the facts were parsed from the verified page, 'llm_vision' when
+    # a photo left no alternative to reading them out of the image.
+    extraction_source = db.Column(db.String(20), nullable=True)
+    # The verified page exactly as TRA served it, so any field can be re-derived
+    # later without asking the portal again.
+    source_html = db.Column(db.Text, nullable=True)
+    category = db.Column(db.String(50), nullable=True, index=True)
+    # 'ok', 'unavailable' (the model could not be reached) or 'skipped'.
+    llm_status = db.Column(db.String(20), nullable=True)
     processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
     raw_llm_response = db.Column(db.Text, nullable=True)
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('receipts', lazy=True))
     submission_id = db.Column(db.Integer, db.ForeignKey('submission.id'), unique=True, nullable=False)
     submission = db.relationship('Submission', backref=db.backref('receipt', uselist=False, lazy=True))
+
+    @property
+    def total_amount(self):
+        """The gross amount as a Decimal. Reads and reports use this; sums use cents."""
+        return from_cents(self.total_incl_tax_cents)
+
+    @property
+    def total_excl_tax(self):
+        return from_cents(self.total_excl_tax_cents)
+
+    @property
+    def vat_amount(self):
+        """Tax charged on the receipt, summed across every printed rate."""
+        return from_cents(self.total_tax_cents)
+
+    @property
+    def discount(self):
+        return from_cents(self.discount_cents)
+
+    @property
+    def is_expense(self):
+        return not (self.is_cancelled or self.is_test)
+
+    @property
+    def receipt_datetime(self):
+        if self.receipt_date is None:
+            return None
+        return datetime.combine(self.receipt_date, self.receipt_time or datetime.min.time())
+
+class ReceiptItem(db.Model):
+    """
+    One line of the purchased-items table.
+
+    This is the level at which category, withholding-tax and capital-allowance
+    questions are actually decided - a single 'total' cannot tell you that one line
+    of a receipt was a laptop and the rest was stationery.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    receipt_id = db.Column(db.Integer, db.ForeignKey('receipt.id'), nullable=False, index=True)
+    receipt = db.relationship(
+        'Receipt',
+        backref=db.backref('items', lazy=True, cascade='all, delete-orphan', order_by='ReceiptItem.line_number'),
+    )
+    line_number = db.Column(db.Integer, nullable=False, default=1)
+    description = db.Column(db.String(500), nullable=True)
+    quantity = db.Column(db.Numeric(18, 4), nullable=True)
+    amount_cents = db.Column(db.BigInteger, nullable=True)
+    # TRA's per-line tax class: A, B, C, SR or EX.
+    tax_code = db.Column(db.String(5), nullable=True, index=True)
+
+    @property
+    def amount(self):
+        return from_cents(self.amount_cents)
+
+class ReceiptTaxLine(db.Model):
+    """
+    One 'TAX RATE X (n%)' row from the totals table.
+
+    Kept per rate rather than collapsed into a single VAT figure, because a receipt
+    can carry standard-rated, special-rated and exempt amounts at once and a VAT
+    return needs them apart.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    receipt_id = db.Column(db.Integer, db.ForeignKey('receipt.id'), nullable=False, index=True)
+    receipt = db.relationship(
+        'Receipt',
+        backref=db.backref('tax_lines', lazy=True, cascade='all, delete-orphan'),
+    )
+    code = db.Column(db.String(5), nullable=False)
+    rate = db.Column(db.Numeric(6, 2), nullable=True)
+    amount_cents = db.Column(db.BigInteger, nullable=True)
+
+    @property
+    def amount(self):
+        return from_cents(self.amount_cents)

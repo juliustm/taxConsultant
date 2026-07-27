@@ -16,8 +16,8 @@ For many businesses in Tanzania, managing and recording expenses is a tedious, m
 
 **TaxConsult AI Agent** transforms this process. By deploying your own private instance of this agent, you create a central hub that can:
 1.  **Receive** receipts from various sources (WhatsApp, Telegram, Web App, etc.) via a secure API.
-2.  **Intelligently Process** the receipt content—whether it's a photo or a URL from a QR code—using a powerful Large Language Model (LLM).
-3.  **Extract Key Data** such as Vendor Name, TIN, VRN, Date, Total Amount, VAT, and more.
+2.  **Verify and Parse** a receipt URL from a QR code against the TRA portal, reading every field straight off the verified page. Photographed receipts, which have no machine-readable source, are read by a vision model instead.
+3.  **Extract Key Data** such as Vendor Name, TIN, VRN, EFD serial, Date, line items, per-rate tax and totals.
 4.  **Automate Logging** by exporting this structured data directly to your preferred destination, like a Google Sheet, an S3 bucket, or a custom webhook.
 
 This project empowers you to build your own internal, automated accounting assistant.
@@ -25,8 +25,10 @@ This project empowers you to build your own internal, automated accounting assis
 ## Key Features
 
 -   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint.
--   **AI-Powered Data Extraction**: Utilizes LLMs (Groq, OpenAI) to accurately read and interpret receipt data, including vision support for images.
--   **Intelligent Text Cleaning**: Automatically cleans messy HTML from TRA verification portals before sending it to the AI, saving costs and improving accuracy.
+-   **Exact Extraction from TRA**: The verified receipt page is structured HTML, so it is parsed, not guessed at — vendor, TIN, VRN, EFD serial, Z number, tax office, line items, each printed tax rate and the totals, exactly as TRA issued them. Amounts are stored as integer cents, never floats.
+-   **AI for Judgment, Not Facts**: The LLM (Groq, OpenAI) is given the parsed JSON and asked only what the purchase *means* — expense category, deductibility, input VAT and withholding tax. It cannot invent a date or an amount, it costs a fraction of the tokens the scraped page did, and when it is unreachable the receipt is still recorded in full.
+-   **Cancelled and Test Receipts**: Detected from the verification page and excluded from every spending total, instead of being counted as real expenses.
+-   **Vision for Photos**: Photographed receipts have no verified page behind them, so a vision model transcribes them; they are flagged as such so they stay distinguishable from the exact ones.
 -   **Multiple Export Destinations**:
     -   **Google Sheets**: Automatically logs all submissions and processed data into a monthly-tabbed spreadsheet.
     -   **Webhook**: Sends real-time event notifications (`queued`, `processed`, `failed`, `duplicate`) to any URL you provide.
@@ -46,6 +48,25 @@ To ensure compatibility with simple, single-app hosting platforms (like Deploy.t
     -   **Instant Trigger**: A non-blocking background task is spawned on receipt submission to call the `/tasks/run` endpoint after a 10-second delay.
     -   **Cron Job (Fallback)**: You use a free external service like [cron-job.org](https://cron-job.org/) to call the `/tasks/run` endpoint on a schedule (e.g., every 5 minutes). This ensures any failed or missed jobs are always processed.
 5.  **Retries**: A receipt the vendor has not uploaded to TRA yet is rescheduled on the job row (`next_attempt_at`) with an increasing backoff, rather than being retried inside the request. Failures that can never succeed - a wrong time in the receipt URL, for instance - fail straight away instead of hammering a rate-limited portal.
+
+## How It Works: Facts vs. Judgment
+
+A receipt has two very different kinds of information on it, and they are handled differently.
+
+**The facts are parsed** (`utils/tra_parser.py`). TRA's verified receipt page is structured HTML - every field is a `<b>LABEL:</b><span>value</span>` pair, a row of the items table, or a row of the totals table - so the vendor, TIN, VRN, EFD serial, receipt and Z numbers, tax office, date and time, every line item, every printed tax rate and the totals are read off it exactly. They are stored in whole cents, and the page is kept in `receipt.source_html` so any field can be re-derived later. If the page ever stops parsing, the submission fails loudly; it is never handed to a model to guess at.
+
+**The judgment is asked of an LLM** (`utils/llm_processor.py`). The model receives the parsed JSON - about a tenth of the tokens the scraped page cost - and answers only what the numbers do not contain: which expense category this is, whether it is deductible, whether input VAT is recoverable, whether withholding tax should have been deducted. It is never in a position to invent a date or an amount. If the model is unreachable, the receipt is still recorded in full, with `llm_status` saying why there is no analysis.
+
+Photographed receipts are the exception: with no verified page behind them, a vision model transcribes the fields, and the receipt is marked `extraction_source='llm_vision'`.
+
+### Running the tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
+
+The parser tests run against a page saved from the live portal (`tests/fixtures/`), so they are deterministic and need no network. The migration tests build a database at the previous schema and run the boot-time migration over it.
 
 ## Getting Started
 
