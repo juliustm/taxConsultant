@@ -13,6 +13,11 @@ from utils.security import generate_totp_provisioning_uri, generate_qr_code_base
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import extract_receipt_details
 from utils.sse_broker import announcer
+from utils.tra import (
+    fetch_receipt_html, TraError, TraReceiptNotUploaded, TraThrottled,
+    TraTransportError, TraUnexpectedResponse,
+)
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import joinedload
 
 app = Flask(__name__)
@@ -30,14 +35,54 @@ db.init_app(app)
 def get_instance_config():
     return InstanceConfig.query.first()
 
+def apply_pending_migrations():
+    """
+    Adds columns introduced after a database was first created.
+
+    There is no migration tool in this project and db.create_all() skips tables that
+    already exist, so an existing deployment would otherwise keep an old 'submission'
+    table and fail on the scheduling columns.
+    """
+    existing_columns = {row[1] for row in db.session.execute(sa_text("PRAGMA table_info(submission)"))}
+    if not existing_columns:
+        return  # Fresh database; create_all() already built the current schema.
+
+    for column, ddl_type in (('next_attempt_at', 'DATETIME'), ('claimed_at', 'DATETIME')):
+        if column not in existing_columns:
+            print(f"[Migration] Adding submission.{column}")
+            db.session.execute(sa_text(f"ALTER TABLE submission ADD COLUMN {column} {ddl_type}"))
+
+    db.session.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_submission_next_attempt_at ON submission (next_attempt_at)"
+    ))
+    db.session.commit()
+
 # Create database tables and seed with dummy data for demo
 with app.app_context():
     db.create_all()
+    apply_pending_migrations()
 
 # --- JOB PROCESSING LOGIC ---
 
-MAX_RETRIES = 9
-RETRY_DELAY_SECONDS = 60 # 1 minute
+# How long a job may sit in 'processing' before another runner may reclaim it.
+JOB_LEASE_MINUTES = 10
+# Ceiling on jobs handled per task-runner tick, so one tick cannot monopolise the
+# worker or hammer TRA; cron-job.org calls the runner again five minutes later.
+MAX_JOBS_PER_RUN = 25
+# Spacing between consecutive TRA fetches. The portal throttles at roughly eight
+# rapid requests from one IP.
+TRA_REQUEST_SPACING_SECONDS = 3
+
+# Retry delays in minutes, indexed by attempt number. Retries are recorded on the
+# submission (next_attempt_at) and picked up by a later tick - never slept through
+# inside the runner that discovered the failure.
+RETRY_SCHEDULE_MINUTES = {
+    # Vendors upload in batches, sometimes hours after issuing the receipt.
+    TraReceiptNotUploaded: [15, 60, 180, 360, 720, 1440],
+    TraThrottled: [2, 5, 15, 45, 120],
+    TraTransportError: [1, 5, 15, 45, 120],
+    TraUnexpectedResponse: [5, 30, 120],
+}
 
 def safe_serialize(obj):
     """Safely serialize SQLAlchemy objects for JSON, handling dates."""
@@ -119,58 +164,68 @@ def clean_html_for_llm(html_content: str) -> str:
     return re.sub(r'\n\s*\n', '\n', text)
 
 
-def fetch_receipt_html_from_tra(submission):
+def fetch_receipt_text_from_tra(submission):
     """
-    Fetches receipt data, and now cleans the HTML before returning it.
+    Fetches the receipt from the TRA portal and returns it as clean text for the LLM.
+
+    One request, no retry loop: retries are scheduled on the submission by the caller.
+    Raises a TraError subclass when the portal did not hand us a receipt.
     """
     url = submission.input_data
-    match = re.search(r'_(\d{2})(\d{2})(\d{2})$', url)
-    if not match:
-        raise ValueError("Invalid receipt URL format: Time suffix not found.")
-    
-    secret_time = f"{match.group(1)}:{match.group(2)}:{match.group(3)}"
-    verify_url_base = 'https://verify.tra.go.tz'
-    verify_url_with_secret = f"{verify_url_base}/Verify/Verified?Secret={secret_time}"
+    print(f"[Fetch] Attempt {(submission.retry_count or 0) + 1} for {url}")
 
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 TaxConsultAI/1.0'})
+    raw_html = fetch_receipt_html(url)
+    print(f"[FetchSuccess] Successfully retrieved HTML (length: {len(raw_html)}).")
 
-    for i in range(submission.retry_count, MAX_RETRIES + 1):
-        try:
-            print(f"[Fetch] Attempt {i+1}/{MAX_RETRIES+1} for {url}")
-            initial_response = session.get(url, timeout=15)
-            initial_response.raise_for_status()
-            
-            html_response = session.get(verify_url_with_secret, timeout=15)
-            html_response.raise_for_status()
+    cleaned_text = clean_html_for_llm(raw_html)
+    print(f"[Clean] HTML cleaned. New length: {len(cleaned_text)}.")
+    print(f"[Clean] Sample of cleaned text being sent to LLM:\n---\n{cleaned_text[:500]}...\n---")
 
-            if "Receipt not found" in html_response.text or html_response.status_code != 200:
-                 raise ValueError("Receipt not yet available on TRA portal.")
+    return cleaned_text
 
-            raw_html = html_response.text
-            print(f"[FetchSuccess] Successfully retrieved HTML (length: {len(raw_html)}).")
+def schedule_retry_or_fail(submission, error):
+    """
+    Applies the retry policy for a failed TRA fetch.
 
-            # ---- NEW CLEANING STEP ----
-            cleaned_text = clean_html_for_llm(raw_html)
-            print(f"[Clean] HTML cleaned. New length: {len(cleaned_text)}.")
-            print(f"[Clean] Sample of cleaned text being sent to LLM:\n---\n{cleaned_text[:500]}...\n---")
+    Retryable failures go back to 'queued' with a next_attempt_at in the future;
+    permanent ones (wrong time in the URL, rejected Referer) fail immediately rather
+    than burning ten more requests against a rate-limited portal.
+    """
+    attempt = submission.retry_count or 0
+    submission.retry_count = attempt + 1
 
-            return cleaned_text
+    schedule = RETRY_SCHEDULE_MINUTES.get(type(error), []) if error.retryable else []
+    delay_minutes = schedule[attempt] if attempt < len(schedule) else None
 
-        except (requests.exceptions.RequestException, ValueError) as e:
-            # ... (error handling remains the same) ...
-            print(f"[FetchAttemptFailed] Attempt {i+1} failed: {e}")
-            submission.retry_count = i + 1
-            db.session.commit()
-            if i < MAX_RETRIES:
-                print(f"[FetchRetry] Waiting {RETRY_DELAY_SECONDS}s before next retry...")
-                time.sleep(RETRY_DELAY_SECONDS)
-            else:
-                print(f"[FetchFailed] Max retries reached for submission {submission.id}.")
-                submission.status = 'failed'
-                submission.error_message = f"Failed after {MAX_RETRIES+1} attempts: {e}"
-                db.session.commit()
-                return None
+    if delay_minutes is None:
+        submission.status = 'failed'
+        submission.claimed_at = None
+        submission.next_attempt_at = None
+        reason = 'permanent' if not error.retryable else f'no retries left after {attempt + 1} attempts'
+        submission.error_message = f"{type(error).__name__} ({reason}): {error}"
+        print(f"[FetchFailed] Submission {submission.id} failed: {submission.error_message}")
+        db.session.commit()
+
+        payload = {"submission_id": submission.id, "status": "failed", "error_message": submission.error_message}
+        dispatch_event('submission.failed', payload, get_instance_config())
+        return
+
+    submission.status = 'queued'
+    submission.claimed_at = None
+    submission.next_attempt_at = datetime.utcnow() + timedelta(minutes=delay_minutes)
+    submission.error_message = (
+        f"{type(error).__name__}: {error} Retry {attempt + 1} scheduled for "
+        f"{submission.next_attempt_at.strftime('%Y-%m-%d %H:%M')} UTC."
+    )
+    print(f"[FetchRetry] Submission {submission.id} requeued in {delay_minutes}m: {error}")
+    db.session.commit()
+
+    payload = {
+        "submission_id": submission.id, "status": submission.status,
+        "error_message": submission.error_message,
+        "next_attempt_at": submission.next_attempt_at.isoformat(),
+    }
+    dispatch_event('submission.retry_scheduled', payload, get_instance_config())
 
 def trigger_url_in_background(url_to_trigger):
     """
@@ -182,8 +237,12 @@ def trigger_url_in_background(url_to_trigger):
     
     try:
         print(f"[Trigger] Making internal request to process the queue...")
-        requests.get(url_to_trigger, timeout=5)
+        requests.get(url_to_trigger, timeout=(5, 5))
         print("[Trigger] Internal request sent successfully.")
+    except requests.exceptions.ReadTimeout:
+        # Expected: the runner holds the connection open until the queue is drained,
+        # which normally outlasts this timeout. The trigger still did its job.
+        print("[Trigger] Task runner accepted the request and is working the queue.")
     except requests.exceptions.RequestException as e:
         print(f"[Trigger Error] Could not trigger task runner internally: {e}")
 
@@ -213,7 +272,11 @@ def process_submission(submission):
 
         content_for_llm, is_image = (None, False)
         if submission.input_type == 'url':
-            content_for_llm = fetch_receipt_html_from_tra(submission)
+            try:
+                content_for_llm = fetch_receipt_text_from_tra(submission)
+            except TraError as e:
+                schedule_retry_or_fail(submission, e)
+                return
         elif submission.input_type == 'photo':
             content_for_llm = submission.input_data
             is_image = True
@@ -685,37 +748,69 @@ def run_tasks():
     if secret != app.config['TASK_RUNNER_SECRET_KEY']:
         return jsonify({"error": "Unauthorized"}), 403
 
-    # --- NEW: Self-healing logic for stuck jobs ---
-    # Find jobs stuck in 'processing' for more than 10 minutes and requeue them.
-    ten_minutes_ago = datetime.utcnow() - timedelta(minutes=10)
+    # --- Self-healing logic for stuck jobs ---
+    # Reclaim jobs whose runner died mid-flight, i.e. whose lease has expired.
+    lease_cutoff = datetime.utcnow() - timedelta(minutes=JOB_LEASE_MINUTES)
     stuck_jobs = Submission.query.filter(
         Submission.status == 'processing',
-        Submission.received_at < ten_minutes_ago # Using received_at as a proxy for start time
+        db.or_(
+            Submission.claimed_at < lease_cutoff,
+            # Rows claimed before claimed_at existed, or by an older release.
+            db.and_(Submission.claimed_at.is_(None), Submission.received_at < lease_cutoff),
+        )
     ).all()
 
     for job in stuck_jobs:
         print(f"[Heal] Found stuck job {job.id}. Re-queueing.")
         job.status = 'queued'
+        job.claimed_at = None
+        job.next_attempt_at = None
         job.error_message = "Rescued from stuck 'processing' state."
-    
+
     if stuck_jobs:
         db.session.commit()
 
     processed_jobs = []
-    # Process all queued jobs
-    while True:
-        # Find one pending job (this will now include any rescued jobs)
-        job = Submission.query.filter_by(status='queued').order_by(Submission.received_at.asc()).first()
+    tra_fetches = 0
+    # Process due jobs, up to this tick's budget. The loop is bounded by attempts, not
+    # by completions, so contention with another runner can never spin it forever.
+    for _ in range(MAX_JOBS_PER_RUN * 2):
+        if len(processed_jobs) >= MAX_JOBS_PER_RUN:
+            break
+        now = datetime.utcnow()
+        # Find one due job (this will now include any rescued jobs). Jobs waiting on a
+        # scheduled retry are skipped until their next_attempt_at comes round.
+        job = Submission.query.filter(
+            Submission.status == 'queued',
+            db.or_(Submission.next_attempt_at.is_(None), Submission.next_attempt_at <= now)
+        ).order_by(Submission.received_at.asc()).first()
         if not job:
             break
 
-        job.status = 'processing'
-        # Clear any previous error messages before processing
-        job.error_message = None 
+        # Atomically claim the job: the UPDATE only matches while the row is still
+        # queued, so a second, unsynchronised runner cannot process it as well.
+        claimed = db.session.query(Submission).filter(
+            Submission.id == job.id, Submission.status == 'queued'
+        ).update(
+            {'status': 'processing', 'claimed_at': now, 'error_message': None},
+            synchronize_session=False
+        )
         db.session.commit()
-        
+
+        if not claimed:
+            print(f"[Claim] Job {job.id} was taken by another runner. Skipping.")
+            continue
+
+        db.session.refresh(job)
+
+        # Space out portal requests; TRA throttles bursts from a single IP.
+        if job.input_type == 'url':
+            if tra_fetches:
+                time.sleep(TRA_REQUEST_SPACING_SECONDS)
+            tra_fetches += 1
+
         process_submission(job)
-        
+
         final_status = Submission.query.get(job.id)
         processed_jobs.append({
             "id": job.id,
@@ -725,7 +820,7 @@ def run_tasks():
 
     if not processed_jobs and not stuck_jobs:
         return jsonify({"message": "No pending or stuck jobs to process."}), 200
-    
+
     return jsonify({
         "message": f"Processed {len(processed_jobs)} job(s). Rescued {len(stuck_jobs)} stuck job(s).",
         "processed_details": processed_jobs

@@ -41,10 +41,11 @@ To ensure compatibility with simple, single-app hosting platforms (like Deploy.t
 
 1.  **Intake**: The `/receipt` endpoint is lightweight. It validates the request, saves the submission to the database with a `queued` status, and immediately responds.
 2.  **Queue**: The SQLite database itself acts as the job queue.
-3.  **Processing**: A secret endpoint, `/tasks/run`, acts as the "worker." When triggered, it processes all jobs in the queue.
+3.  **Processing**: A secret endpoint, `/tasks/run`, acts as the "worker." When triggered, it claims each due job atomically (so two overlapping runners never process the same submission) and works through them, up to a per-run budget.
 4.  **Trigger**: A dual-trigger system provides both immediate feedback and robust reliability:
     -   **Instant Trigger**: A non-blocking background task is spawned on receipt submission to call the `/tasks/run` endpoint after a 10-second delay.
     -   **Cron Job (Fallback)**: You use a free external service like [cron-job.org](https://cron-job.org/) to call the `/tasks/run` endpoint on a schedule (e.g., every 5 minutes). This ensures any failed or missed jobs are always processed.
+5.  **Retries**: A receipt the vendor has not uploaded to TRA yet is rescheduled on the job row (`next_attempt_at`) with an increasing backoff, rather than being retried inside the request. Failures that can never succeed - a wrong time in the receipt URL, for instance - fail straight away instead of hammering a rate-limited portal.
 
 ## Getting Started
 

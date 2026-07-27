@@ -39,6 +39,11 @@ class Submission(db.Model):
     location = db.Column(db.String(255), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
+    # When a queued job becomes eligible again. NULL means "now". Set instead of
+    # sleeping inside the task runner when a fetch has to be retried later.
+    next_attempt_at = db.Column(db.DateTime, nullable=True, index=True)
+    # When a runner claimed this job; used to expire the lease on a dead runner.
+    claimed_at = db.Column(db.DateTime, nullable=True)
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('submissions', lazy=True))
 
