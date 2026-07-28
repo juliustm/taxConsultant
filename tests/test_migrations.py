@@ -38,6 +38,22 @@ LEGACY_SCHEMA = [
     )
     """,
     """
+    CREATE TABLE instance_config (
+        id INTEGER NOT NULL PRIMARY KEY,
+        admin_email VARCHAR(120) NOT NULL UNIQUE,
+        totp_secret VARCHAR(100) NOT NULL UNIQUE,
+        llm_provider VARCHAR(50),
+        llm_api_key VARCHAR(200),
+        post_callback_url VARCHAR(500),
+        s3_bucket_name VARCHAR(200),
+        s3_access_key_id VARCHAR(200),
+        s3_secret_access_key VARCHAR(200),
+        s3_region VARCHAR(50),
+        google_sheet_id VARCHAR(200),
+        google_service_account_json TEXT
+    )
+    """,
+    """
     CREATE TABLE receipt (
         id INTEGER NOT NULL PRIMARY KEY,
         vendor_name VARCHAR(200),
@@ -72,6 +88,10 @@ def legacy_database(app):
     db.session.execute(sa_text(
         "INSERT INTO device (id, name, api_key) VALUES (1, 'Old device', 'old-key')"
     ))
+    db.session.execute(sa_text(
+        "INSERT INTO instance_config (id, admin_email, totp_secret, llm_provider)"
+        " VALUES (1, 'admin@example.com', 'SECRET', 'groq')"
+    ))
     for index, (amount, vat, name) in enumerate(
         [(1234.56, 188.32, 'PLASCO LIMITED'), (10.10, 0.0, 'Plasco Ltd')], start=1
     ):
@@ -100,6 +120,28 @@ def test_migration_adds_the_new_schema(legacy_database):
     assert {'total_incl_tax_cents', 'is_cancelled', 'source_html', 'vendor_id',
             'efd_serial', 'z_number', 'tax_office', 'receipt_time'} <= receipt_columns
     assert {'next_attempt_at', 'claimed_at'} <= main._table_columns('submission')
+    assert {'business_name', 'business_tin', 'business_vrn'} <= main._table_columns('instance_config')
+
+
+def test_migration_keeps_an_existing_instance_configured(legacy_database):
+    """
+    Adding the business identity must not disturb the settings already there.
+
+    The instance config is a single row holding the API keys and the TOTP secret; an
+    upgrade that dropped it would lock the admin out of their own dashboard.
+    """
+    import main
+    from models.user import InstanceConfig
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    config = InstanceConfig.query.one()
+    assert (config.admin_email, config.totp_secret, config.llm_provider) == (
+        'admin@example.com', 'SECRET', 'groq',
+    )
+    # Nothing has been claimed about the business yet, which the checks read as "unset".
+    assert config.business_tin is None
 
 
 def test_migration_converts_float_amounts_to_cents(legacy_database):

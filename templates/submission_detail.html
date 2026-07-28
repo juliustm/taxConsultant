@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+
+{#
+  A submission with no verified receipt behind it.
+
+  Two states share this page: still trying, and gave up. Both need the same three
+  things - what was captured before TRA was contacted, exactly where the retry
+  schedule stands, and a way to put it back on the queue.
+#}
+
+{% set is_failed = submission.status == 'failed' %}
+
+{% block content %}
+<div x-data="submissionPage()">
+
+    <div class="mb-6">
+        <a href="{{ url_for('index') }}" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">&larr; Back to dashboard</a>
+        <div class="mt-2 md:flex md:items-start md:justify-between">
+            <div>
+                <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
+                    Submission #{{ submission.id }}
+                </h1>
+                <p class="mt-1 text-sm text-gray-500">
+                    Submitted {{ submission.received_at.strftime('%d %b %Y %H:%M') }} UTC
+                    by {{ submission.device.name if submission.device else 'an unknown device' }}
+                </p>
+            </div>
+            <div class="mt-4 flex items-center gap-x-3 md:mt-0">
+                {% if is_failed %}
+                    <span class="inline-flex items-center rounded-full bg-red-100 px-3 py-1 text-sm font-medium text-red-800">Gave up</span>
+                {% elif submission.status in ('queued', 'processing') %}
+                    <span class="inline-flex items-center rounded-full bg-yellow-100 px-3 py-1 text-sm font-medium text-yellow-800">Still trying</span>
+                {% else %}
+                    <span class="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-800">{{ submission.status|capitalize }}</span>
+                {% endif %}
+                <button @click="requeue()" :disabled="busy || done"
+                        class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
+                    <span x-text="done ? 'Queued' : (busy ? 'Queueing...' : 'Send to TRA again')"></span>
+                </button>
+            </div>
+        </div>
+        <p x-show="message" class="mt-3 rounded-md p-3 text-sm" :class="failed ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-900'" x-text="message"></p>
+    </div>
+
+    {% if twin %}
+    <div class="mb-6 rounded-md bg-green-50 p-4 ring-1 ring-inset ring-green-600/20">
+        <p class="text-sm text-green-900">
+            This receipt is already in the ledger &mdash;
+            <a href="{{ url_for('receipt_detail', receipt_id=twin.id) }}" class="font-semibold underline">receipt #{{ twin.id }}</a>
+            carries the same verification code. It got through on another submission, so nothing is lost here.
+        </p>
+    </div>
+    {% endif %}
+
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+
+        <!-- What we know without TRA -->
+        <div class="lg:col-span-2 space-y-6">
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">Captured at submission</h2>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Read off the submission itself, before TRA was contacted. None of it depends
+                        on the portal being reachable.
+                    </p>
+                </div>
+                <div class="px-6 py-5">
+                    <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                        {% for label, value in [
+                            ('Verification code', submission.receipt_code),
+                            ('Receipt time', receipt_time),
+                            ('Submitted by', submission.device.name if submission.device else None),
+                            ('Submitted at', submission.received_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC'),
+                            ('Note from the sender', submission.description),
+                            ('Location', submission.location),
+                            ('Region', (region ~ ' (approximate)') if region else None),
+                        ] %}
+                            {% if value %}
+                            <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1">
+                                <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
+                                <dd class="text-right text-sm text-gray-900">{{ value }}</dd>
+                            </div>
+                            {% endif %}
+                        {% endfor %}
+                    </dl>
+
+                    {% if not submission.receipt_code and submission.input_type == 'url' %}
+                    <p class="mt-4 rounded-md bg-yellow-50 p-3 text-sm text-yellow-900">
+                        No verification code could be read from the submitted URL, so it is not in the
+                        form <span class="font-mono">&lt;code&gt;_&lt;HHMMSS&gt;</span> that TRA issues.
+                        That is almost certainly why this will not verify.
+                    </p>
+                    {% endif %}
+
+                    {% if submission.input_type == 'url' %}
+                    <p class="mt-4 break-all text-sm">
+                        <span class="text-gray-500">Submitted URL:</span>
+                        <a href="{{ submission.input_data }}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline">{{ submission.input_data }}</a>
+                    </p>
+                    <p class="mt-1 text-xs text-gray-500">Opening it yourself is the quickest way to tell whether TRA has the receipt at all.</p>
+                    {% endif %}
+
+                    {% if photo_url %}
+                    <div class="mt-4">
+                        <p class="mb-2 text-sm text-gray-500">Photograph</p>
+                        <img src="{{ photo_url }}" alt="Photograph of the receipt" class="w-full max-w-md rounded-md border">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- What went wrong -->
+            {% if submission.error_message or reason %}
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">What went wrong</h2>
+                </div>
+                <div class="space-y-3 px-6 py-5">
+                    {% if reason %}
+                    <p class="text-sm font-medium text-gray-900">{{ reason.title }}</p>
+                    <p class="text-sm text-gray-600">{{ reason.detail }}</p>
+                    <p class="text-sm text-gray-900"><span class="font-medium">What to do:</span> {{ reason.action }}</p>
+                    {% else %}
+                    <p class="text-sm font-medium text-gray-900">Processing failed</p>
+                    {% endif %}
+                    {% if submission.error_message %}
+                    <details class="pt-2">
+                        <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Exact message</summary>
+                        <p class="mt-2 whitespace-pre-wrap break-words rounded bg-gray-50 p-3 font-mono text-xs text-gray-700">{{ submission.error_message }}</p>
+                    </details>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Where the retry schedule stands -->
+        <div>
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">Retry schedule</h2>
+                </div>
+                <div class="space-y-4 px-6 py-5 text-sm">
+                    <div class="flex justify-between gap-x-4">
+                        <span class="text-gray-500">Attempts made</span>
+                        <span class="text-gray-900">
+                            {{ plan.attempts_used }}{% if plan.attempts_total %} of {{ plan.attempts_total }}{% endif %}
+                        </span>
+                    </div>
+
+                    {% if plan.next_attempt_at %}
+                    <div class="flex justify-between gap-x-4">
+                        <span class="text-gray-500">Next attempt</span>
+                        <span class="text-right text-gray-900">
+                            {% if plan.due %}
+                                <span class="font-medium text-amber-600">due now</span>
+                            {% else %}
+                                <span x-text="countdown"></span>
+                            {% endif %}
+                            <span class="block text-xs text-gray-500">{{ plan.next_attempt_at[:16]|replace('T', ' ') }} UTC</span>
+                        </span>
+                    </div>
+                    {% endif %}
+
+                    {% if plan.gives_up_after_minutes %}
+                    <div class="flex justify-between gap-x-4">
+                        <span class="text-gray-500">Gives up after</span>
+                        <span class="text-gray-900">
+                            {% set hours = (plan.gives_up_after_minutes / 60)|round(1) %}
+                            {% if hours >= 24 %}about {{ (hours / 24)|round(1) }} days{% else %}about {{ hours }} hours{% endif %}
+                            <span class="block text-xs text-gray-500">from the first attempt</span>
+                        </span>
+                    </div>
+                    {% endif %}
+
+                    {% if is_failed %}
+                    <p class="rounded-md bg-gray-50 p-3 text-xs text-gray-600">
+                        {% if plan.retryable %}
+                            Every scheduled attempt was used without success, so it stopped on its own.
+                            Sending it again starts a fresh schedule.
+                        {% else %}
+                            This failure cannot be fixed by trying again, so no retries were scheduled.
+                            Sending it again will fail the same way unless the underlying problem is fixed first.
+                        {% endif %}
+                    </p>
+                    {% elif plan.due %}
+                    <p class="rounded-md bg-amber-50 p-3 text-xs text-amber-900">
+                        This attempt is already due. The queue runs when a new receipt arrives or when
+                        the scheduled task runner fires &mdash; use the button above to run it now.
+                    </p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="mt-4 rounded-lg bg-white p-5 text-xs text-gray-500 shadow ring-1 ring-black ring-opacity-5">
+                <p class="mb-2 font-medium text-gray-900">How retries work</p>
+                <p>
+                    Attempts are spaced further apart each time, and the spacing depends on what went
+                    wrong: a receipt the vendor has not uploaded is worth waiting a day for, while a
+                    rate-limited request is worth retrying in minutes. Nothing is retried inside the
+                    request that discovered the failure &mdash; the next attempt is written on the job
+                    and picked up by a later run.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function submissionPage() {
+    return {
+        busy: false,
+        done: false,
+        failed: false,
+        message: '',
+        // Rendered from the server's own UTC timestamp rather than a duration baked
+        // into the HTML, so leaving the tab open does not freeze the countdown.
+        nextAttemptAt: {% if plan.next_attempt_at %}{{ (plan.next_attempt_at ~ 'Z')|tojson }}{% else %}null{% endif %},
+        countdown: '',
+
+        init() {
+            if (!this.nextAttemptAt) return;
+            this.tick();
+            setInterval(() => this.tick(), 1000);
+        },
+        tick() {
+            const seconds = Math.round((new Date(this.nextAttemptAt) - new Date()) / 1000);
+            if (seconds <= 0) { this.countdown = 'due now'; return; }
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            this.countdown = days ? `in ${days}d ${hours}h`
+                : (hours ? `in ${hours}h ${minutes}m` : `in ${minutes}m ${seconds % 60}s`);
+        },
+        async requeue() {
+            this.busy = true;
+            this.failed = false;
+            try {
+                const response = await fetch('{{ url_for('retry_submission', submission_id=submission.id) }}', { method: 'POST' });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'The queue refused it.');
+                this.done = true;
+                this.message = 'Back on the queue. Reload in a moment to see the outcome.';
+            } catch (error) {
+                this.failed = true;
+                this.message = error.message;
+            } finally {
+                this.busy = false;
+            }
+        },
+    }
+}
+</script>
+{% endblock %}

@@ -45,38 +45,26 @@
                         TaxConsult
                     </div>
                     <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
-                        
-                        <!-- Dashboard Link -->
-                        <a href="{{ url_for('index') }}" 
+                        {# A receipt page is reached from the dashboard, so it keeps that tab lit. #}
+                        {% set nav_items = [
+                            ('index', 'Dashboard', ['index', 'receipt_detail']),
+                            ('insights', 'Insights', ['insights']),
+                            ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
+                            ('vendors', 'Vendors', ['vendors']),
+                            ('queue_status', 'Queue', ['queue_status']),
+                            ('configure_instance', 'Configuration', ['configure_instance']),
+                        ] %}
+                        {% for endpoint, label, active_on in nav_items %}
+                        <a href="{{ url_for(endpoint) }}"
                            class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
-                                  {% if request.endpoint == 'index' %}
+                                  {% if request.endpoint in active_on %}
                                     border-indigo-500 text-gray-900
                                   {% else %}
                                     border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
                                   {% endif %}">
-                           Dashboard
+                           {{ label }}
                         </a>
-
-                        <a href="{{ url_for('queue_status') }}" class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
-                                  {% if request.endpoint == 'queue_status' %}
-                                    border-indigo-500 text-gray-900
-                                  {% else %}
-                                    border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
-                                  {% endif %}">
-                            Queue
-                        </a>
-
-                        <!-- Configuration Link -->
-                        <a href="{{ url_for('configure_instance') }}"
-                           class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
-                                  {% if request.endpoint == 'configure_instance' %}
-                                    border-indigo-500 text-gray-900
-                                  {% else %}
-                                    border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
-                                  {% endif %}">
-                           Configuration
-                        </a>
-
+                        {% endfor %}
                     </div>
                 </div>
                 <div class="hidden sm:ml-6 sm:flex sm:items-center">

@@ -35,7 +35,28 @@
                 <input type="hidden" name="active_tab" :value="activeTab">
                 
                 <div x-show="activeTab === 'general-settings'" class="bg-white py-6 px-4 sm:p-6">
-                    <h3 class="text-base font-semibold leading-6 text-gray-900">LLM Configuration</h3>
+                    <h3 class="text-base font-semibold leading-6 text-gray-900">Your Business</h3>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Input VAT is only claimable on a tax invoice made out to your TIN. Without it,
+                        every receipt has to be treated as if it might belong to someone else.
+                    </p>
+                    <div class="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-6">
+                        <div class="sm:col-span-6">
+                            <label for="business_name" class="block text-sm font-medium leading-6 text-gray-900">Registered Name</label>
+                            <input type="text" name="business_name" id="business_name" value="{{ config.business_name or '' }}" placeholder="As registered with TRA" class="mt-2 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
+                        </div>
+                        <div class="sm:col-span-3">
+                            <label for="business_tin" class="block text-sm font-medium leading-6 text-gray-900">Your TIN</label>
+                            <input type="text" name="business_tin" id="business_tin" value="{{ config.business_tin or '' }}" placeholder="e.g. 108537108" class="mt-2 block w-full rounded-md border-0 py-1.5 font-mono text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
+                            <p class="mt-2 text-xs text-gray-500">Receipts are matched against this to decide whether the input VAT on them is yours to claim.</p>
+                        </div>
+                        <div class="sm:col-span-3">
+                            <label for="business_vrn" class="block text-sm font-medium leading-6 text-gray-900">Your VRN</label>
+                            <input type="text" name="business_vrn" id="business_vrn" value="{{ config.business_vrn or '' }}" placeholder="Leave blank if not VAT-registered" class="mt-2 block w-full rounded-md border-0 py-1.5 font-mono text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
+                        </div>
+                    </div>
+
+                    <h3 class="mt-10 border-t border-gray-200 pt-6 text-base font-semibold leading-6 text-gray-900">LLM Configuration</h3>
                     <p class="mt-1 text-sm text-gray-500">Configure the AI provider for receipt processing.</p>
                     <div class="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-6">
                         <div class="sm:col-span-3">

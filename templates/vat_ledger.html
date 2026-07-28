@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% macro money(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.2f}'.format(cents / 100) }}{%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+<div class="mb-6 md:flex md:items-start md:justify-between">
+    <div>
+        <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">VAT Ledger</h1>
+        <p class="mt-2 max-w-2xl text-sm text-gray-500">
+            Input tax for {{ start.strftime('%B %Y') }}, receipt by receipt. Every receipt in the
+            period is assessed on its own, because the VAT charged on a receipt and the VAT you may
+            actually claim are different numbers.
+        </p>
+    </div>
+    <form method="get" class="mt-4 md:mt-0">
+        <label for="period" class="sr-only">Period</label>
+        <select name="period" id="period" onchange="this.form.submit()"
+                class="rounded-md border-0 py-1.5 pl-3 pr-10 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-indigo-600 sm:text-sm">
+            {% for option in periods %}
+            <option value="{{ option }}" {% if option == period %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+        </select>
+    </form>
+</div>
+
+{% if not business or not business.business_tin %}
+<div class="mb-6 rounded-md bg-yellow-50 p-4 ring-1 ring-inset ring-yellow-600/20">
+    <p class="text-sm text-yellow-900">
+        Your own TIN is not set, so no receipt here has been checked against it.
+        <a href="{{ url_for('configure_instance') }}" class="font-semibold underline">Set it under Configuration</a>
+        &mdash; until then, every figure below assumes each receipt was issued to you.
+    </p>
+</div>
+{% endif %}
+
+<!-- The figures a return is filed from -->
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Input VAT recoverable</dt>
+        <dd class="mt-1 text-2xl font-semibold text-green-700">{{ money(totals.recoverable) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">of {{ money(totals.charged) }} charged</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Standard-rated purchases</dt>
+        <dd class="mt-1 text-2xl font-semibold text-gray-900">{{ money(totals.standard_excl) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">excluding VAT</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Zero-rated or exempt</dt>
+        <dd class="mt-1 text-2xl font-semibold text-gray-900">{{ money(totals.exempt) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">carries no input tax</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Return due</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-red-700' if days_to_due < 0 else ('text-amber-600' if days_to_due <= 7 else 'text-gray-900') }}">
+            {% if days_to_due < 0 %}{{ -days_to_due }} days late{% else %}{{ days_to_due }} days{% endif %}
+        </dd>
+        <dd class="mt-1 text-xs text-gray-500">{{ due.strftime('%d %b %Y') }}</dd>
+    </div>
+</div>
+
+{% if blocked %}
+<div class="mt-8 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+    <div class="border-b border-gray-200 bg-red-50 px-6 py-4">
+        <h2 class="text-base font-semibold text-red-900">
+            {{ money(totals.charged - totals.recoverable) }} of VAT you cannot claim
+        </h2>
+        <p class="mt-1 text-sm text-red-800">
+            {{ blocked|length }} receipt(s) charged VAT that is not recoverable. Each one is money
+            already paid; most are fixable by asking the supplier for a corrected invoice.
+        </p>
+    </div>
+    <ul class="divide-y divide-gray-100">
+        {% for entry in blocked %}
+        <li class="px-6 py-3">
+            <div class="flex items-start justify-between gap-x-4">
+                <div class="min-w-0">
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm font-medium text-indigo-600 hover:underline">
+                        {{ entry.receipt.vendor_name or 'Unnamed vendor' }}
+                    </a>
+                    <p class="mt-0.5 text-sm text-gray-600">{{ entry.assessment.recovery_blockers|join('; and ') }}.</p>
+                </div>
+                <div class="whitespace-nowrap text-right">
+                    <p class="font-mono text-sm text-red-700">{{ money(entry.assessment.input_vat_cents) }}</p>
+                    <p class="text-xs text-gray-500">{{ entry.receipt.receipt_date.isoformat() if entry.receipt.receipt_date else 'undated' }}</p>
+                </div>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<div class="mt-8 overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+    <table class="min-w-full divide-y divide-gray-300">
+        <thead class="bg-gray-50">
+            <tr>
+                <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">Date</th>
+                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Supplier</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Gross</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Net (standard)</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">VAT charged</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Recoverable</th>
+                <th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-6"><span class="sr-only">View</span></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200 bg-white">
+            {% for entry in entries %}
+            {% set receipt = entry.receipt %}
+            {% set assessment = entry.assessment %}
+            <tr class="{{ 'bg-gray-50 text-gray-400' if not receipt.is_expense }}">
+                <td class="whitespace-nowrap py-3 pl-4 pr-3 text-sm text-gray-500 sm:pl-6">{{ receipt.receipt_date.isoformat() if receipt.receipt_date else '--' }}</td>
+                <td class="px-3 py-3 text-sm">
+                    <span class="font-medium text-gray-900">{{ receipt.vendor_name or 'Unnamed vendor' }}</span>
+                    {% if not receipt.is_expense %}
+                    <span class="ml-1 inline-flex items-center rounded-md bg-red-50 px-1.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">{{ 'cancelled' if receipt.is_cancelled else 'test' }}</span>
+                    {% endif %}
+                    <span class="block font-mono text-xs text-gray-500">{{ receipt.vendor_tin or 'no TIN' }}</span>
+                </td>
+                <td class="whitespace-nowrap px-3 py-3 text-right font-mono text-sm">{{ money(receipt.total_incl_tax_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-3 text-right font-mono text-sm">{{ money(assessment.standard_rated_excl_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-3 text-right font-mono text-sm">{{ money(assessment.input_vat_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-3 text-right font-mono text-sm {{ 'text-green-700' if assessment.recoverable_vat_cents > 0 else 'text-gray-400' }}">
+                    {{ money(assessment.recoverable_vat_cents) }}
+                </td>
+                <td class="relative whitespace-nowrap py-3 pl-3 pr-4 text-right text-sm sm:pr-6">
+                    <a href="{{ url_for('receipt_detail', receipt_id=receipt.id) }}" class="font-medium text-indigo-600 hover:text-indigo-900">View</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="py-12 text-center text-sm text-gray-500">No receipts dated in {{ start.strftime('%B %Y') }}.</td></tr>
+            {% endfor %}
+        </tbody>
+        {% if entries %}
+        <tfoot class="bg-gray-50 font-semibold">
+            <tr>
+                <td class="py-3 pl-4 pr-3 text-sm text-gray-900 sm:pl-6" colspan="2">{{ entries|length }} receipt(s)</td>
+                <td class="px-3 py-3 text-right font-mono text-sm text-gray-900">{{ money(totals.gross) }}</td>
+                <td class="px-3 py-3 text-right font-mono text-sm text-gray-900">{{ money(totals.standard_excl) }}</td>
+                <td class="px-3 py-3 text-right font-mono text-sm text-gray-900">{{ money(totals.charged) }}</td>
+                <td class="px-3 py-3 text-right font-mono text-sm text-green-700">{{ money(totals.recoverable) }}</td>
+                <td></td>
+            </tr>
+        </tfoot>
+        {% endif %}
+    </table>
+</div>
+{% endblock %}

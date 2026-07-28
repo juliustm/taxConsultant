@@ -16,14 +16,10 @@ import openai
 import base64
 import json
 
-# Fixed set, so categories can be grouped and reported on. A free-text category is a
-# category that is spelled three different ways by the end of the quarter.
-EXPENSE_CATEGORIES = [
-    "fuel", "vehicle_running", "travel", "accommodation", "meals_entertainment",
-    "utilities", "telecom", "rent", "office_supplies", "professional_services",
-    "repairs_maintenance", "insurance", "bank_charges", "marketing",
-    "inventory_purchases", "capital_asset", "staff_costs", "taxes_levies", "other",
-]
+# The fixed category set lives in utils.classify, which decides the same question
+# from the item text alone. Imported rather than restated so the model can never
+# return a category the deterministic classifier has no bucket for.
+from utils.classify import EXPENSE_CATEGORIES
 
 JUDGMENT_SYSTEM_PROMPT = """
 You are an expert in Tanzanian tax compliance (Income Tax Act / VAT Act) reviewing a

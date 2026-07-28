@@ -183,7 +183,8 @@ def test_cancelled_receipt_is_stored_but_not_counted(app, device, config, submit
     # And it stays out of the spending figures.
     receipt.receipt_date = date.today()
     db.session.commit()
-    assert main.calculate_dashboard_stats()['today'] == {'count': 0, 'total_cents': 0, 'total': 0.0}
+    today = main.calculate_dashboard_stats()['today']
+    assert (today['count'], today['total_cents'], today['total']) == (0, 0, 0.0)
 
 
 def test_test_receipts_are_excluded_from_totals(app, device):
@@ -216,7 +217,7 @@ def test_stats_count_when_money_was_spent_not_when_it_was_scanned(app, device):
 
     # Both were processed just now; only one was spent today.
     assert old.processed_at.date() == date.today()
-    assert stats['today'] == {'count': 1, 'total_cents': 25_00, 'total': 25.0}
+    assert (stats['today']['count'], stats['today']['total_cents']) == (1, 25_00)
     assert stats['1y']['count'] == 2
     assert stats['1y']['total_cents'] == 1_025_00
 
@@ -228,6 +229,41 @@ def test_stats_ignore_receipts_dated_beyond_the_window(app, device):
 
     assert main.calculate_dashboard_stats()['7d']['count'] == 0
     assert main.calculate_dashboard_stats()['4w']['count'] == 1
+
+
+def test_stats_compare_each_period_with_the_one_before_it(app, device):
+    """
+    A total on its own is not a figure anyone can act on.
+
+    100.00 this week against 50.00 the week before is a doubling; the card has to be
+    able to say so, which means the previous window has to be measured too.
+    """
+    import main
+
+    store_receipt(app, device, receipt_date=date.today(), total_incl_tax_cents=100_00)
+    store_receipt(app, device, receipt_date=date.today() - timedelta(days=9), total_incl_tax_cents=50_00)
+
+    week = main.calculate_dashboard_stats()['7d']
+
+    assert week['total_cents'] == 100_00
+    assert week['previous_total_cents'] == 50_00
+    assert week['delta_pct'] == 100.0
+    # Oldest bucket first, so the sparkline reads left to right and ends on today.
+    assert len(week['series']) == 7 and week['series'][-1] == 100_00
+
+
+def test_no_previous_spending_reports_no_percentage_change(app, device):
+    """
+    There is no percentage change from nothing.
+
+    Rendering it as +0% or +100% would both be inventions, so the card is given None
+    and shows nothing at all.
+    """
+    import main
+
+    store_receipt(app, device, receipt_date=date.today(), total_incl_tax_cents=100_00)
+
+    assert main.calculate_dashboard_stats()['7d']['delta_pct'] is None
 
 
 # --- Vendors ----------------------------------------------------------------
@@ -358,7 +394,7 @@ def test_dashboard_and_csv_render_a_stored_receipt(app, device, config, submit, 
     assert '24273000.00' in body
     assert '03TZ343001520' in body           # EFD serial
     assert 'SUMMARIZED SALE - E' in body     # line items
-    assert json.loads(main.prepare_submissions_for_frontend([]))  == []
+    assert main.prepare_submissions_for_frontend([]) == []
 
 
 def test_unparsable_page_fails_the_submission_instead_of_guessing(app, device, config, submit, monkeypatch):

@@ -1,0 +1,452 @@
+{% extends "base.html" %}
+
+{#
+  Everything the receipts say once you stop reading them one at a time.
+
+  Rendered entirely by Jinja. There is no state on this page and nothing to fetch, so
+  there is no reason for it to depend on JavaScript running - a page of figures should
+  not be able to fail to a blank screen.
+#}
+
+{% macro money(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.0f}'.format((cents / 100)|round(0, 'floor')) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro exact(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.2f}'.format(cents / 100) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro bar(share, colour='bg-indigo-500') %}
+    <div class="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
+        <div class="h-full rounded-full {{ colour }}" style="width: {{ [share, 100]|min }}%"></div>
+    </div>
+{% endmacro %}
+
+{% macro section(title, subtitle) %}
+    <h2 class="text-lg font-semibold text-gray-900">{{ title }}</h2>
+    <p class="mt-1 text-sm text-gray-500">{{ subtitle }}</p>
+{% endmacro %}
+
+{% block content %}
+
+<div class="md:flex md:items-start md:justify-between">
+    <div>
+        <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Insights</h1>
+        <p class="mt-2 text-sm text-gray-500">
+            {{ receipt_count }} receipt(s) dated {{ start.strftime('%d %b %Y') }} to {{ today.strftime('%d %b %Y') }}.
+            Everything below is computed from them; nothing here is a model's opinion.
+        </p>
+    </div>
+    <form method="get" class="mt-4 md:mt-0">
+        <label for="window" class="sr-only">Period</label>
+        <select name="window" id="window" onchange="this.form.submit()"
+                class="rounded-md border-0 py-1.5 pl-3 pr-10 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-indigo-600 sm:text-sm">
+            <option value="30" {% if window == '30' %}selected{% endif %}>Last 30 days</option>
+            <option value="90" {% if window == '90' %}selected{% endif %}>Last 90 days</option>
+            <option value="365" {% if window == '365' %}selected{% endif %}>Last 12 months</option>
+        </select>
+    </form>
+</div>
+
+{% if not receipt_count %}
+    <div class="mt-8 rounded-lg bg-white py-16 text-center shadow ring-1 ring-black ring-opacity-5">
+        <p class="text-sm text-gray-500">No receipts dated in this period yet.</p>
+        <p class="mt-1 text-sm text-gray-400">Insights need a few receipts before they can say anything worth acting on.</p>
+    </div>
+{% else %}
+
+<!-- The headline: what this period costs you if you do nothing -->
+<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Input VAT recoverable</dt>
+        <dd class="mt-1 text-2xl font-semibold text-green-700">{{ money(attention.recoverable_cents) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">yours to claim</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">VAT you cannot claim</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-red-700' if attention.blocked_cents else 'text-gray-400' }}">{{ money(attention.blocked_cents) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">across {{ attention.blocked_total }} receipt(s)</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Expiring within 30 days</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-amber-600' if attention.expiring_cents else 'text-gray-400' }}">{{ money(attention.expiring_cents) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">{{ attention.expiring|length }} receipt(s) near the deadline</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Withholding tax indicated</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-purple-700' if attention.wht_cents else 'text-gray-400' }}">{{ money(attention.wht_cents) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">on service purchases</dd>
+    </div>
+</div>
+
+{% if not business or not business.business_tin %}
+<div class="mt-6 rounded-md bg-yellow-50 p-4 ring-1 ring-inset ring-yellow-600/20">
+    <p class="text-sm text-yellow-900">
+        Your own TIN is not set, so no receipt has been checked against it and the recoverable
+        figure above assumes every receipt was issued to you.
+        <a href="{{ url_for('configure_instance') }}" class="font-semibold underline">Set it under Configuration</a>.
+    </p>
+</div>
+{% endif %}
+
+<!-- 1. Money already lost, and why -->
+{% if attention.reasons %}
+<div class="mt-10">
+    {{ section('Why VAT is being lost', 'The reasons behind the ' ~ money(attention.blocked_cents) ~ ' above, most expensive first. One habit is usually behind most of it.') }}
+    <div class="mt-4 space-y-3">
+        {% for reason in attention.reasons %}
+        <div class="rounded-lg bg-white p-4 shadow ring-1 ring-black ring-opacity-5">
+            <div class="flex items-baseline justify-between gap-x-4">
+                {# Not |capitalize: it lower-cases the rest of the string, and these
+                   reasons contain 'TIN' and 'VAT'. #}
+                <p class="text-sm font-medium text-gray-900">{{ reason.reason[0]|upper }}{{ reason.reason[1:] }}</p>
+                <p class="whitespace-nowrap font-mono text-sm text-red-700">{{ exact(reason.cents) }}</p>
+            </div>
+            <p class="mt-1 text-xs text-gray-500">{{ reason.count }} receipt(s)</p>
+            <div class="mt-2">{{ bar(reason.cents * 100 / attention.blocked_cents if attention.blocked_cents else 0, 'bg-red-500') }}</div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <ul class="divide-y divide-gray-100">
+            {% for entry in attention.blocked %}
+            <li class="flex items-start justify-between gap-x-4 px-5 py-3">
+                <div class="min-w-0">
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    <p class="mt-0.5 text-xs text-gray-500">{{ entry.assessment.recovery_blockers|join('; and ') }}</p>
+                </div>
+                <div class="whitespace-nowrap text-right">
+                    <p class="font-mono text-sm text-red-700">{{ exact(entry.assessment.input_vat_cents) }}</p>
+                    <p class="text-xs text-gray-400">{{ entry.receipt.receipt_date.isoformat() if entry.receipt.receipt_date else 'undated' }}</p>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% if attention.blocked_total > attention.blocked|length %}
+        <p class="border-t border-gray-100 px-5 py-2 text-xs text-gray-500">and {{ attention.blocked_total - attention.blocked|length }} more.</p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<!-- 2. Money about to be lost -->
+{% if attention.expiring %}
+<div class="mt-10">
+    {{ section('Claim these before they expire', 'Input tax has to be claimed within six months of the invoice date. After that the expense still counts, but the VAT on it is simply gone.') }}
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <ul class="divide-y divide-gray-100">
+            {% for entry in attention.expiring %}
+            <li class="flex items-center justify-between gap-x-4 px-5 py-3">
+                <div class="min-w-0">
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    <p class="mt-0.5 text-xs text-gray-500">closes {{ entry.assessment.claim_deadline.strftime('%d %b %Y') }}</p>
+                </div>
+                <div class="whitespace-nowrap text-right">
+                    <p class="font-mono text-sm text-gray-900">{{ exact(entry.assessment.recoverable_vat_cents) }}</p>
+                    <p class="text-xs font-medium text-amber-600">{{ entry.assessment.claim_days_left }} day(s) left</p>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endif %}
+
+<!-- 3. Where the money goes -->
+<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div>
+        {{ section('Where the money goes', 'By expense category, largest first.') }}
+        <div class="mt-4 space-y-3 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            {% for entry in categories %}
+            <div>
+                <div class="flex items-baseline justify-between gap-x-4">
+                    <p class="truncate text-sm text-gray-900">{{ entry.category }}</p>
+                    <p class="whitespace-nowrap text-sm text-gray-500">
+                        <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
+                        <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>
+                    </p>
+                </div>
+                <div class="mt-1">{{ bar(entry.share_pct) }}</div>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500">Nothing categorised yet.</p>
+            {% endfor %}
+        </div>
+
+        <div class="mt-4 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            <p class="text-sm font-medium text-gray-900">Monthly spend</p>
+            {% set peak = months|map(attribute='cents')|max %}
+            <div class="mt-4 flex items-end gap-x-2" style="height: 7rem;">
+                {% for entry in months %}
+                <div class="flex flex-1 flex-col items-center justify-end gap-y-1" style="height: 100%;">
+                    <span class="text-[10px] text-gray-500">{{ money(entry.cents) }}</span>
+                    {# A month with no spending still gets a visible sliver, so the gap reads as zero rather than as missing. #}
+                    <div class="w-full rounded-t bg-indigo-500" style="height: {{ (entry.cents * 100 / peak) if peak else 0 }}%; min-height: 2px;"></div>
+                    <span class="text-[10px] text-gray-400">{{ entry.label[5:] }}</span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <div>
+        {{ section('Where it is spent', 'From the coordinates the submitting device attached. Regions are approximate - the nearest regional centre, worked out offline.') }}
+        <div class="mt-4 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            <div class="flex flex-col gap-4 sm:flex-row">
+                {# The 31 regional centres are drawn first, faintly: they are exact, and
+                   Tanzania's shape emerges from them well enough to place a receipt
+                   without a hand-drawn border pretending to a precision it lacks. #}
+                <svg viewBox="-4 -4 108 108" class="h-56 w-full flex-shrink-0 sm:w-52" role="img"
+                     aria-label="Receipt locations across Tanzania, with the 31 regional centres for reference">
+                    <rect x="0" y="0" width="100" height="100" rx="2" class="fill-gray-50 stroke-gray-200" stroke-width="0.5"></rect>
+                    {% for reference in map_reference %}
+                    <circle cx="{{ reference.x }}" cy="{{ reference.y }}" r="0.7" class="fill-gray-300">
+                        <title>{{ reference.name }}</title>
+                    </circle>
+                    {% endfor %}
+                    {% for point in map_points %}
+                    <circle cx="{{ point.x }}" cy="{{ point.y }}" r="{{ point.r }}" class="fill-indigo-500/60 stroke-indigo-600/80" stroke-width="0.3">
+                        <title>{{ point.vendor_name }} — {{ money(point.cents) }} TZS in {{ point.region }}{% if point.on %} on {{ point.on }}{% endif %}</title>
+                    </circle>
+                    {% endfor %}
+                </svg>
+                <div class="min-w-0 flex-1 space-y-3">
+                    {% for entry in regions %}
+                    <div>
+                        <div class="flex items-baseline justify-between gap-x-4">
+                            <p class="truncate text-sm {{ 'text-gray-400 italic' if entry.region == 'Unknown' else 'text-gray-900' }}">{{ entry.region }}</p>
+                            <p class="whitespace-nowrap text-sm text-gray-500">
+                                <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
+                                <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>
+                            </p>
+                        </div>
+                        <div class="mt-1">{{ bar(entry.share_pct, 'bg-gray-300' if entry.region == 'Unknown' else 'bg-teal-500') }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <p class="mt-3 text-xs text-gray-400">
+                {% if map_points %}
+                    Dot area is proportional to the amount spent. Grey dots are the 31 regional centres,
+                    shown for reference. Drawn offline &mdash; no tiles are fetched, so nobody outside is
+                    told where this business operates.
+                {% else %}
+                    No receipt carries a location yet. Devices attach one when they submit.
+                {% endif %}
+            </p>
+        </div>
+    </div>
+</div>
+
+<!-- 4. What things cost -->
+{% if price_movements or cheaper %}
+<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+    {% if price_movements %}
+    <div>
+        {{ section('Prices that have moved', 'The latest unit price against the average this supplier used to charge. Nothing is reported from fewer than two earlier purchases.') }}
+        <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <ul class="divide-y divide-gray-100">
+                {% for movement in price_movements %}
+                <li class="px-5 py-3">
+                    <div class="flex items-baseline justify-between gap-x-4">
+                        <p class="truncate text-sm font-medium text-gray-900">{{ movement.description }}</p>
+                        <p class="whitespace-nowrap text-sm font-semibold {{ 'text-red-600' if movement.change_pct > 0 else 'text-green-600' }}">
+                            {{ '+' if movement.change_pct > 0 }}{{ movement.change_pct }}%
+                        </p>
+                    </div>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ movement.vendor_name }} &middot;
+                        {{ exact(movement.baseline_cents) }} &rarr; {{ exact(movement.latest_cents) }} per unit,
+                        against {{ movement.observations }} earlier purchase(s) since {{ movement.since.strftime('%d %b') }}
+                    </p>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if cheaper %}
+    <div>
+        {{ section('Cheaper elsewhere', 'The same item, bought for less from another supplier you already use. Whether that supplier is actually usable is not on the receipt.') }}
+        <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <ul class="divide-y divide-gray-100">
+                {% for saving in cheaper %}
+                <li class="px-5 py-3">
+                    <div class="flex items-baseline justify-between gap-x-4">
+                        <p class="truncate text-sm font-medium text-gray-900">{{ saving.description }}</p>
+                        <p class="whitespace-nowrap text-sm font-semibold text-green-700">{{ saving.saving_pct }}% less</p>
+                    </div>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ saving.current_vendor }} at {{ exact(saving.current_cents) }} &middot;
+                        <a href="{{ url_for('receipt_detail', receipt_id=saving.cheapest_receipt_id) }}" class="text-indigo-600 hover:underline">{{ saving.cheapest_vendor }}</a>
+                        at {{ exact(saving.cheapest_cents) }} on {{ saving.cheapest_on.strftime('%d %b') }}
+                    </p>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- 5. What looks unusual -->
+{% if anomalies or outliers or attention.restricted %}
+<div class="mt-10">
+    {{ section('Worth a second look', 'Patterns, not findings. Each of these has an innocent explanation as often as not - the point is that somebody should know about it.') }}
+    <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <p class="border-b border-gray-100 px-5 py-3 text-sm font-medium text-gray-900">Unusually large</p>
+            <ul class="divide-y divide-gray-100">
+                {% for finding in anomalies %}
+                <li class="px-5 py-3">
+                    <a href="{{ url_for('receipt_detail', receipt_id=finding.receipt_id) }}" class="text-sm text-indigo-600 hover:underline">{{ finding.vendor_name }}</a>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ exact(finding.amount_cents) }} against a typical {{ exact(finding.typical_cents) }}
+                        for {{ finding.category }}, over {{ finding.compared_with }} receipts
+                    </p>
+                </li>
+                {% else %}
+                <li class="px-5 py-3 text-xs text-gray-500">Nothing stands out.</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <p class="border-b border-gray-100 px-5 py-3 text-sm font-medium text-gray-900">Collected somewhere unusual</p>
+            <ul class="divide-y divide-gray-100">
+                {% for finding in outliers %}
+                <li class="px-5 py-3">
+                    <a href="{{ url_for('receipt_detail', receipt_id=finding.receipt_id) }}" class="text-sm text-indigo-600 hover:underline">{{ finding.vendor_name }}</a>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ finding.distance_km }} km from where this supplier's receipts usually come from
+                        {%- if finding.region %} (in {{ finding.region }}{% if finding.usual_region %}, not {{ finding.usual_region }}{% endif %}){% endif %}
+                    </p>
+                </li>
+                {% else %}
+                <li class="px-5 py-3 text-xs text-gray-500">Nothing out of place.</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <p class="border-b border-gray-100 px-5 py-3 text-sm font-medium text-gray-900">Restricted expenditure</p>
+            <ul class="divide-y divide-gray-100">
+                {% for entry in attention.restricted %}
+                <li class="px-5 py-3">
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ entry.assessment.restrictions|map(attribute='flag')|unique|join(', ')|replace('_', ' ') }}
+                    </p>
+                </li>
+                {% else %}
+                <li class="px-5 py-3 text-xs text-gray-500">Nothing restricted.</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- 6. Which suppliers' receipts give TRA trouble -->
+{% if reliability.vendors or reliability.unattributed %}
+<div class="mt-10">
+    {{ section('Receipts that gave TRA trouble',
+               'Attributed by verification code, which is read off the submitted URL before the portal is ever contacted - so even a submission that never verified can be traced to a supplier, provided that receipt reached us some other way.') }}
+
+    {% if reliability.vendors %}
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th scope="col" class="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Supplier</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Submissions</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">First time</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Needed retries</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Never verified</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Trouble rate</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for vendor in reliability.vendors %}
+                <tr>
+                    <td class="px-5 py-3 text-sm text-gray-900">{{ vendor.vendor_name }}</td>
+                    <td class="px-5 py-3 text-right text-sm text-gray-500">{{ vendor.attempts }}</td>
+                    <td class="px-5 py-3 text-right text-sm text-green-700">{{ vendor.clean }}</td>
+                    <td class="px-5 py-3 text-right text-sm text-amber-600">{{ vendor.retried }}</td>
+                    <td class="px-5 py-3 text-right text-sm {{ 'text-red-700' if vendor.gave_up else 'text-gray-400' }}">{{ vendor.gave_up }}</td>
+                    <td class="px-5 py-3 text-right text-sm font-semibold text-gray-900">{{ vendor.trouble_pct }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if reliability.unattributed %}
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <div class="border-b border-gray-200 bg-gray-50 px-5 py-3">
+            <p class="text-sm font-medium text-gray-900">
+                {{ reliability.unattributed_total }} submission(s) nobody can be blamed for
+            </p>
+            <p class="mt-1 text-xs text-gray-500">
+                These never verified, and their code matches no receipt we hold &mdash; so there is no
+                way to know which supplier issued them. Each one is a receipt somebody still has to
+                chase by hand.
+            </p>
+        </div>
+        <ul class="divide-y divide-gray-100">
+            {% for entry in reliability.unattributed %}
+            <li class="flex items-center justify-between gap-x-4 px-5 py-3">
+                <div class="min-w-0">
+                    <a href="{{ url_for('submission_detail', submission_id=entry.submission_id) }}" class="text-sm font-medium text-indigo-600 hover:underline">Submission #{{ entry.submission_id }}</a>
+                    <p class="mt-0.5 font-mono text-xs text-gray-500">{{ entry.receipt_code or 'no verification code in the URL' }}</p>
+                </div>
+                <div class="whitespace-nowrap text-right">
+                    <p class="text-xs text-gray-600">{{ (failure_titles.get(entry.failure_reason)) or 'Processing failed' }}</p>
+                    <p class="text-xs text-gray-400">{{ entry.received_at.strftime('%d %b') }}</p>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- 7. Suppliers who make you wait -->
+{% if uploaders %}
+<div class="mt-10 mb-6">
+    {{ section('Suppliers who upload late', 'A retry proves the receipt was not on the TRA portal when we first looked. The wait shown is from that first check to the one that succeeded, so it is a lower bound - the receipt may have appeared at any point in between.') }}
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th scope="col" class="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Supplier</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Receipts</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Not there first time</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Median wait</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for uploader in uploaders %}
+                <tr>
+                    <td class="px-5 py-3 text-sm text-gray-900">{{ uploader.vendor_name }}</td>
+                    <td class="px-5 py-3 text-right text-sm text-gray-500">{{ uploader.receipts }}</td>
+                    <td class="px-5 py-3 text-right text-sm text-gray-900">{{ uploader.late }} <span class="text-xs text-gray-500">({{ uploader.late_pct }}%)</span></td>
+                    <td class="px-5 py-3 text-right font-mono text-sm text-gray-500">
+                        {% if uploader.median_wait_hours is not none %}{{ uploader.median_wait_hours }} h{% else %}--{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

@@ -27,6 +27,12 @@ This project empowers you to build your own internal, automated accounting assis
 -   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint.
 -   **Exact Extraction from TRA**: The verified receipt page is structured HTML, so it is parsed, not guessed at — vendor, TIN, VRN, EFD serial, Z number, tax office, line items, each printed tax rate and the totals, exactly as TRA issued them. Amounts are stored as integer cents, never floats.
 -   **AI for Judgment, Not Facts**: The LLM (Groq, OpenAI) is given the parsed JSON and asked only what the purchase *means* — expense category, deductibility, input VAT and withholding tax. It cannot invent a date or an amount, it costs a fraction of the tokens the scraped page did, and when it is unreachable the receipt is still recorded in full.
+-   **Compliance Checks, Computed Not Guessed**: Every receipt is scored 0–100 against checks that decide real money — is the invoice made out to *your* TIN (input VAT is not claimable otherwise), does the printed tax follow from the line items at the rate shown, did an unregistered supplier charge VAT, how many days are left in the six-month claim window. Each answer is a sentence you can act on, and none of them involves a model. See `utils/compliance.py`.
+-   **Input VAT You Can Actually Claim**: The dashboard reports what is *recoverable*, not just what was charged — and names the reason whenever those differ.
+-   **Withholding Tax and Capital Assets**: Line item text is classified deterministically (`utils/classify.py`), flagging services that should have had WHT deducted and purchases that are depreciable assets rather than deductible expenses.
+-   **VAT Ledger**: One month at a time, receipt by receipt, with every blocked claim named and a countdown to the 20th.
+-   **Insights**: One page, ordered by what it costs to ignore — VAT already lost and why, claims about to expire, where the money goes by category and region, prices that have moved against what a supplier used to charge, the same item cheaper elsewhere, unusually large purchases, receipts collected somewhere odd, and suppliers who make you wait for their TRA uploads. Nothing is reported from a single observation.
+-   **Locations Without a Geocoder**: Regions are worked out from the device's coordinates against a built-in table of Tanzania's 31 regional centres — offline, no API key, no per-receipt network call, and no third party told where your business spends its money. Labelled approximate wherever it appears.
 -   **Cancelled and Test Receipts**: Detected from the verification page and excluded from every spending total, instead of being counted as real expenses.
 -   **Vision for Photos**: Photographed receipts have no verified page behind them, so a vision model transcribes them; they are flagged as such so they stay distinguishable from the exact ones.
 -   **Multiple Export Destinations**:
@@ -58,6 +64,47 @@ A receipt has two very different kinds of information on it, and they are handle
 **The judgment is asked of an LLM** (`utils/llm_processor.py`). The model receives the parsed JSON - about a tenth of the tokens the scraped page cost - and answers only what the numbers do not contain: which expense category this is, whether it is deductible, whether input VAT is recoverable, whether withholding tax should have been deducted. It is never in a position to invent a date or an amount. If the model is unreachable, the receipt is still recorded in full, with `llm_status` saying why there is no analysis.
 
 Photographed receipts are the exception: with no verified page behind them, a vision model transcribes the fields, and the receipt is marked `extraction_source='llm_vision'`.
+
+**The compliance verdict is computed** (`utils/compliance.py`). It sits in neither camp: it is arithmetic and rule-checking over the parsed facts, so it is exact, free, offline and identical on every run — which is what a figure destined for a tax return has to be. It is computed on read rather than stored, because two of its answers (how many days are left to claim, and whether the buyer TIN matches yours) change as the calendar moves and as the instance is configured; a stored verdict would be stale the day after it was written.
+
+Where the deterministic classifier and the model disagree about a category, the receipt page shows both. That disagreement is a useful signal, not a bug.
+
+## What happens when TRA does not answer
+
+Every failure is typed, and the type decides how patiently it is retried. Nothing is
+retried inside the request that discovered the failure: the next attempt is written on
+the job (`next_attempt_at`) and picked up by a later run.
+
+| Failure | Meaning | Attempts | Spacing | Gives up after |
+|---|---|---|---|---|
+| `TraReceiptNotUploaded` | The vendor has not pushed it to TRA yet | 7 | 15m, 1h, 3h, 6h, 12h, 24h | ~1.9 days |
+| `TraThrottled` | Rate limited | 6 | 2m, 5m, 15m, 45m, 2h | ~3.1 hours |
+| `TraTransportError` | Could not reach the portal | 6 | 1m, 5m, 15m, 45m, 2h | ~3.1 hours |
+| `TraUnexpectedResponse` | Portal served something unrecognisable | 4 | 5m, 30m, 2h | ~2.6 hours |
+| `TraWrongReceiptTime` | Wrong time in the submitted URL | 1 | — | immediately |
+| `TraRefererRejected` | Our bug, not an outage | 1 | — | immediately |
+| `TraParseError` | Page will not parse | 1 | — | immediately |
+
+Separately, *within* a single attempt, a connection-level failure is redialled 4 times
+one second apart before that attempt is counted as failed — TRA's TLS endpoint drops a
+significant share of handshakes, and a fresh connection usually lands on a healthy
+backend. So an unreachable portal costs up to 24 actual connections across ~3 hours
+before the job is given up on.
+
+**The queue only advances when something triggers it.** Two things do: a new submission
+arriving (which is why sending one receipt visibly retries the others), and the
+`/tasks/run` endpoint being called on a schedule. If you have not set up the cron
+trigger, a retry scheduled for tomorrow will not fire until the next receipt arrives —
+so set it up.
+
+A job that has given up is not lost. `/submissions/<id>` shows what was captured before
+TRA was ever contacted — the verification code and receipt time read straight out of the
+submitted URL, the device, the note, the location — says exactly where the retry
+schedule got to and why it stopped, and offers a button that starts a fresh schedule.
+
+## Configuring your own TIN
+
+The single most valuable check — *is this tax invoice even made out to us?* — needs to know who "us" is. Set your registered name, TIN and VRN under **Configuration → General Settings**. Until you do, the check reports itself as unconfigured rather than silently assuming every receipt is yours, and the VAT ledger says so at the top of the page.
 
 ### Running the tests
 

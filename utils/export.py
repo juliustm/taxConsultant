@@ -36,12 +36,22 @@ def _describe_items(items):
 def dispatch_event(event_type: str, payload: dict, config):
     """
     Dispatches an event to all configured export destinations.
+
+    A missing config is survivable and must be. This is called from the failure
+    handler, so raising here would mean an error while reporting an error - and since
+    that handler runs inside the task runner's loop, it would take the whole tick down
+    with it and strand every job behind it. The dashboard is still told, because the
+    live feed does not depend on any of the export destinations being set up.
     """
     print(f"--- Dispatching event: {event_type} ---")
 
     sse_payload = {"event_type": event_type, "data": payload}
     announcer.announce(msg=json.dumps(sse_payload, default=str))
-    
+
+    if config is None:
+        print(f"[Dispatch] No instance config; {event_type} announced but not exported.")
+        return
+
     if config.post_callback_url:
         send_webhook(event_type, payload, config.post_callback_url)
 

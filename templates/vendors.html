@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% macro money(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.2f}'.format(cents / 100) }}{%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+<div class="mb-6">
+    <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Vendors</h1>
+    <p class="mt-2 text-sm text-gray-500">
+        Where the money goes, grouped on the TIN TRA issued rather than the trading name printed
+        on the receipt &mdash; the same supplier is spelled three ways by the end of a quarter.
+        Cancelled and test receipts are excluded.
+    </p>
+</div>
+
+{% if not profiles %}
+    <div class="rounded-lg bg-white py-12 text-center shadow ring-1 ring-black ring-opacity-5">
+        <p class="text-sm text-gray-500">No vendors yet. They appear as receipts are processed.</p>
+    </div>
+{% else %}
+<div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 sm:rounded-lg">
+    <table class="min-w-full divide-y divide-gray-300">
+        <thead class="bg-gray-50">
+            <tr>
+                <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">Vendor</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Total spend</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Share</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Receipts</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">Average</th>
+                <th scope="col" class="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">VAT charged</th>
+                <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Seen</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200 bg-white">
+            {% for profile in profiles %}
+            {% set vendor = profile.vendor %}
+            <tr>
+                <td class="py-4 pl-4 pr-3 text-sm sm:pl-6">
+                    <div class="font-medium text-gray-900">{{ vendor.name or 'Unnamed vendor' }}</div>
+                    <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span class="font-mono text-xs text-gray-500">{{ 'TIN ' ~ vendor.tin if vendor.tin else 'no TIN' }}</span>
+                        {% if vendor.vrn %}
+                            <span class="inline-flex items-center rounded-md bg-green-50 px-1.5 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">VAT registered</span>
+                        {% else %}
+                            <span class="inline-flex items-center rounded-md bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">no VRN</span>
+                        {% endif %}
+                        {% if profile.tills > 1 %}
+                            <span class="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20"
+                                  title="Receipts from more than one EFD serial: separate tills or branches.">{{ profile.tills }} tills</span>
+                        {% endif %}
+                    </div>
+                    {% if vendor.tax_office %}
+                    <div class="mt-0.5 text-xs text-gray-500">{{ vendor.tax_office }}</div>
+                    {% endif %}
+                </td>
+                <td class="whitespace-nowrap px-3 py-4 text-right font-mono text-sm text-gray-900">{{ money(profile.total_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-4 text-right text-sm text-gray-500">
+                    {%- if total_cents -%}
+                        {{ '{:.1f}%'.format(profile.total_cents * 100 / total_cents) }}
+                    {%- else -%}--{%- endif -%}
+                </td>
+                <td class="whitespace-nowrap px-3 py-4 text-right text-sm text-gray-500">{{ profile.count }}</td>
+                <td class="whitespace-nowrap px-3 py-4 text-right font-mono text-sm text-gray-500">{{ money(profile.average_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-4 text-right font-mono text-sm text-gray-500">{{ money(profile.vat_cents) }}</td>
+                <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    {{ profile.first_seen.isoformat() if profile.first_seen else '--' }}
+                    &rarr;
+                    {{ profile.last_seen.isoformat() if profile.last_seen else '--' }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

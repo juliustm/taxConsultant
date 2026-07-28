@@ -14,6 +14,14 @@ class InstanceConfig(db.Model):
     llm_provider = db.Column(db.String(50), nullable=True)
     llm_api_key = db.Column(db.String(200), nullable=True)
 
+    # --- Who this instance files for ---
+    # Without the TIN there is no way to tell a receipt issued to this business from
+    # one issued to a walk-in customer, and that distinction decides whether the input
+    # VAT on it is claimable at all. See utils/compliance.
+    business_name = db.Column(db.String(200), nullable=True)
+    business_tin = db.Column(db.String(50), nullable=True)
+    business_vrn = db.Column(db.String(50), nullable=True)
+
     post_callback_url = db.Column(db.String(500), nullable=True)
     s3_bucket_name = db.Column(db.String(200), nullable=True)
     s3_access_key_id = db.Column(db.String(200), nullable=True)
@@ -40,6 +48,17 @@ class Submission(db.Model):
     description = db.Column(db.Text, nullable=True)
     location = db.Column(db.String(255), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
+    # The exception class behind the last failure, stored as its own field rather than
+    # left to be picked back out of error_message. The dashboard has to say what went
+    # wrong and what to do about it, and parsing that out of a sentence is how a
+    # reworded message silently turns into "Processing failed".
+    failure_reason = db.Column(db.String(50), nullable=True)
+    # The verification code read out of the submitted TRA URL at intake, before the
+    # portal is ever contacted. It is the receipt's identity, so it lets a duplicate be
+    # spotted without spending a request, gives a submission that never verifies
+    # something to show the admin, and ties such a submission to a vendor later if the
+    # same receipt does eventually arrive. See utils/tra.parse_receipt_url.
+    receipt_code = db.Column(db.String(50), nullable=True, index=True)
     retry_count = db.Column(db.Integer, default=0)
     # When a queued job becomes eligible again. NULL means "now". Set instead of
     # sleeping inside the task runner when a fetch has to be retried later.
