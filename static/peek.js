@@ -84,6 +84,8 @@
   let target = null;       // What it is currently describing.
   let openTimer = null;
   let closeTimer = null;
+  let watchHandle = null;  // The frame loop that keeps the card on its anchor.
+  let placedAgainst = '';  // The geometry the card was last positioned for.
   let pointerInCard = false;
   let sequence = 0;        // Rising edge, so a slow fetch cannot overwrite a newer one.
 
@@ -298,15 +300,58 @@
 
     node.style.top = `${Math.round(top)}px`;
     node.style.left = `${Math.round(left)}px`;
+    placedAgainst = geometry(anchor);
   }
 
-  /* Places now, then again once the browser has laid the card out for real. */
+  /*
+   * What the card's position was computed from.
+   *
+   * The anchor's rectangle, the viewport and the card's own size: if any of them
+   * changes, the position derived from them is stale.
+   */
+  function geometry(anchor) {
+    const box = anchor.getBoundingClientRect();
+    return [box.left, box.top, box.width, box.height,
+            window.innerWidth, window.innerHeight,
+            card ? card.offsetHeight : 0, card ? card.offsetWidth : 0]
+      .map(Math.round).join(',');
+  }
+
+  /*
+   * Keeps the card on its anchor for as long as it is open.
+   *
+   * Placing once is not enough, because the page can move underneath a card that is
+   * already on screen. The way this showed up: Tailwind is fetched from a CDN, and
+   * until it arrives the page is unstyled - full width, hard against the left edge.
+   * A card opened in that window is positioned correctly for the layout that exists
+   * at the time; the stylesheet then lands, `max-w-7xl mx-auto` centres the content,
+   * the anchor slides several hundred pixels to the right, and the card is left
+   * behind at the edge of the screen. It happened once per page load and never again,
+   * because by the second hover the stylesheet was there - which is exactly the shape
+   * of a first-paint race.
+   *
+   * A late stylesheet is only the cause that was caught. A web font swapping, an
+   * image finishing, a row Alpine re-rendered underneath an open card and a window
+   * being resized all do the same thing, so this watches the geometry rather than any
+   * one of its causes. It costs one rectangle read per frame while a card is open,
+   * and writes only when something actually moved.
+   */
+  function watch(anchor) {
+    cancelAnimationFrame(watchHandle);
+    const tick = () => {
+      if (target !== anchor) return;
+      if (geometry(anchor) !== placedAgainst) place(anchor);
+      watchHandle = requestAnimationFrame(tick);
+    };
+    watchHandle = requestAnimationFrame(tick);
+  }
+
+  /* Places now, keeps it there, and lets the card take the pointer a frame later. */
   function placeSettled(anchor) {
     place(anchor);
+    watch(anchor);
     requestAnimationFrame(() => {
-      if (target !== anchor) return;
-      place(anchor);
-      card.style.pointerEvents = 'auto';
+      if (target === anchor) card.style.pointerEvents = 'auto';
     });
   }
 
@@ -317,6 +362,9 @@
     target = anchor;
     const ticket = ++sequence;
     const known = anchor.getAttribute('data-peek-title') || anchor.textContent.trim();
+    // Set on both paths, cached or not, so a screen reader is told about the card
+    // whether or not this is the first time the value has been asked about.
+    anchor.setAttribute('aria-describedby', 'peek-card');
 
     if (cache.has(spec)) {
       // Already answered: no skeleton, no flicker, no perceptible wait.
@@ -330,7 +378,6 @@
 
     renderPlaceholder(known, 'Looking…');
     placeSettled(anchor);
-    anchor.setAttribute('aria-describedby', 'peek-card');
 
     load(spec).then((payload) => {
       if (ticket !== sequence) return;
@@ -346,6 +393,8 @@
   function close() {
     sequence += 1;
     pointerInCard = false;
+    cancelAnimationFrame(watchHandle);
+    placedAgainst = '';
     if (target) target.removeAttribute('aria-describedby');
     target = null;
     if (card) {
