@@ -113,7 +113,7 @@
             {% for entry in attention.blocked %}
             <li class="flex items-start justify-between gap-x-4 px-5 py-3">
                 <div class="min-w-0">
-                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" data-peek="compliance:{{ entry.receipt.id }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
                     <p class="mt-0.5 text-xs text-gray-500">{{ entry.assessment.recovery_blockers|join('; and ') }}</p>
                 </div>
                 <div class="whitespace-nowrap text-right">
@@ -139,7 +139,7 @@
             {% for entry in attention.expiring %}
             <li class="flex items-center justify-between gap-x-4 px-5 py-3">
                 <div class="min-w-0">
-                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" data-peek="compliance:{{ entry.receipt.id }}" class="text-sm font-medium text-indigo-600 hover:underline">{{ entry.receipt.vendor_name or 'Unnamed vendor' }}</a>
                     <p class="mt-0.5 text-xs text-gray-500">closes {{ entry.assessment.claim_deadline.strftime('%d %b %Y') }}</p>
                 </div>
                 <div class="whitespace-nowrap text-right">
@@ -161,7 +161,10 @@
             {% for entry in categories %}
             <div>
                 <div class="flex items-baseline justify-between gap-x-4">
-                    <p class="truncate text-sm text-gray-900">{{ entry.category }}</p>
+                    <p class="truncate text-sm text-gray-900">
+                        <a class="peek" href="{{ url_for('index', tab='processed', category=entry.key) }}"
+                           data-peek="category:{{ entry.key }}" data-peek-eager>{{ entry.category }}</a>
+                    </p>
                     <p class="whitespace-nowrap text-sm text-gray-500">
                         <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
                         <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>

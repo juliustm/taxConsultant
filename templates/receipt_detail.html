@@ -20,6 +20,28 @@
     'na':   ('bg-gray-50 text-gray-600 ring-gray-500/20', '–'),
 } %}
 
+{#
+  How this receipt's own values link outward. Built once here rather than at each of
+  the dozen places below that need it, and keyed the same way /vendors/<key> and the
+  hover cards are - a receipt whose vendor never got a Vendor row still resolves on
+  the printed TIN.
+#}
+{% set vendor_key = (receipt.vendor.lookup_key if receipt.vendor else None)
+                    or ('tin:' ~ receipt.vendor_tin if receipt.vendor_tin else None) %}
+{% set vendor_href = url_for('vendor_detail', key=vendor_key) if vendor_key else None %}
+
+{#
+  A value that has more behind it. Renders an anchor where there is a page to open and
+  a focusable span where the card is the whole answer, so every peekable value is
+  reachable by keyboard either way.
+#}
+{% macro peek(value, spec, href=None, classes='') -%}
+    {%- if not spec -%}{{ value }}
+    {%- elif href -%}<a class="peek {{ classes }}" href="{{ href }}" data-peek="{{ spec }}">{{ value }}</a>
+    {%- else -%}<span class="peek {{ classes }}" tabindex="0" role="button" data-peek="{{ spec }}">{{ value }}</span>
+    {%- endif -%}
+{%- endmacro %}
+
 {% block content %}
 <div x-data="receiptPage()">
 
@@ -29,11 +51,15 @@
         <div class="mt-2 md:flex md:items-start md:justify-between">
             <div>
                 <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
-                    {{ receipt.vendor_name or 'Unnamed vendor' }}
+                    {{ peek(receipt.vendor_name or 'Unnamed vendor', 'vendor:' ~ vendor_key if vendor_key else None, vendor_href) }}
                 </h1>
                 <p class="mt-1 text-sm text-gray-500">
                     {{ money(receipt.total_incl_tax_cents) }} TZS
-                    {% if receipt.receipt_date %}on {{ receipt.receipt_date.strftime('%d %B %Y') }}{% endif %}
+                    {% if receipt.receipt_date %}on {{ peek(
+                        receipt.receipt_date.strftime('%d %B %Y'),
+                        'date:' ~ receipt.receipt_date.isoformat(),
+                        url_for('index', tab='processed', start_date=receipt.receipt_date.isoformat(), end_date=receipt.receipt_date.isoformat()),
+                    ) }}{% endif %}
                     {% if receipt.receipt_time %}at {{ receipt.receipt_time.strftime('%H:%M') }}{% endif %}
                     &middot; submission #{{ receipt.submission_id }}
                 </p>
@@ -118,24 +144,30 @@
                     <p class="mt-1 text-sm text-gray-500">As TRA printed it. Nothing on this panel is inferred.</p>
                 </div>
                 <div class="px-6 py-5">
+                    {#
+                      Almost every field here is a key into something larger: the TIN is a
+                      supplier we may hold twelve other receipts from, the EFD serial is one
+                      till among their four, the code is what a duplicate is caught on. Each
+                      one that is carries its own card; the rest are printed as they are.
+                    #}
                     <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                        {% for label, value in [
-                            ('Vendor', receipt.vendor_name),
-                            ('Vendor TIN', receipt.vendor_tin),
-                            ('VRN', receipt.vrn),
-                            ('Tax office', receipt.tax_office),
-                            ('EFD serial', receipt.efd_serial),
-                            ('Receipt no.', receipt.receipt_number),
-                            ('Z number', receipt.z_number),
-                            ('Verification code', receipt.receipt_verification_code),
-                            ('Customer', receipt.customer_name),
-                            ('Customer ID', ((receipt.customer_id_type or '') ~ ' ' ~ (receipt.customer_id or '')).strip()),
-                            ('Phone', receipt.vendor_phone),
+                        {% for label, value, spec, href in [
+                            ('Vendor', receipt.vendor_name, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href),
+                            ('Vendor TIN', receipt.vendor_tin, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href),
+                            ('VRN', receipt.vrn, None, None),
+                            ('Tax office', receipt.tax_office, 'tax_office:' ~ receipt.tax_office if receipt.tax_office else None, None),
+                            ('EFD serial', receipt.efd_serial, 'till:' ~ receipt.efd_serial if receipt.efd_serial else None, None),
+                            ('Receipt no.', receipt.receipt_number, None, None),
+                            ('Z number', receipt.z_number, None, None),
+                            ('Verification code', receipt.receipt_verification_code, 'code:' ~ receipt.receipt_verification_code if receipt.receipt_verification_code else None, None),
+                            ('Customer', receipt.customer_name, 'customer:' ~ receipt.id, None),
+                            ('Customer ID', ((receipt.customer_id_type or '') ~ ' ' ~ (receipt.customer_id or '')).strip(), 'customer:' ~ receipt.id, None),
+                            ('Phone', receipt.vendor_phone, None, None),
                         ] %}
                             {% if value %}
                             <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1">
                                 <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
-                                <dd class="text-sm text-gray-900 text-right">{{ value }}</dd>
+                                <dd class="text-sm text-gray-900 text-right">{{ peek(value, spec, href) }}</dd>
                             </div>
                             {% endif %}
                         {% endfor %}
@@ -154,7 +186,9 @@
                         <tbody>
                             {% for item in receipt.items %}
                             <tr class="border-b border-gray-100">
-                                <td class="py-1.5 pr-2">{{ item.description }}</td>
+                                {# What this line has cost before, here and elsewhere, and what
+                                   buying it implies for withholding tax and capital allowances. #}
+                                <td class="py-1.5 pr-2">{{ peek(item.description, 'item:' ~ receipt.id ~ ':' ~ item.line_number) }}</td>
                                 <td class="py-1.5 text-center text-gray-500">{{ item.quantity if item.quantity is not none else '' }}</td>
                                 <td class="py-1.5 text-right font-mono">{{ money(item.amount_cents) }}</td>
                                 <td class="py-1.5 pl-2 text-center text-xs text-gray-500">{{ item.tax_code or '' }}</td>
@@ -237,7 +271,9 @@
                 </div>
                 <div class="px-6 py-5">
                     {% if receipt.category %}
-                    <span class="mb-3 inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">{{ receipt.category.replace('_', ' ') }}</span>
+                    <a class="peek peek-chip mb-3 inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+                       href="{{ url_for('index', tab='processed', category=receipt.category) }}"
+                       data-peek="category:{{ receipt.category }}">{{ receipt.category.replace('_', ' ') }}</a>
                     {% endif %}
                     {% if assessment.computed_category and assessment.computed_category != receipt.category %}
                     <span class="mb-3 ml-1 inline-flex items-center rounded-md bg-yellow-50 px-2 py-0.5 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20"
@@ -324,6 +360,9 @@
                 <div class="border-b border-gray-200 px-6 py-4">
                     <h2 class="text-base font-semibold text-gray-900">More from this supplier</h2>
                     <p class="mt-1 text-sm text-gray-500">{{ receipt.vendor_name or 'This vendor' }}{% if receipt.vendor_tin %}, TIN {{ receipt.vendor_tin }}{% endif %}</p>
+                    {% if vendor_href %}
+                    <a href="{{ vendor_href }}" class="mt-1 inline-block text-sm font-medium text-indigo-600 hover:text-indigo-500">Everything from this supplier &rarr;</a>
+                    {% endif %}
                 </div>
                 <ul class="divide-y divide-gray-100">
                     {% for sibling in siblings %}

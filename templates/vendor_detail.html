@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+
+{#
+  One supplier, at its own address.
+
+  The vendors table says what a supplier costs. This says what they are like to buy
+  from: which checks their receipts keep failing, what their prices have done, whether
+  they upload to TRA on time, and how much input VAT their paperwork has already cost
+  us. Everything here is computed from receipts we hold - nothing is asked of a model.
+#}
+
+{% macro money(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.2f}'.format(cents / 100) }}{%- endif -%}
+{%- endmacro %}
+
+{% set check_styles = {
+    'pass': ('bg-green-50 text-green-800 ring-green-600/20', '✓'),
+    'warn': ('bg-amber-50 text-amber-800 ring-amber-600/20', '!'),
+    'fail': ('bg-red-50 text-red-800 ring-red-600/20', '✕'),
+    'info': ('bg-blue-50 text-blue-800 ring-blue-600/20', 'i'),
+    'na':   ('bg-gray-50 text-gray-600 ring-gray-500/20', '–'),
+} %}
+
+{% block content %}
+<div class="mb-6">
+    <a href="{{ url_for('vendors') }}" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">&larr; All vendors</a>
+    <div class="mt-2 md:flex md:items-start md:justify-between">
+        <div>
+            <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">{{ name }}</h1>
+            <p class="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-gray-500">
+                <span class="font-mono">{{ 'TIN ' ~ vendor.tin if vendor and vendor.tin else 'no TIN on file' }}</span>
+                {% if vendor and vendor.vrn %}<span class="font-mono">VRN {{ vendor.vrn }}</span>{% endif %}
+                {% if vendor and vendor.tax_office %}
+                    <span class="peek" tabindex="0" role="button" data-peek="tax_office:{{ vendor.tax_office }}">{{ vendor.tax_office }}</span>
+                {% endif %}
+                {% if vendor and vendor.phone %}<span>{{ vendor.phone }}</span>{% endif %}
+            </p>
+        </div>
+        <div class="mt-4 flex flex-wrap items-center gap-2 md:mt-0">
+            {% if vendor and vendor.vrn %}
+                <span class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">VAT registered</span>
+            {% else %}
+                <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">no VRN on file</span>
+            {% endif %}
+            {% if tills|length > 1 %}
+                <span class="inline-flex items-center rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20">{{ tills|length }} tills</span>
+            {% endif %}
+            <a href="{{ url_for('index', tab='processed', search=vendor.tin if vendor and vendor.tin else name) }}"
+               class="rounded-md bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                Show in the dashboard
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- The four figures that decide whether this supplier is worth keeping -->
+<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Total spend</dt>
+        <dd class="mt-1 text-2xl font-semibold text-gray-900">{{ money(spend) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">across {{ assessed }} receipt(s)</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Input VAT recoverable</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-green-700' if totals.recoverable else 'text-gray-400' }}">{{ money(totals.recoverable) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">of {{ money(totals.charged) }} charged</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Blocked by their paperwork</dt>
+        <dd class="mt-1 text-2xl font-semibold {{ 'text-red-700' if totals.blocked else 'text-gray-400' }}">{{ money(totals.blocked) }}</dd>
+        <dd class="mt-1 text-xs text-gray-500">VAT charged that cannot be claimed</dd>
+    </div>
+    <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+        <dt class="text-sm font-medium text-gray-500">Average receipt</dt>
+        <dd class="mt-1 text-2xl font-semibold text-gray-900">{{ money((spend / assessed)|int) if assessed else '---' }}</dd>
+        {# Withholding only appears when the line items actually indicate some; a
+           permanent '0.00' next to an average reads as a property of the average. #}
+        <dd class="mt-1 text-xs text-gray-500">
+            {% if totals.wht %}withholding tax indicated: {{ money(totals.wht) }}
+            {% else %}what a purchase here normally costs{% endif %}
+        </dd>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+    <div class="space-y-6 lg:col-span-2">
+
+        <!-- The record. One bad receipt is an accident; the same check failing nine
+             times is how this supplier works, and that is worth a phone call. -->
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">Compliance record</h2>
+                <p class="mt-1 text-sm text-gray-500">
+                    Every check, across the {{ assessed }} receipt(s) assessed. A check that fails
+                    repeatedly is a habit of this supplier's, not an accident of one receipt.
+                </p>
+            </div>
+            {% if failing %}
+            <ul class="divide-y divide-gray-100">
+                {% for record in failing %}
+                {% set style, glyph = check_styles['fail'] %}
+                <li class="px-6 py-4">
+                    <div class="flex items-center justify-between gap-x-3">
+                        <div class="flex items-center gap-x-2">
+                            <span class="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ring-1 ring-inset {{ style }}">{{ glyph }}</span>
+                            <p class="text-sm font-medium text-gray-900">{{ record.label }}</p>
+                        </div>
+                        <p class="shrink-0 text-sm text-gray-500">
+                            failed on <span class="font-semibold text-red-700">{{ record.fail }}</span> of {{ assessed }}
+                        </p>
+                    </div>
+                    <p class="mt-1 pl-7 text-sm text-gray-600">{{ record.detail }}</p>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="px-6 py-8 text-center text-sm text-gray-500">
+                Nothing fails. Every check passes on every receipt from this supplier.
+            </p>
+            {% endif %}
+            <div class="border-t border-gray-200 bg-gray-50/60 px-6 py-3">
+                <div class="flex flex-wrap gap-x-4 gap-y-1">
+                    {% for record in checks %}
+                    <span class="text-xs text-gray-500">
+                        {{ record.label }}
+                        <span class="font-mono text-green-700">{{ record.pass }}</span>/<span class="font-mono text-amber-600">{{ record.warn }}</span>/<span class="font-mono text-red-700">{{ record.fail }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                <p class="mt-1 text-xs text-gray-400">pass / warn / fail</p>
+            </div>
+        </div>
+
+        <!-- What they charge, and what it has done -->
+        {% if price_movements or cheaper %}
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">Prices</h2>
+                <p class="mt-1 text-sm text-gray-500">
+                    Unit prices, against what this supplier used to charge and against everybody
+                    else. Nothing is reported from a single observation.
+                </p>
+            </div>
+            <ul class="divide-y divide-gray-100">
+                {% for finding in price_movements %}
+                <li class="px-6 py-4">
+                    <div class="flex items-baseline justify-between gap-x-3">
+                        <p class="text-sm font-medium text-gray-900">{{ finding.description }}</p>
+                        <p class="shrink-0 font-mono text-sm {{ 'text-red-700' if finding.change_pct > 0 else 'text-green-700' }}">
+                            {{ '+' if finding.change_pct > 0 }}{{ finding.change_pct }}%
+                        </p>
+                    </div>
+                    <p class="mt-1 text-sm text-gray-600">
+                        Now {{ money(finding.latest_cents) }} a unit against {{ money(finding.baseline_cents) }}
+                        averaged over {{ finding.observations }} earlier purchase(s) since {{ finding.since.isoformat() }}.
+                        <a href="{{ url_for('receipt_detail', receipt_id=finding.receipt_id) }}" class="text-indigo-600 hover:underline">See the receipt</a>
+                    </p>
+                </li>
+                {% endfor %}
+                {% for saving in cheaper %}
+                <li class="px-6 py-4">
+                    <div class="flex items-baseline justify-between gap-x-3">
+                        <p class="text-sm font-medium text-gray-900">{{ saving.description }}</p>
+                        <p class="shrink-0 font-mono text-sm text-green-700">-{{ saving.saving_pct }}% elsewhere</p>
+                    </div>
+                    <p class="mt-1 text-sm text-gray-600">
+                        {{ saving.cheapest_vendor }} charged {{ money(saving.cheapest_cents) }} a unit on
+                        {{ saving.cheapest_on.isoformat() }} against {{ money(saving.current_cents) }} here.
+                        Whether they can actually supply it is not on the receipt.
+                    </p>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Every receipt, most recent first -->
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">Receipts</h2>
+            </div>
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th scope="col" class="px-6 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Date</th>
+                        <th scope="col" class="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Amount</th>
+                        <th scope="col" class="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Input VAT</th>
+                        <th scope="col" class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Score</th>
+                        <th scope="col" class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Category</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for entry in entries %}
+                    {% set score = entry.assessment.score %}
+                    {% set score_style = 'bg-gray-100 text-gray-600' if score is none else ('bg-green-100 text-green-800' if score >= 90 else ('bg-yellow-100 text-yellow-800' if score >= 70 else 'bg-red-100 text-red-800')) %}
+                    <tr data-peek-warm="compliance:{{ entry.receipt.id }}">
+                        <td class="whitespace-nowrap px-6 py-2 text-sm text-gray-500">
+                            <a href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}" class="text-indigo-600 hover:underline">
+                                {{ entry.receipt.receipt_date.isoformat() if entry.receipt.receipt_date else 'undated' }}
+                            </a>
+                        </td>
+                        <td class="whitespace-nowrap px-3 py-2 text-right font-mono text-sm text-gray-900">{{ money(entry.receipt.total_incl_tax_cents) }}</td>
+                        <td class="whitespace-nowrap px-3 py-2 text-right font-mono text-sm {{ 'text-green-700' if entry.assessment.recoverable_vat_cents else 'text-gray-400' }}">
+                            {{ money(entry.assessment.input_vat_cents) }}
+                        </td>
+                        <td class="whitespace-nowrap px-3 py-2 text-sm">
+                            <a class="peek peek-chip inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold {{ score_style }}"
+                               href="{{ url_for('receipt_detail', receipt_id=entry.receipt.id) }}"
+                               data-peek="compliance:{{ entry.receipt.id }}">{{ score if score is not none else '--' }}</a>
+                        </td>
+                        <td class="whitespace-nowrap px-3 py-2 text-sm text-gray-500">
+                            {% if entry.receipt.category %}
+                            <a class="peek peek-chip inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+                               href="{{ url_for('index', tab='processed', category=entry.receipt.category) }}"
+                               data-peek="category:{{ entry.receipt.category }}">{{ entry.receipt.category.replace('_', ' ') }}</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if not entries %}
+            <p class="px-6 py-8 text-center text-sm text-gray-500">No receipts from this supplier yet.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="space-y-6">
+        <!-- Twelve months of spending, drawn from the receipts themselves -->
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">By month</h2>
+            </div>
+            <div class="px-6 py-5">
+                {% set peak = months|map(attribute='cents')|max %}
+                <ul class="space-y-2">
+                    {% for month in months %}
+                    <li class="flex items-center gap-x-3">
+                        <span class="w-16 shrink-0 font-mono text-xs text-gray-500">{{ month.label }}</span>
+                        <span class="h-2 flex-1 rounded-full bg-gray-100">
+                            {# Width is a number we computed from our own figures, never text. #}
+                            <span class="block h-2 rounded-full bg-indigo-500" style="width: {{ (month.cents * 100 / peak)|round(1) if peak else 0 }}%"></span>
+                        </span>
+                        <span class="w-24 shrink-0 text-right font-mono text-xs text-gray-700">{{ money(month.cents) }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <!-- Tills. Two serials against one TIN is a supplier with branches. -->
+        {% if tills %}
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">Tills</h2>
+                <p class="mt-1 text-sm text-gray-500">Each EFD serial is one machine: a branch, or a lane.</p>
+            </div>
+            <ul class="divide-y divide-gray-100">
+                {% for serial, count, cents, first_seen, last_seen in tills %}
+                <li class="px-6 py-3">
+                    <div class="flex items-baseline justify-between gap-x-3">
+                        {% if serial %}
+                        <span class="peek font-mono text-sm text-gray-900" tabindex="0" role="button" data-peek="till:{{ serial }}">{{ serial }}</span>
+                        {% else %}
+                        <span class="font-mono text-sm text-gray-400">no serial printed</span>
+                        {% endif %}
+                        <span class="font-mono text-sm text-gray-700">{{ money(cents) }}</span>
+                    </div>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ count }} receipt(s)
+                        {% if first_seen and last_seen %}· {{ first_seen.isoformat() }} → {{ last_seen.isoformat() }}{% endif %}
+                    </p>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- What we buy from them -->
+        {% if categories %}
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">What we buy here</h2>
+            </div>
+            <ul class="divide-y divide-gray-100">
+                {% for entry in categories %}
+                <li class="flex items-center justify-between px-6 py-2.5">
+                    <a class="peek text-sm text-gray-700" href="{{ url_for('index', tab='processed', category=entry.key) }}"
+                       data-peek="category:{{ entry.key }}">{{ entry.category }}</a>
+                    <span class="text-sm text-gray-500">
+                        <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
+                        <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>
+                    </span>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Do they upload on time? Measured, not assumed. -->
+        {% if uploads %}
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="border-b border-gray-200 px-6 py-4">
+                <h2 class="text-base font-semibold text-gray-900">TRA uploads</h2>
+            </div>
+            <div class="px-6 py-4 text-sm text-gray-600">
+                <p>
+                    {{ uploads.late }} of {{ uploads.receipts }} receipt(s) &mdash; {{ uploads.late_pct }}% &mdash;
+                    were not on the TRA portal when first checked{% if uploads.median_wait_hours %},
+                    and took a median of {{ uploads.median_wait_hours }} hour(s) to appear{% endif %}.
+                </p>
+                <p class="mt-2 text-xs text-gray-500">
+                    A lower bound: the receipt may have appeared at any point between the failed check
+                    and the one that worked.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

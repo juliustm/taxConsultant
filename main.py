@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
-from utils import analytics, compliance, geo
+from utils import analytics, compliance, geo, peek
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import analyse_receipt, extract_receipt_details, LlmUnavailable
@@ -389,6 +389,9 @@ def _read_filters(args):
     return {
         'tab': tab if tab in TAB_FILTERS else 'processed',
         'search': (args.get('search') or '').strip(),
+        # Set by clicking a category anywhere it is shown, so 'what else is fuel?' is
+        # one click rather than a search that would also match a vendor called Fuel.
+        'category': (args.get('category') or '').strip(),
         'start_date': args.get('start_date', ''),
         'end_date': args.get('end_date', ''),
         'sort': sort if sort in SORT_COLUMNS else 'received_at',
@@ -439,6 +442,9 @@ def _filtered_submissions(filters, ordered=True):
             Receipt.receipt_verification_code.ilike(pattern),
             Submission.description.ilike(pattern),
         ))
+
+    if filters.get('category'):
+        query = query.filter(Receipt.category == filters['category'])
 
     start_date = _parse_date_arg(filters['start_date'])
     end_date = _parse_date_arg(filters['end_date'])
@@ -524,7 +530,13 @@ def _filtered_insights(filters):
         'total_cents': total_cents or 0,
         'vat_cents': vat_cents or 0,
         'top_vendors': [
-            {'name': name or 'Unnamed vendor', 'tin': tin, 'count': vendor_count, 'cents': cents or 0}
+            {
+                'name': name or 'Unnamed vendor', 'tin': tin,
+                'count': vendor_count, 'cents': cents or 0,
+                # The same key /vendors/<key> and the hover cards use, built by the
+                # rule that owns it rather than reassembled by the browser.
+                'key': Vendor.make_lookup_key(tin, name),
+            }
             for name, tin, vendor_count, cents in top_vendors
         ],
     }
@@ -1140,6 +1152,27 @@ def api_submissions():
         _read_filters(request.args), _read_page(request.args), _read_page_size(request.args),
     ))
 
+@app.route('/api/peek/<kind>/<path:key>')
+@login_required
+def api_peek(kind, key):
+    """
+    One hover card: everything we hold about a single value printed on a receipt.
+
+    Answers the question the table cannot fit - is this vendor always like this, is
+    this price normal, what does this score actually object to - without navigating
+    away from the row that raised it. The payload shape is the same for every kind,
+    so the browser has one renderer and this endpoint is the only place a new
+    hoverable field has to be taught about. See utils/peek.
+
+    A miss is a 404 rather than an empty card: the key came from our own markup, so
+    nothing behind it means the receipt was deleted or the link is stale, and a card
+    that renders 'Unnamed vendor · 0 receipts' hides that.
+    """
+    card = peek.build(kind, key, business=get_instance_config())
+    if card is None:
+        return jsonify({'error': f'Nothing to show for {kind}.'}), 404
+    return jsonify(card)
+
 @app.route('/receipts/<int:receipt_id>')
 @login_required
 def receipt_detail(receipt_id):
@@ -1402,6 +1435,115 @@ def vendors():
         total_cents=sum(profile['total_cents'] for profile in profiles),
     )
 
+@app.route('/vendors/<path:key>')
+@login_required
+def vendor_detail(key):
+    """
+    One supplier, everything at once.
+
+    The hover card answers 'is this vendor always like this?' in six lines; this is
+    where the answer is shown its working. Two things live here that exist nowhere
+    else in the app: which checks this supplier fails *repeatedly* - one receipt made
+    out to a walk-in customer is an annoyance, nine out of twelve is a conversation to
+    have with them - and what their prices have done over the receipts we hold.
+
+    Keyed on the vendor's lookup key rather than a row id, so the address survives a
+    supplier who had no Vendor row when the receipt was filed, and so every link to
+    here can be built from a receipt without a second query.
+    """
+    vendor, query = peek.vendor_query(key)
+    if query is None:
+        flash('That vendor does not exist.', 'danger')
+        return redirect(url_for('vendors'))
+
+    receipts = (
+        query.options(
+            selectinload(Receipt.items), selectinload(Receipt.tax_lines),
+            joinedload(Receipt.submission),
+        )
+        .order_by(Receipt.receipt_date.desc().nullslast())
+        .limit(peek.MAX_ASSESSED).all()
+    )
+    if not receipts and vendor is None:
+        flash('That vendor does not exist.', 'danger')
+        return redirect(url_for('vendors'))
+
+    config = get_instance_config()
+    today = datetime.utcnow().date()
+
+    # The compliance record: which checks this supplier fails, how often, and what it
+    # costs. Counted across every check rather than only the failures, so 'passes 12
+    # of 12' is visible too - a supplier who never gets it wrong is worth knowing.
+    tally, entries = {}, []
+    totals = {'charged': 0, 'recoverable': 0, 'blocked': 0, 'wht': 0}
+    for receipt in receipts:
+        assessment = assess_receipt(receipt, config)
+        entries.append({'receipt': receipt, 'assessment': assessment})
+
+        totals['charged'] += assessment.input_vat_cents
+        totals['recoverable'] += assessment.recoverable_vat_cents
+        totals['wht'] += assessment.wht_total_cents
+        if assessment.input_vat_cents > 0 and assessment.recoverable_vat_cents == 0:
+            totals['blocked'] += assessment.input_vat_cents
+
+        for check in assessment.checks:
+            record = tally.setdefault(check.id, {
+                'id': check.id, 'label': check.label, 'pass': 0, 'warn': 0, 'fail': 0,
+                'detail': check.detail,
+            })
+            if check.status in ('pass', 'warn', 'fail'):
+                record[check.status] += 1
+            # The wording kept is the most recent failure's, because that is the one
+            # that says what went wrong rather than what went right.
+            if check.status == 'fail':
+                record['detail'] = check.detail
+
+    failing = sorted(
+        (record for record in tally.values() if record['fail']),
+        key=lambda record: record['fail'], reverse=True,
+    )
+
+    tills = (
+        query.with_entities(
+            Receipt.efd_serial, db.func.count(Receipt.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+            db.func.min(Receipt.receipt_date), db.func.max(Receipt.receipt_date),
+        )
+        .group_by(Receipt.efd_serial)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc()).all()
+    )
+
+    # Cheaper-elsewhere needs the other suppliers to compare against, so it is the one
+    # analysis here that cannot run on this vendor's receipts alone.
+    window_start = today - timedelta(days=365)
+    everyone = (
+        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
+        .filter(Submission.status == 'completed', Receipt.receipt_date >= window_start)
+        .options(selectinload(Receipt.items)).all()
+    )
+    name = (vendor.name if vendor else None) or (receipts[0].vendor_name if receipts else None)
+    cheaper = [
+        finding for finding in analytics.cheaper_elsewhere(everyone)
+        if finding['current_vendor'] == name
+    ]
+
+    return render_template(
+        'vendor_detail.html',
+        key=key, vendor=vendor, name=name or 'Unnamed vendor',
+        receipt=receipts[0] if receipts else None,
+        entries=entries, totals=totals, tills=tills,
+        failing=failing, checks=sorted(tally.values(), key=lambda record: record['label']),
+        assessed=len(receipts),
+        spend=sum(receipt.total_incl_tax_cents or 0 for receipt in receipts),
+        categories=analytics.category_breakdown(receipts),
+        months=analytics.monthly_totals(receipts, months=12, today=today),
+        price_movements=analytics.unit_price_movements(receipts),
+        cheaper=cheaper,
+        uploads=next(iter(analytics.vendor_upload_behaviour(receipts)), None),
+        business=config,
+        today=today,
+    )
+
 @app.route('/vat-ledger')
 @login_required
 def vat_ledger():
@@ -1430,7 +1572,10 @@ def vat_ledger():
             Receipt.receipt_date >= start,
             Receipt.receipt_date <= end,
         )
-        .options(selectinload(Receipt.items), selectinload(Receipt.tax_lines))
+        # The vendor row comes along because every supplier on the ledger links to
+        # their profile, and a lazy load there is one query per line of the return.
+        .options(selectinload(Receipt.items), selectinload(Receipt.tax_lines),
+                 joinedload(Receipt.vendor))
         .order_by(Receipt.receipt_date.asc())
         .all()
     )

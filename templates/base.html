@@ -32,6 +32,37 @@
     <meta property="twitter:title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
     <meta property="twitter:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
     <meta property="twitter:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
+
+    {#
+      Peekable values. Anything carrying data-peek is a real link to a real page that
+      also answers itself on hover - see static/peek.js. The dotted underline is the
+      whole affordance: it is how the reader learns which of the values in front of
+      them are keys into something larger, without a page of instructions.
+
+      Chips (a score badge, a category pill) are already boxed, so they get a ring on
+      hover instead of an underline that would cut through their own background.
+    #}
+    <style>
+        .peek {
+            text-decoration: none;
+            border-bottom: 1px dotted rgb(156 163 175);
+            transition: color 120ms ease, border-color 120ms ease;
+        }
+        .peek:hover, .peek:focus-visible {
+            color: rgb(67 56 202);
+            border-bottom-color: rgb(99 102 241);
+        }
+        .peek-chip {
+            border-bottom: none;
+            border-radius: 0.375rem;
+            transition: box-shadow 120ms ease;
+        }
+        .peek-chip:hover, .peek-chip:focus-visible {
+            color: inherit;
+            box-shadow: 0 0 0 2px rgb(199 210 254);
+        }
+        .peek:focus-visible, .peek-chip:focus-visible { outline: none; }
+    </style>
 </head>
 <body class="h-full">
 <div class="min-h-full">
@@ -102,5 +133,8 @@
         </main>
     </div>
 </div>
+{% if session.get('admin_logged_in') %}
+<script src="{{ url_for('static', filename='peek.js') }}" defer></script>
+{% endif %}
 </body>
 </html>

@@ -111,9 +111,16 @@
             {% set receipt = entry.receipt %}
             {% set assessment = entry.assessment %}
             <tr class="{{ 'bg-gray-50 text-gray-400' if not receipt.is_expense }}">
+                {% set vendor_key = (receipt.vendor.lookup_key if receipt.vendor else None)
+                                    or ('tin:' ~ receipt.vendor_tin if receipt.vendor_tin else None) %}
                 <td class="whitespace-nowrap py-3 pl-4 pr-3 text-sm text-gray-500 sm:pl-6">{{ receipt.receipt_date.isoformat() if receipt.receipt_date else '--' }}</td>
                 <td class="px-3 py-3 text-sm">
+                    {% if vendor_key %}
+                    <a class="peek font-medium text-gray-900" href="{{ url_for('vendor_detail', key=vendor_key) }}"
+                       data-peek="vendor:{{ vendor_key }}" data-peek-eager>{{ receipt.vendor_name or 'Unnamed vendor' }}</a>
+                    {% else %}
                     <span class="font-medium text-gray-900">{{ receipt.vendor_name or 'Unnamed vendor' }}</span>
+                    {% endif %}
                     {% if not receipt.is_expense %}
                     <span class="ml-1 inline-flex items-center rounded-md bg-red-50 px-1.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">{{ 'cancelled' if receipt.is_cancelled else 'test' }}</span>
                     {% endif %}
@@ -126,7 +133,8 @@
                     {{ money(assessment.recoverable_vat_cents) }}
                 </td>
                 <td class="relative whitespace-nowrap py-3 pl-3 pr-4 text-right text-sm sm:pr-6">
-                    <a href="{{ url_for('receipt_detail', receipt_id=receipt.id) }}" class="font-medium text-indigo-600 hover:text-indigo-900">View</a>
+                    <a href="{{ url_for('receipt_detail', receipt_id=receipt.id) }}" data-peek="vat:{{ receipt.id }}"
+                       class="font-medium text-indigo-600 hover:text-indigo-900">View</a>
                 </td>
             </tr>
             {% else %}

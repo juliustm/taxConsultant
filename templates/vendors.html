@@ -37,7 +37,10 @@
             {% set vendor = profile.vendor %}
             <tr>
                 <td class="py-4 pl-4 pr-3 text-sm sm:pl-6">
-                    <div class="font-medium text-gray-900">{{ vendor.name or 'Unnamed vendor' }}</div>
+                    <div class="font-medium text-gray-900">
+                        <a class="peek" data-peek-eager href="{{ url_for('vendor_detail', key=vendor.lookup_key) }}"
+                           data-peek="vendor:{{ vendor.lookup_key }}">{{ vendor.name or 'Unnamed vendor' }}</a>
+                    </div>
                     <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span class="font-mono text-xs text-gray-500">{{ 'TIN ' ~ vendor.tin if vendor.tin else 'no TIN' }}</span>
                         {% if vendor.vrn %}

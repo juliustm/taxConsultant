@@ -168,7 +168,8 @@
                                         <template x-for="vendor in (page.insights?.top_vendors || [])" :key="vendor.tin || vendor.name">
                                             <li class="flex items-center justify-between">
                                                 <span class="truncate pr-4">
-                                                    <span x-text="vendor.name"></span>
+                                                    <a class="peek" data-peek-eager :href="`/vendors/${encodeURIComponent(vendor.key)}`"
+                                                       :data-peek="`vendor:${vendor.key}`" x-text="vendor.name"></a>
                                                     <span class="block font-mono text-xs text-gray-500" x-text="vendor.tin ? `TIN ${vendor.tin}` : 'no TIN'"></span>
                                                 </span>
                                                 <span class="text-right">
@@ -185,6 +186,18 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- A filter arrived at by clicking a category has to be visible and removable,
+         or the table is quietly lying about how much there is. -->
+    <div x-show="filters.category" class="mt-4 flex items-center gap-x-2">
+        <span class="text-sm text-gray-500">Showing only</span>
+        <button @click="filters.category = ''" type="button"
+                class="inline-flex items-center gap-x-1 rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20 hover:bg-indigo-100">
+            <span x-text="(filters.category || '').replace(/_/g, ' ')"></span>
+            <span aria-hidden="true">&times;</span>
+            <span class="sr-only">Clear the category filter</span>
+        </button>
     </div>
 
     <!-- Table -->
@@ -206,23 +219,36 @@
                         </thead>
                         <tbody class="divide-y divide-gray-200 bg-white">
                             <template x-for="sub in page.submissions" :key="sub.id">
-                                <tr :class="loading ? 'opacity-50' : ''">
+                                <tr :class="loading ? 'opacity-50' : ''" :data-peek-warm="rowEntities(sub)">
                                     <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm sm:pl-6">
                                         <span x-text="getStatusText(sub)" :class="getStatusClass(sub)"></span>
                                     </td>
                                     <td class="px-3 py-4 text-sm text-gray-900">
                                         <div class="font-medium">
-                                            <span x-text="sub.receipt.vendor_name || 'Processing...'"></span>
-                                            <span x-show="sub.receipt.vendor_tin" class="ml-1 font-mono text-xs font-normal text-gray-500" x-text="`TIN ${sub.receipt.vendor_tin}`"></span>
+                                            <!-- The vendor is a key, not a label: it opens their whole history. -->
+                                            <template x-if="vendorKey(sub)">
+                                                <a class="peek" data-peek-eager :href="vendorHref(sub)"
+                                                   :data-peek="`vendor:${vendorKey(sub)}`"
+                                                   x-text="sub.receipt.vendor_name || 'Unnamed vendor'"></a>
+                                            </template>
+                                            <template x-if="!vendorKey(sub)">
+                                                <span x-text="sub.receipt.vendor_name || 'Processing...'"></span>
+                                            </template>
+                                            <a x-show="sub.receipt.vendor_tin" class="peek ml-1 font-mono text-xs font-normal text-gray-500"
+                                               :href="vendorHref(sub)" :data-peek="`vendor:${vendorKey(sub)}`"
+                                               x-text="`TIN ${sub.receipt.vendor_tin}`"></a>
                                         </div>
                                         <div class="text-gray-500" x-text="sub.description || 'Awaiting processing'"></div>
                                         <!-- Read off the URL at intake, so it is there even when TRA never answered. -->
                                         <div x-show="!sub.receipt.receipt_id && sub.receipt_code" class="mt-0.5 font-mono text-xs text-gray-400">
-                                            <span x-text="sub.receipt_code"></span>
+                                            <a class="peek" :href="`/submissions/${sub.id}`" :data-peek="`code:${sub.receipt_code}`" x-text="sub.receipt_code"></a>
                                             <span x-show="sub.receipt_time" x-text="` · ${sub.receipt_time}`"></span>
                                         </div>
                                         <div class="mt-1 flex flex-wrap gap-1">
-                                            <span x-show="sub.receipt.category" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="(sub.receipt.category || '').replace(/_/g, ' ')"></span>
+                                            <a x-show="sub.receipt.category" class="peek peek-chip inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+                                               :href="`/?tab=processed&category=${sub.receipt.category}`"
+                                               :data-peek="`category:${sub.receipt.category}`"
+                                               x-text="(sub.receipt.category || '').replace(/_/g, ' ')"></a>
                                             <span x-show="sub.receipt.items?.length > 1" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="`${sub.receipt.items.length} items`"></span>
                                             <template x-for="chip in flagChips(sub)" :key="chip.label">
                                                 <span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium" :class="chip.class" x-text="chip.label"></span>
@@ -236,13 +262,19 @@
                                             <span x-show="sub.receipt.is_test" class="ml-2 inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Test</span>
                                         </div>
                                     </td>
-                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500" x-text="sub.receipt.receipt_date || '---'"></td>
+                                    <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                        <template x-if="sub.receipt.receipt_date">
+                                            <a class="peek" :href="`/?tab=processed&start_date=${sub.receipt.receipt_date}&end_date=${sub.receipt.receipt_date}`"
+                                               :data-peek="`date:${sub.receipt.receipt_date}`" x-text="sub.receipt.receipt_date"></a>
+                                        </template>
+                                        <template x-if="!sub.receipt.receipt_date"><span>---</span></template>
+                                    </td>
                                     <td class="whitespace-nowrap px-3 py-4 text-sm">
                                         <template x-if="sub.receipt.assessment && sub.receipt.assessment.input_vat_cents > 0">
-                                            <div>
+                                            <a class="peek block" :href="`/receipts/${sub.receipt.receipt_id}`" :data-peek="`vat:${sub.receipt.receipt_id}`">
                                                 <div class="font-medium" :class="sub.receipt.assessment.recoverable_vat_cents > 0 ? 'text-green-700' : 'text-gray-400 line-through'" x-text="money(sub.receipt.assessment.input_vat_cents)"></div>
                                                 <div class="text-xs" :class="claimUrgencyClass(sub)" x-text="claimText(sub)"></div>
-                                            </div>
+                                            </a>
                                         </template>
                                         <template x-if="!sub.receipt.assessment || sub.receipt.assessment.input_vat_cents <= 0">
                                             <span class="text-sm text-gray-400" x-text="sub.receipt.assessment ? 'None charged' : '---'"></span>
@@ -250,10 +282,12 @@
                                     </td>
                                     <td class="px-3 py-4 text-sm">
                                         <template x-if="sub.receipt.assessment">
-                                            <div class="flex items-center gap-x-2">
+                                            <a class="peek peek-chip flex items-center gap-x-2 px-1 py-0.5"
+                                               :href="`/receipts/${sub.receipt.receipt_id}`"
+                                               :data-peek="`compliance:${sub.receipt.receipt_id}`">
                                                 <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold" :class="scoreClass(sub.receipt.assessment.score)" x-text="sub.receipt.assessment.score === null ? '--' : sub.receipt.assessment.score"></span>
                                                 <span class="text-xs text-gray-500" x-text="failureSummary(sub.receipt.assessment)"></span>
-                                            </div>
+                                            </a>
                                         </template>
                                         <template x-if="!sub.receipt.assessment && sub.status === 'failed'">
                                             <div>
@@ -426,7 +460,7 @@ function dashboard() {
             });
         },
         get anyFilterApplied() {
-            return Boolean(this.filters.search || this.filters.start_date || this.filters.end_date);
+            return Boolean(this.filters.search || this.filters.start_date || this.filters.end_date || this.filters.category);
         },
         get rangeStart() { return this.page.total ? (this.page.page - 1) * this.page.per_page + 1 : 0; },
         get rangeEnd() { return Math.min(this.page.page * this.page.per_page, this.page.total); },
@@ -489,7 +523,26 @@ function dashboard() {
                 this.filters.direction = 'asc';
             }
         },
-        resetFilters() { this.filters = { ...this.filters, search: '', start_date: '', end_date: '' }; },
+        resetFilters() { this.filters = { ...this.filters, search: '', start_date: '', end_date: '', category: '' }; },
+
+        // --- Peekable values ---
+        // Every entity a row points at, so hovering anywhere in the row fetches them
+        // before the pointer arrives. See static/peek.js.
+        vendorKey(sub) {
+            const receipt = sub.receipt || {};
+            return receipt.vendor_key || (receipt.vendor_tin ? `tin:${receipt.vendor_tin}` : null);
+        },
+        vendorHref(sub) {
+            const key = this.vendorKey(sub);
+            return key ? `/vendors/${encodeURIComponent(key)}` : null;
+        },
+        rowEntities(sub) {
+            const specs = [];
+            const key = this.vendorKey(sub);
+            if (key) specs.push(`vendor:${key}`);
+            if (sub.receipt?.receipt_id) specs.push(`compliance:${sub.receipt.receipt_id}`);
+            return specs.join(',');
+        },
         updateUrlState() { window.history.replaceState({}, '', `${window.location.pathname}?${this.queryString({ page: this.page.page })}`); },
         toggleAdvanced() { this.showAdvanced = !this.showAdvanced; localStorage.setItem('showAdvancedFilters', this.showAdvanced); },
 
