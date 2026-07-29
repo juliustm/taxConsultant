@@ -1036,3 +1036,185 @@ def test_the_dashboard_numbers_say_unknown_rather_than_zero(tmp_path):
     assert state['storageUnknown']['stats'][2] == ['Unsent', '?', 'is-alert']
     # ...and a receipt that failed outright outranks everything.
     assert state['failing']['stats'][2] == ['Need you', '2', 'is-alert']
+
+
+# --- The receipt that vanished ------------------------------------------------
+#
+# The worst bug this screen has had, because of what it looked like from outside: a
+# receipt was scanned, sat visibly in "on this phone", and then - the moment the server
+# accepted it, which is the moment it was safest it had ever been - disappeared. It came
+# back on a manual refresh or a relaunch, so nothing was ever actually lost. Nobody
+# holding the phone had any way to know that.
+#
+# It had two halves, and both are pinned here.
+
+REFRESH_DRIVER = """
+const cache = [];
+global.PWA = {
+    MAX_ATTEMPTS: 8,
+    status: async () => ({
+        pending: 0, syncing: false, online: true, live: true, summary: null,
+        session: { device: { name: 'Test Phone' } }, recentEvents: [], storageOk: true,
+    }),
+    outboxAll: async () => [],
+    // The same contract as the real one: newest first, `beforeId` exclusive.
+    cachedHistory: async (options = {}) => {
+        let rows = cache.slice().sort((a, b) => b.id - a.id);
+        if (options.beforeId != null) rows = rows.filter((r) => r.id < options.beforeId);
+        return options.limit ? rows.slice(0, options.limit) : rows;
+    },
+};
+
+const row = (id, status) => ({
+    id, status, captured_at: '2026-07-29T17:4' + (id % 10) + ':00', receipt_code: 'CODE' + id,
+});
+
+(async () => {
+    const out = {};
+    const page = historyPage();
+
+    // On screen: one receipt from earlier. In the cache: that one, plus the one just
+    // scanned, which the server has taken and given the next id to.
+    page.submissions = [row(41, 'completed')];
+    cache.push(row(41, 'completed'), row(42, 'queued'));
+    await page.refresh();
+    out.afterScan = page.submissions.map((s) => s.id);
+
+    // A status that moved while the app was open still lands, which is what refresh()
+    // was doing right before and must go on doing.
+    cache.find((r) => r.id === 42).status = 'completed';
+    await page.refresh();
+    out.afterVerdict = page.submissions.map((s) => s.status);
+
+    // A search is its own list. Merging the newest page into it would put receipts on
+    // screen that do not match what was typed.
+    page.query = 'maina';
+    page.submissions = [row(7, 'completed')];
+    await page.refresh();
+    out.duringSearch = page.submissions.map((s) => s.id);
+
+    console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_receipt_that_was_just_sent_appears_without_being_asked_for(tmp_path):
+    """
+    refresh() must re-read the newest receipts, not the ones already on screen.
+
+    It used to ask the cache for `beforeId: submissions[0].id + 1` - a window pinned
+    under the top of the list, which by construction cannot contain a receipt newer than
+    the top of the list. Every freshly sent receipt is exactly that. So the row left the
+    outbox when the server took it and had nowhere to arrive: it was in the cache, it
+    was in IndexedDB, and it was not on screen until the refresh button or a relaunch
+    re-read the first page from the top.
+    """
+    bundle = tmp_path / 'refresh.js'
+    bundle.write_text(
+        "global.navigator = { onLine: true };\n"
+        + history_component_source() + REFRESH_DRIVER
+    )
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+
+    assert state['afterScan'] == [42, 41], 'the receipt just sent is still not on screen'
+    assert state['afterVerdict'] == ['completed', 'completed']
+    assert state['duringSearch'] == [7], 'a refresh dropped non-matching rows into a search'
+
+
+def test_an_accepted_receipt_reaches_history_before_it_leaves_the_outbox():
+    """
+    The other half. Even re-reading from the top only helps once something has written
+    the sent receipt into the cache, and the only thing that did was the next pull from
+    /scan/api/submissions - a round trip, on connections where a round trip is not a
+    given. Between discard() and that reply the receipt was in neither list.
+
+    The server already answers the sync call with the submission id it created, so the
+    phone can record the row itself, immediately, and let the pull fill in the rest.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+
+    for name in ('syncUrlBatch', 'syncPhoto'):
+        body = pwa.split('async function %s' % name)[1].split('\n    }')[0]
+        assert 'cacheAccepted' in body, f'{name} drops the outbox row with nothing to replace it'
+        # rindex: the discard that matters is the one after a successful send. syncPhoto
+        # has an earlier one for an entry whose blob is gone, which has nothing to cache.
+        assert body.index('cacheAccepted') < body.rindex('await discard('), \
+            f'{name} discards before the receipt is anywhere else'
+
+    written = pwa.split('async function cacheAccepted')[1].split('\n    }')[0]
+    # Keyed on the server's own id, so the pull that follows replaces this row rather
+    # than adding a second one next to it.
+    assert 'id: result.submission_id' in written
+    # And it never overwrites what the server has already told us.
+    assert 'if (existing) return;' in written
+
+
+ROUTER_DRIVER = """
+const listeners = {};
+global.window = {
+    addEventListener: (name, fn) => { listeners[name] = fn; },
+    history: { replaceState() {}, pushState() {} },
+    location: { pathname: '/scan/history', href: '/scan/history' },
+    document: {
+        title: '',
+        body: { classList: { add() {}, remove() {} }, scrollTop: 0 },
+        documentElement: { scrollTop: 0 },
+    },
+    scrollTo() { /* the no-op this file exists to work around */ },
+    requestAnimationFrame: (fn) => fn(),
+};
+global.window.window = global.window;
+require(process.argv[2]);
+
+const R = window.ScanRouter;
+const body = window.document.body;
+R.watch('history', () => {});
+R.watch('scan', () => {});
+R.start();
+
+const out = {};
+body.scrollTop = 640;              // deep into a year of receipts
+R.go('scan');
+out.openedScanner = body.scrollTop;
+R.go('history');
+out.backOnHistory = body.scrollTop;
+R.go('diagnostics');
+out.openedDiagnostics = body.scrollTop;
+listeners.popstate({ state: { view: 'history' } });
+out.wentBack = body.scrollTop;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_switching_views_lands_where_the_user_left_each_one(tmp_path):
+    """
+    Three views, one document, one scroller - so a scroll position belongs to a view,
+    not to the app, and the router is the only thing that knows which is which.
+
+    It was calling window.scrollTo(0, 0), which does nothing here: scan.css gives html
+    and body both a height and their own overflow, which makes the body the scroll
+    container and window the wrong object to ask. So Diagnostics opened halfway down
+    wherever History had been left, and History came back to the top of a list someone
+    was reading the middle of.
+    """
+    bundle = tmp_path / 'router-driver.js'
+    bundle.write_text(ROUTER_DRIVER)
+
+    result = subprocess.run(
+        ['node', str(bundle), str(STATIC / 'js' / 'router.js')],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+
+    # A view being opened for the first time starts at the top of itself.
+    assert state['openedScanner'] == 0
+    assert state['openedDiagnostics'] == 0
+    # And one being returned to picks up where it was - by the tap, and by Back.
+    assert state['backOnHistory'] == 640
+    assert state['wentBack'] == 640

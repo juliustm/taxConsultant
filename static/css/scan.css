@@ -250,10 +250,18 @@ input, textarea, [contenteditable] {
 .sync-events .sync-event-when { flex: none; color: rgba(255, 255, 255, 0.45); font-size: 0.6875rem; }
 .sync-events .sync-event-empty { padding: 0.5rem 0.6rem; font-size: 0.75rem; color: rgba(255, 255, 255, 0.5); text-align: center; }
 
-/* On the dashboard the pill sits lower and over open space, so its feed hangs
-   directly beneath it rather than being pushed clear of a header. */
-.dash .sync-events {
-    top: calc(env(safe-area-inset-top, 0px) + 4.25rem);
+/* On the dashboard the same feed hangs off the sheet's own header rather than off a
+   floating pill - see .dash-sync. The header is `position: sticky`, which is a
+   positioned ancestor, so an absolute box inside it follows the header wherever the
+   scroll has put it. That is the whole reason the control moved: a fixed panel had to
+   guess where the header was, and guessed wrong the moment anything scrolled. */
+.dash-bar .sync-events {
+    position: absolute;
+    top: calc(100% - 0.25rem);
+    left: auto;
+    right: 1rem;
+    transform: none;
+    max-width: min(80vw, 20rem);
 }
 
 .sync-dot {
@@ -364,6 +372,16 @@ input, textarea, [contenteditable] {
        on a phone, clamped so it neither swallows a small screen nor floats in the
        middle of a tablet. */
     --hero-height: clamp(13.5rem, 34vh, 18rem);
+    /* The notch, once, so the two things that have to agree about it can. Also read
+       from JavaScript (see safeTopInset in _history.html) to tell an observer where
+       the header comes to rest. */
+    --hero-inset: env(safe-area-inset-top, 0px);
+    /* What the hero actually occupies: its own height, the strip under the status bar
+       it paints into, and the room its content needs below the total. The sheet is
+       positioned from this single figure rather than from --hero-height alone, which
+       is what used to leave it parked over the bottom of the hero - the three stats,
+       the one row on this screen a person is most likely to be looking for. */
+    --hero-block: calc(var(--hero-height) + var(--hero-inset) + 2.5rem);
 }
 
 .dash-hero {
@@ -371,13 +389,13 @@ input, textarea, [contenteditable] {
     top: 0;
     left: 0;
     right: 0;
-    height: calc(var(--hero-height) + env(safe-area-inset-top, 0px) + 2.5rem);
+    height: var(--hero-block);
     z-index: 0;
     display: flex;
     flex-direction: column;
     justify-content: center;
     gap: 0.75rem;
-    padding: calc(env(safe-area-inset-top, 0px) + 4rem) 1.5rem 2.75rem;
+    padding: calc(var(--hero-inset) + 3.5rem) 1.5rem 2.25rem;
     background:
         radial-gradient(120% 90% at 15% 0%, rgba(79, 70, 229, 0.55) 0%, rgba(79, 70, 229, 0) 60%),
         linear-gradient(180deg, #14141a 0%, #0a0a0c 100%);
@@ -450,7 +468,11 @@ input, textarea, [contenteditable] {
 .dash-sheet {
     position: relative;
     z-index: 1;
-    margin-top: var(--hero-height);
+    /* The full hero, less enough of an overlap for the corner radius to read as one
+       surface. It used to start at --hero-height, which is only part of the hero: on
+       any phone with a notch the sheet opened sitting on top of the stats row, and
+       the figures a person opens this app to check were cut in half by it. */
+    margin-top: calc(var(--hero-block) - 1rem);
     /* Always taller than the viewport, so the sheet can always be pulled up over the
        hero even with two receipts in it - a screen that refuses to scroll reads as
        broken long before anyone works out that there was simply nothing below. */
@@ -459,6 +481,44 @@ input, textarea, [contenteditable] {
     background: #f9fafb;
     box-shadow: 0 -1rem 2.5rem rgba(0, 0, 0, 0.45);
 }
+
+/*
+ * Sync state, on the dashboard, as a line under the title rather than a floating pill.
+ *
+ * The pill is fixed to the top of the viewport, which is right where it belongs over a
+ * viewfinder and wrong here: as soon as the sheet was pulled up, a dark capsule saying
+ * "Synced" was left hanging over the search field. Inside the header it travels with
+ * the thing it describes, it cannot collide with anything, and it absorbs the device
+ * name - which was a second line of grey text saying something less important.
+ */
+.dash-sync {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    max-width: 100%;
+    min-width: 0;
+    margin: 0.125rem 0 -0.25rem;
+    padding: 0.25rem 0;
+    border: 0;
+    background: transparent;
+    font-size: 0.75rem;
+    line-height: 1.1;
+    color: #6b7280;
+    cursor: pointer;
+    text-align: left;
+}
+
+.dash-sync .sync-dot { width: 0.5rem; height: 0.5rem; }
+.dash-sync-label { flex: none; font-weight: 600; color: #374151; }
+
+.dash-sync-device {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-sync-device::before { content: '·'; margin-right: 0.35rem; color: #9ca3af; }
 
 /* The handle. Not interactive - this sheet is scrolled, not dragged - but it is the
    convention that says "this moves", which is the instruction. */
@@ -472,22 +532,54 @@ input, textarea, [contenteditable] {
 }
 
 /*
- * The sheet's own header: title, refresh, Scan, search.
+ * The sheet's own header: title, sync state, refresh, Scan, search.
  *
  * Sticky, not fixed. It travels up with the sheet and stops at the top of the
  * viewport, so the two actions someone came here to use are always one thumb-reach
  * away no matter how far into a year of receipts they have scrolled.
+ *
+ * It stops at the notch, not at the very top. `top: 0` put the title and the search
+ * field underneath the clock and the battery meter - unreadable, and it made the whole
+ * screen look like it had been shoved off the top of the phone. Coming to rest just
+ * clear of the status bar is also what bounds the scroll: there is nowhere further up
+ * for the header to go, so nothing on this screen is ever hidden behind the island.
  */
 .dash-bar {
     position: sticky;
-    top: 0;
+    top: var(--hero-inset);
     z-index: 20;
-    padding: 0.75rem 1rem 0.75rem;
+    padding: 1rem 1rem 0.75rem;
     border-radius: 1.5rem 1.5rem 0 0;
     background: rgba(249, 250, 251, 0.92);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+    transition: border-radius 150ms ease;
 }
+
+/* Once stuck the header is the top edge of the screen, and a rounded corner there is
+   just a notch showing the list sliding past behind it. */
+.dash-bar.is-stuck { border-radius: 0; }
+
+/* The strip the header does not cover: between the top of the viewport and where the
+   header comes to rest, list rows would otherwise scroll up into the status bar. This
+   fills it with the header's own surface, so what is behind the clock is the app's
+   background rather than half a receipt. Only once the header is actually up there -
+   before that this sits over the hero, where it would be a light band across it. */
+.dash-bar::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    height: var(--hero-inset);
+    background: rgba(249, 250, 251, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+
+.dash-bar.is-stuck::before { opacity: 1; }
 
 /* Only once it has actually stuck - a divider under a header that is still halfway
    down the screen is just a line across the page. */

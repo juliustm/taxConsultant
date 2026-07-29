@@ -453,6 +453,70 @@
         emit();
     }
 
+    /*
+     * Writes what the server just said about an accepted scan into the history cache,
+     * before the outbox row that carried it is dropped.
+     *
+     * Without this there is a hole. discard() takes the receipt out of "on this phone"
+     * the instant the server acknowledges it, and nothing puts it into the sent list
+     * until /scan/api/submissions has been fetched and come back - a round trip, on a
+     * connection that may not manage one. In between, a receipt somebody watched
+     * themselves scan is in neither list, which reads as "it was lost", and is exactly
+     * what leaves people tapping refresh to get their own receipt back on screen.
+     *
+     * The row written here is deliberately thin: an id, an identity and a status the
+     * server has actually recorded. Everything else arrives with the pull that follows,
+     * or with the push event that beats it - both keyed on this same server id, so both
+     * replace this row rather than duplicating it.
+     */
+    async function cacheAccepted(entry, result) {
+        if (!result || result.submission_id == null) return;
+        try {
+            var db = await getDB();
+            var existing = await withDeadline(db.get('submissions', result.submission_id),
+                                              DB_OP_TIMEOUT_MS, 'Reading cached history timed out.');
+            // Already have the server's own version - a duplicate scan of a receipt sent
+            // days ago, say. It knows more than we do; leave it alone.
+            if (existing) return;
+
+            await withDeadline(db.put('submissions', {
+                id: result.submission_id,
+                client_uuid: entry.client_uuid,
+                // What is true at this moment: taken by the server, not yet checked
+                // against the portal. The runner moves it on from here.
+                status: result.status === 'duplicate' ? 'duplicate' : 'queued',
+                is_duplicate: result.status === 'duplicate',
+                received_at: new Date().toISOString(),
+                captured_at: entry.captured_at || null,
+                input_type: entry.kind === 'photo' ? 'photo' : 'url',
+                input_data: entry.kind === 'photo' ? null : entry.receipturl,
+                description: entry.description || null,
+                location: entry.location || null,
+                receipt: null,
+                receipt_code: receiptCodeOf(entry.receipturl),
+                error_message: null,
+                retry: null,
+            }), DB_OP_TIMEOUT_MS, 'Saving history locally timed out.');
+        } catch (e) {
+            // Storage is down, or slow. The receipt is safe either way - the server has
+            // it, which is the whole point of the call that got us here - and the next
+            // pull is what puts it on screen.
+        }
+    }
+
+    /* The code printed on the receipt, so a row that has not been through the portal yet
+       still says which receipt it is. Scanner owns the pattern the server also uses; a
+       document without it (nothing today) simply gets no code. */
+    function receiptCodeOf(url) {
+        try {
+            var parsed = url && global.Scanner && global.Scanner.parseReceipt
+                ? global.Scanner.parseReceipt(url) : null;
+            return parsed ? parsed.code : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     async function noteAttempt(entry, error) {
         var db = await getDB();
         var current = await db.get('outbox', entry.client_uuid);
@@ -568,6 +632,10 @@
             // 'duplicate' means the server already had this exact scan, which is just as
             // final as 'accepted' - either way it is safe to stop holding it here.
             if (res && (res.status === 'accepted' || res.status === 'duplicate')) {
+                // Into the sent list before it leaves the outbox, never the other way
+                // round: for the moment between the two the receipt is in both lists,
+                // which is survivable, where being in neither is not.
+                await cacheAccepted(entry, res);
                 await discard(entry.client_uuid);
                 sent += 1;
             } else {
@@ -610,6 +678,9 @@
             return { sent: 0, failed: 1, stop: response.status >= 500 };
         }
 
+        // Same order as the URL batch, for the same reason: the photo lands in history
+        // before it leaves the outbox, so it is never in neither place.
+        await cacheAccepted(entry, await response.json().catch(function () { return null; }));
         await discard(entry.client_uuid);
         emit();
         return { sent: 1, failed: 0, stop: false };
