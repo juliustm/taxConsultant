@@ -42,6 +42,35 @@
 
     var current = null;
     var watchers = [];
+    // Where each view was left. One document means one scroller shared by all three, so
+    // without this, opening Diagnostics from halfway down a year of receipts opens it
+    // halfway down as well - and coming back lands at the top of a list the user was
+    // reading the middle of.
+    var scrollTops = {};
+
+    /*
+     * Sets and reads the scroll offset without caring which element owns it.
+     *
+     * scan.css gives html and body both a full height and their own overflow, which
+     * makes the *body* the scroll container - and window.scrollTo() a no-op. That is
+     * why the reset this used to do never actually did anything. Writing to all three
+     * is harmless: scrollTop on an element with nothing to scroll clamps to 0.
+     */
+    function scrollOffset() {
+        var doc = global.document;
+        return Math.max(
+            (doc.body && doc.body.scrollTop) || 0,
+            (doc.documentElement && doc.documentElement.scrollTop) || 0,
+            global.scrollY || 0
+        );
+    }
+
+    function scrollTo(top) {
+        var doc = global.document;
+        try { global.scrollTo(0, top); } catch (e) { /* nothing to do */ }
+        if (doc.body) doc.body.scrollTop = top;
+        if (doc.documentElement) doc.documentElement.scrollTop = top;
+    }
 
     function viewForPath(pathname) {
         for (var name in VIEWS) {
@@ -70,6 +99,7 @@
 
     function apply(name) {
         if (name === current) return;
+        if (current) scrollTops[current] = scrollOffset();
         current = name;
 
         var view = VIEWS[name];
@@ -91,6 +121,22 @@
     }
 
     /*
+     * Puts the incoming view back where its reader left it, or at the top if this is
+     * the first time they have opened it.
+     *
+     * Twice: once now, and once after the frame in which Alpine actually shows the
+     * view. Until it does, the incoming content is display:none and the scroller has
+     * nothing to scroll - so the first write is what stops a visible jump, and the
+     * second is the one that lands.
+     */
+    function restoreScroll(name) {
+        var top = scrollTops[name] || 0;
+        scrollTo(top);
+        var raf = global.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+        raf(function () { raf(function () { scrollTo(top); }); });
+    }
+
+    /*
      * Moves to a view and puts it in the address bar.
      *
      * `replace` is for the one case that is not a navigation the user made: the
@@ -109,15 +155,20 @@
 
         apply(name);
         // A view swapped in under a page scrolled halfway down someone else's list
-        // would otherwise open mid-content.
-        if (!options.keepScroll) global.scrollTo(0, 0);
+        // would otherwise open mid-content. `keepScroll` is for the one case that is
+        // not a move between views at all - the scanner rewriting its own URL.
+        if (!options.keepScroll) restoreScroll(name);
     }
 
     function start() {
         if (current !== null) return;
         global.addEventListener('popstate', function (event) {
             var name = (event.state && event.state.view) || viewForPath(global.location.pathname);
-            apply(VIEWS[name] ? name : DEFAULT_VIEW);
+            if (!VIEWS[name]) name = DEFAULT_VIEW;
+            apply(name);
+            // Back is a navigation like any other, and the same shared scroller: without
+            // this it returns to the right view at the wrong place in it.
+            restoreScroll(name);
         });
 
         var initial = viewForPath(global.location.pathname);
