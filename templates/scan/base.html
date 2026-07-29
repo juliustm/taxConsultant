@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    {# maximum-scale/user-scalable: pinch-zooming a viewfinder does nothing useful and
+       double-tap zoom makes every button feel like it lagged. viewport-fit=cover lets
+       the camera fill the notch area. #}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>{% block title %}Scan Receipts{% endblock %}</title>
+
+    {# The activation page overrides this with a manifest whose start_url carries the
+       token, so adding to the home screen carries the activation with it. #}
+    <link rel="manifest" href="{% block manifest_url %}{{ url_for('scan_manifest') }}{% endblock %}">
+    <meta name="theme-color" content="{% block theme_color %}#000000{% endblock %}">
+
+    {# Critical CSS, loaded before anything else. Tailwind here is the browser build and
+       compiles at runtime, so without this the first paint of a fullscreen camera app
+       is a white page. #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/scan.css') }}">
+
+    <!-- iOS home-screen app -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Receipts">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+
+    {% block head %}{% endblock %}
+
+    {# Vendored, not CDN. An app that cannot open without reaching the public internet
+       is not an offline app. #}
+    <script src="{{ url_for('static', filename='js/vendor/tailwind.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/vendor/idb.umd.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/pwa.js') }}"></script>
+</head>
+<body class="h-full">
+{% block body %}{% endblock %}
+
+{# Alpine last and deferred: it scans the DOM on load, so anything it binds to has to
+   exist first. #}
+<script defer src="{{ url_for('static', filename='js/vendor/alpine.min.js') }}"></script>
+</body>
+</html>

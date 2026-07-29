@@ -1,0 +1,247 @@
+{% extends "scan/base.html" %}
+{% block title %}Diagnostics{% endblock %}
+
+{% block head %}
+<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+{#
+  Self-service troubleshooting.
+
+  A field user with a broken app and no admin nearby has otherwise no way to tell "my
+  phone refused the camera" from "the install never finished" from "there is no
+  internet". Every check here names one thing and, when it fails, says what to do -
+  and the repair button covers the single most common cause, a precache that a weak
+  connection left half-filled.
+#}
+<div class="sheet min-h-full px-4 py-6" x-data="diagnosticsPage()" x-init="run()">
+    <div class="mx-auto max-w-md">
+        <div class="flex items-center justify-between">
+            <h1 class="text-lg font-semibold text-gray-900">Diagnostics</h1>
+            <a href="{{ url_for('scan_home') }}" class="text-sm font-medium text-indigo-600">Back</a>
+        </div>
+
+        <p class="mt-1 text-xs text-gray-500">
+            Show this screen to your admin if the app is not working.
+        </p>
+
+        <ul class="mt-5 space-y-2">
+            <template x-for="check in checks" :key="check.name">
+                <li class="rounded-lg border bg-white p-3"
+                    :class="check.ok ? 'border-gray-200' : 'border-red-200'">
+                    <div class="flex items-start gap-3">
+                        <span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
+                              :class="check.ok ? 'bg-green-500' : (check.warn ? 'bg-amber-500' : 'bg-red-500')"
+                              x-text="check.ok ? '✓' : '!'"></span>
+                        <div class="min-w-0">
+                            <p class="text-sm font-medium text-gray-900" x-text="check.name"></p>
+                            <p class="mt-0.5 text-xs" :class="check.ok ? 'text-gray-500' : 'text-red-700'"
+                               x-text="check.detail"></p>
+                        </div>
+                    </div>
+                </li>
+            </template>
+        </ul>
+
+        <template x-if="missing.length">
+            <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p class="text-xs font-semibold text-amber-900">Not downloaded yet</p>
+                <ul class="mt-1 space-y-0.5">
+                    <template x-for="url in missing" :key="url">
+                        <li class="truncate font-mono text-xs text-amber-800" x-text="url"></li>
+                    </template>
+                </ul>
+            </div>
+        </template>
+
+        <div class="mt-6 space-y-2">
+            <button type="button" @click="repair()" :disabled="repairing"
+                    class="w-full rounded-lg bg-gray-900 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
+                    x-text="repairing ? 'Repairing…' : 'Repair offline mode'"></button>
+            <button type="button" @click="run()"
+                    class="w-full rounded-lg bg-white px-4 py-3 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300">
+                Run checks again
+            </button>
+            <button type="button" @click="signOut()"
+                    class="w-full px-4 py-3 text-sm font-medium text-gray-500">
+                Sign this device out
+            </button>
+        </div>
+
+        <p class="safe-bottom mt-6 text-center text-xs text-gray-400" x-text="userAgent"></p>
+    </div>
+</div>
+
+<script>
+function diagnosticsPage() {
+    return {
+        checks: [],
+        missing: [],
+        repairing: false,
+        userAgent: navigator.userAgent,
+
+        async run() {
+            const checks = [];
+            const add = (name, ok, detail, warn) => checks.push({ name, ok, detail, warn: !!warn });
+
+            // Everything below depends on this one. getUserMedia, service workers and
+            // persistent storage are all gated on a secure context, so a self-hosted
+            // instance served over plain HTTP fails all of them at once and this is the
+            // only check that explains why.
+            add('Secure connection', window.isSecureContext,
+                window.isSecureContext
+                    ? 'The camera and offline mode are allowed here.'
+                    : 'This page is not on HTTPS. The camera and offline mode cannot work. Ask your admin for an https:// address.');
+
+            // Offline capability
+            if ('serviceWorker' in navigator) {
+                const reg = await navigator.serviceWorker.getRegistration('/scan/');
+                const controlled = !!navigator.serviceWorker.controller;
+                add('Offline mode installed', !!reg,
+                    reg ? (controlled ? 'Installed and active.' : 'Installed. Reload once to activate it.')
+                        : 'Not installed. Tap "Repair offline mode".');
+            } else {
+                add('Offline mode installed', false, 'This browser does not support offline mode.');
+            }
+
+            // Precache coverage, listed by name so a missing file is actionable rather
+            // than just a count.
+            try {
+                const names = await caches.keys();
+                const precacheName = names.find((n) => n.startsWith('scan-precache-'));
+                if (precacheName) {
+                    const cache = await caches.open(precacheName);
+                    const keys = await cache.keys();
+                    const cached = new Set(keys.map((r) => new URL(r.url).pathname));
+                    const shell = await this.shellList();
+                    this.missing = shell.filter((u) => !cached.has(u));
+                    add('App files downloaded', this.missing.length === 0,
+                        this.missing.length === 0
+                            ? `All ${shell.length} files are on this phone.`
+                            : `${this.missing.length} of ${shell.length} files are missing. Tap "Repair offline mode" while online.`);
+                } else {
+                    this.missing = [];
+                    add('App files downloaded', false, 'Nothing cached yet. Tap "Repair offline mode".');
+                }
+            } catch (e) {
+                add('App files downloaded', false, 'Could not read the cache: ' + e.message);
+            }
+
+            // Camera
+            try {
+                if (navigator.permissions && navigator.permissions.query) {
+                    const status = await navigator.permissions.query({ name: 'camera' });
+                    add('Camera permission', status.state !== 'denied',
+                        status.state === 'granted' ? 'Allowed.'
+                            : status.state === 'prompt' ? 'Will be asked for on the scan screen.'
+                            : 'Refused. Allow the camera in your browser settings for this site.',
+                        status.state === 'prompt');
+                } else {
+                    add('Camera permission', true, 'Cannot be checked on this browser.', true);
+                }
+            } catch (e) {
+                add('Camera permission', true, 'Cannot be checked on this browser.', true);
+            }
+
+            // Decoders. Either one alone is enough to scan, so having only one warns;
+            // having neither is fatal and says so, because that is a scanner that will
+            // never read anything however long it is pointed at a receipt.
+            const native = await Scanner.getBarcodeDetector();
+            let wasmOk = false;
+            let wasmError = '';
+            try { await Scanner.getZXing(); wasmOk = true; }
+            catch (e) { wasmError = e.message; }
+
+            add('QR code reader', !!(native || wasmOk),
+                (native || wasmOk)
+                    ? [native ? 'Fast built-in reader available.' : 'No built-in reader on this phone.',
+                       wasmOk ? 'Backup reader loaded.' : 'Backup reader unavailable: ' + wasmError].join(' ')
+                    : 'Nothing on this phone can read a QR code: ' + (wasmError || 'no reader available')
+                      + '. Use Photo on the scan screen — receipts are still read for you.',
+                !(native && wasmOk));
+
+            // Whether the local database opens at all. WebKit can leave
+            // indexedDB.open() hanging with no event of any kind, which is invisible
+            // from everywhere else in the app - it just makes things stop.
+            const status = await PWA.status();
+            add('Local storage working', status.storageOk,
+                status.storageOk
+                    ? 'Receipts can be saved on this phone while offline.'
+                    : 'This phone will not open its local database, so scans cannot be held offline. Close other tabs of this app and tap "Repair offline mode". If it persists, restart the phone.');
+
+            // Storage
+            let persisted = false;
+            try {
+                persisted = navigator.storage && navigator.storage.persisted
+                    ? await navigator.storage.persisted() : false;
+            } catch (e) { persisted = false; }
+            add('Storage protected', persisted,
+                persisted ? 'Unsent receipts cannot be cleared by the phone automatically.'
+                          : 'The phone may clear unsent receipts under low storage. Keep some free space.',
+                true);
+
+            // Queue and session
+            add('Waiting to send', true,
+                status.pending === 0 ? 'Nothing waiting. Everything has been sent.'
+                                     : `${status.pending} receipt(s) still on this phone.`);
+            add('Device activated', !!status.session,
+                status.session ? `Signed in as ${status.session.device.name}.`
+                               : (status.signOutReason ? status.signOutReason.message
+                                                       : 'Not activated. Ask your admin for an activation link.'));
+            add('Server reachable', status.online,
+                status.online ? 'This phone thinks it is online.'
+                              : 'No connection. Scanning still works; receipts send when you reconnect.',
+                true);
+
+            this.checks = checks;
+        },
+
+        /* Read back from the worker's own list rather than restated here, so this screen
+           cannot claim everything is present while the worker wants a file it never
+           heard of. */
+        async shellList() {
+            try {
+                const source = await (await fetch('/scan/sw.js', { cache: 'reload' })).text();
+                const block = source.match(/const APP_SHELL\s*=\s*\[([\s\S]*?)\]/);
+                if (!block) return [];
+                return (block[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1));
+            } catch (e) {
+                return [];
+            }
+        },
+
+        async repair() {
+            this.repairing = true;
+            try {
+                // A database that failed to open once is latched off so nothing waits on
+                // it again; this is what un-latches it.
+                PWA.resetStorage();
+                const reg = await PWA.registerServiceWorker();
+                if (reg) {
+                    await reg.update().catch(() => {});
+                    const worker = reg.active || (await navigator.serviceWorker.ready).active;
+                    if (worker) worker.postMessage({ type: 'repair-cache' });
+                }
+                // The worker refetches in the background; give it a moment before
+                // re-counting, otherwise this reports the state it started from.
+                await new Promise((r) => setTimeout(r, 2500));
+                await this.run();
+            } finally {
+                this.repairing = false;
+            }
+        },
+
+        async signOut() {
+            const status = await PWA.status();
+            const warning = status.pending > 0
+                ? `${status.pending} receipt(s) have not been sent yet. They stay on this phone and will send once it is activated again. Sign out?`
+                : 'Sign this device out?';
+            if (!confirm(warning)) return;
+            PWA.clearSession();
+            window.location.href = '{{ url_for("scan_home") }}';
+        },
+    };
+}
+</script>
+{% endblock %}

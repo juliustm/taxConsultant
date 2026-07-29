@@ -1,0 +1,266 @@
+{% extends "scan/base.html" %}
+{% block title %}Activate Device{% endblock %}
+
+{# The manifest carries the token, so "Add to Home Screen" installs an app that opens
+   straight into activating itself. On iOS this is the only flow that works: a
+   home-screen app there does not share storage with Safari, so activating in the
+   browser first would spend the single-use token in the wrong place and leave the
+   installed app signed out. #}
+{% block manifest_url %}{{ url_for('scan_manifest', t=token) }}{% endblock %}
+{% block theme_color %}#f9fafb{% endblock %}
+
+{% block head %}
+<script>
+    /*
+     * If this device is already activated, this is not an activation - it is a launch.
+     *
+     * iOS bookmarks the *current page URL* when you Add to Home Screen; it does not
+     * follow the manifest's start_url. Since the instructions here are to install from
+     * this page, the home-screen shortcut points at this URL forever. So every launch
+     * arrives back here holding a token that was spent on the very first one.
+     *
+     * Left unhandled, that meant the app reactivated on every launch, failed because
+     * the token was single-use, and showed "This device is not recognised" to a user
+     * whose session was sitting valid in localStorage the whole time.
+     *
+     * Checked here, before any script or markup that could paint, so a relaunch goes
+     * straight to the camera with nothing flashing up in between. localStorage is read
+     * directly because pwa.js has not loaded yet at this point; the key is asserted
+     * against PWA's own constant in tests/test_pwa_assets.py.
+     */
+    (function () {
+        try {
+            var raw = window.localStorage.getItem('taxconsult.activeSession');
+            if (raw && JSON.parse(raw).token) {
+                window.location.replace({{ url_for('scan_home') | tojson }});
+            }
+        } catch (e) { /* no storage: fall through and show the normal page */ }
+    })();
+</script>
+{% endblock %}
+
+{% block body %}
+{#
+  The token is in the URL but is not spent by arriving here - only by an explicit
+  action. A single-use credential that a link preview, a mail scanner or an over-eager
+  chat app could burn on a GET is a credential the field user finds already dead.
+#}
+<div class="sheet flex min-h-full flex-col px-6 py-10"
+     x-data="activatePage('{{ token }}')" x-init="detect()">
+
+    <div class="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center">
+        <img src="{{ url_for('static', filename='icons/icon-192.png') }}" alt=""
+             class="mx-auto h-16 w-16 rounded-2xl shadow-sm">
+
+        <!-- ============ DONE ============ -->
+        <template x-if="done">
+            <div class="mt-6 text-center">
+                <h1 class="text-xl font-bold text-gray-900">Ready to scan</h1>
+                <p class="mt-2 rounded-lg bg-green-50 px-3 py-3 text-sm text-green-800">
+                    Activated as <strong x-text="deviceName"></strong>.
+                </p>
+                <a href="{{ url_for('scan_home') }}"
+                   class="mt-6 block w-full rounded-xl bg-indigo-600 px-4 py-3.5 text-base font-semibold text-white">
+                    Start scanning
+                </a>
+            </div>
+        </template>
+
+        <!-- ============ iOS: INSTALL FIRST ============ -->
+        <template x-if="!done && needsInstallFirst">
+            <div class="mt-6">
+                <h1 class="text-center text-xl font-bold text-gray-900">Add to your Home Screen</h1>
+                <p class="mt-2 text-center text-sm text-gray-600">
+                    One tap sets everything up &mdash; you won't need this link again.
+                </p>
+
+                <ol class="mt-6 space-y-4">
+                    <li class="flex gap-3">
+                        <span class="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
+                        <span class="text-sm text-gray-700 pt-0.5">
+                            Tap
+                            <span class="mx-0.5 inline-flex translate-y-0.5 items-center">
+                                <svg class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0L8 8m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3"/>
+                                </svg>
+                            </span>
+                            <strong>Share</strong> at the bottom of the screen.
+                        </span>
+                    </li>
+                    <li class="flex gap-3">
+                        <span class="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
+                        <span class="text-sm text-gray-700 pt-0.5">
+                            Scroll down and choose <strong>Add to Home Screen</strong>.
+                        </span>
+                    </li>
+                    <li class="flex gap-3">
+                        <span class="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">3</span>
+                        <span class="text-sm text-gray-700 pt-0.5">
+                            Open the new icon. It activates itself.
+                        </span>
+                    </li>
+                </ol>
+
+                <div class="mt-6 rounded-lg bg-gray-100 p-3">
+                    <p class="text-xs text-gray-600">
+                        Activating in Safari instead would only work in Safari &mdash; an app on
+                        the Home Screen keeps its own separate login, and this link works once.
+                    </p>
+                </div>
+
+                <button type="button" class="mt-4 w-full py-2 text-sm font-medium text-gray-500 underline"
+                        @click="showSafariEscape = !showSafariEscape">
+                    I just want to use it in Safari
+                </button>
+
+                <template x-if="showSafariEscape">
+                    <div x-transition:enter="transition ease-out duration-150"
+                         x-transition:enter-start="opacity-0 -translate-y-1"
+                         x-transition:enter-end="opacity-100 translate-y-0">
+                        <template x-if="error">
+                            <p class="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" x-text="error"></p>
+                        </template>
+                        <button type="button"
+                                class="w-full rounded-xl bg-gray-900 px-4 py-3 text-base font-semibold text-white disabled:opacity-50"
+                                :disabled="busy" @click="activate()"
+                                x-text="busy ? statusText : 'Activate in Safari only'"></button>
+                    </div>
+                </template>
+            </div>
+        </template>
+
+        <!-- ============ EVERYONE ELSE ============ -->
+        <template x-if="!done && !needsInstallFirst">
+            <div class="mt-6">
+                <h1 class="text-center text-xl font-bold text-gray-900">Activate this device</h1>
+                <p class="mt-2 text-center text-sm text-gray-600">
+                    This link works once. Using it signs out any other phone already using
+                    this device.
+                </p>
+
+                <template x-if="error">
+                    <p class="mt-6 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" x-text="error"></p>
+                </template>
+
+                <!-- A spent link never works again, so retrying it is a dead end. The
+                     scanner accepts a fresh activation QR directly, which is the only
+                     thing that can actually help. -->
+                <template x-if="spent">
+                    <a href="{{ url_for('scan_home') }}"
+                       class="mt-6 block w-full rounded-xl bg-indigo-600 px-4 py-3.5 text-center text-base font-semibold text-white">
+                        Scan a new activation code
+                    </a>
+                </template>
+
+                <template x-if="!spent">
+                    <button type="button"
+                            class="mt-6 w-full rounded-xl bg-indigo-600 px-4 py-3.5 text-base font-semibold text-white disabled:opacity-60"
+                            :disabled="busy" @click="activate()"
+                            x-text="busy ? statusText : (error ? 'Try again' : 'Activate')"></button>
+                </template>
+
+                <p class="mt-4 text-center text-xs text-gray-500">
+                    You need to be online just for this step.
+                </p>
+            </div>
+        </template>
+    </div>
+</div>
+
+<script>
+function activatePage(token) {
+    return {
+        token: token,
+        busy: false,
+        done: false,
+        error: null,
+        deviceName: '',
+        needsInstallFirst: false,
+        spent: false,
+        showSafariEscape: false,
+        statusText: 'Activating…',
+        _ticker: null,
+
+        detect() {
+            // Belt and braces behind the inline redirect in <head>: an activated device
+            // must never spend another token, however it got here. Re-activating is a
+            // deliberate act (an admin issuing a new link), never something a relaunch
+            // does on its own.
+            if (PWA.sessionToken()) {
+                window.location.replace('{{ url_for("scan_home") }}');
+                return;
+            }
+
+            // The service worker is deliberately NOT registered here. Installing it
+            // downloads the whole app shell, which on mobile data starves the one
+            // request this page exists to make. PWA.activate installs it on success.
+            const ua = navigator.userAgent;
+            const isIOS = /iPad|iPhone|iPod/.test(ua)
+                // iPadOS 13+ reports itself as a Mac; the touch points give it away.
+                || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const standalone = window.navigator.standalone === true
+                || window.matchMedia('(display-mode: standalone)').matches;
+
+            // Installed, and genuinely not activated - so this is the first launch after
+            // Add to Home Screen. Nothing to explain; just do it.
+            if (standalone) { this.activate(); return; }
+            this.needsInstallFirst = isIOS;
+        },
+
+        /*
+         * Keeps the button honest while waiting.
+         *
+         * A label that says "Activating…" and never changes is indistinguishable from a
+         * frozen app, and the request is allowed a long deadline precisely because the
+         * connection may be poor. So it narrates instead of sitting still.
+         */
+        startTicker() {
+            const started = Date.now();
+            this.statusText = 'Activating…';
+            this._ticker = setInterval(() => {
+                const seconds = Math.round((Date.now() - started) / 1000);
+                if (seconds > 20) this.statusText = 'Still trying… (' + seconds + 's)';
+                else if (seconds > 7) this.statusText = 'Slow connection…';
+            }, 1000);
+        },
+
+        stopTicker() {
+            if (this._ticker) clearInterval(this._ticker);
+            this._ticker = null;
+        },
+
+        async activate() {
+            if (this.busy) return;
+            this.busy = true;
+            this.error = null;
+            this.startTicker();
+
+            // PWA.activate reports every failure in its return value, including network
+            // ones, so the message shown is the actual reason rather than a guess.
+            const result = await PWA.activate(this.token);
+
+            this.stopTicker();
+            if (result.ok) {
+                this.done = true;
+                this.deviceName = result.device ? result.device.name : 'this device';
+                // Straight through to the camera; nobody wants a confirmation screen
+                // between them and the receipt they are standing in front of.
+                setTimeout(() => { window.location.href = '{{ url_for("scan_home") }}'; }, 900);
+            } else if (result.reason === 'timeout') {
+                this.error = result.error + ' Tap to try again.';
+            } else if (result.reason === 'unknown') {
+                // Reached with no session and a token the server has never heard of -
+                // almost always a home-screen shortcut whose link was used long ago.
+                // "Not recognised" reads as a fault with the phone; it is not.
+                this.error = 'This activation link has already been used. '
+                    + 'Ask your admin for a new one from the Devices page.';
+                this.spent = true;
+            } else {
+                this.error = result.error;
+            }
+            this.busy = false;
+        },
+    };
+}
+</script>
+{% endblock %}

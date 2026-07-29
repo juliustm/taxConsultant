@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+
+{#
+  Device management.
+
+  The thing this page exists to make obvious is *state*: whether a device can submit
+  right now, and if not, what the admin has to do about it. Everything else - the
+  API key, the counts, the user agent - is secondary and is folded away until asked
+  for. A device that has never been activated leads with its activation panel open,
+  because there is exactly one useful action to take on it.
+#}
+
+{% macro status_pill(status) %}
+  {% set styles = {
+    'active': ('bg-green-100', 'text-green-800', 'Active'),
+    'awaiting_activation': ('bg-amber-100', 'text-amber-800', 'Awaiting activation'),
+    'signed_out': ('bg-gray-100', 'text-gray-600', 'Signed out'),
+    'revoked': ('bg-red-100', 'text-red-800', 'Revoked'),
+  } %}
+  {% set bg, fg, label = styles.get(status, ('bg-gray-100', 'text-gray-600', status)) %}
+  <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ bg }} {{ fg }}">{{ label }}</span>
+{% endmacro %}
+
+{% block content %}
+<div class="mx-auto max-w-5xl px-4 sm:px-6 lg:px-0" x-data="devicesPage({{ just_created or 'null' }})">
+
+    <div class="mb-6 sm:flex sm:items-end sm:justify-between">
+        <div>
+            <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Devices</h1>
+            <p class="mt-2 max-w-2xl text-sm text-gray-500">
+                Anything that submits receipts. A phone is activated once, by scanning a QR
+                code or opening its link, and stays signed in. Each device holds one session:
+                activating it somewhere new signs the old phone out.
+            </p>
+        </div>
+    </div>
+
+    <!-- Add a device -->
+    <form method="POST" action="{{ url_for('add_device') }}"
+          class="mb-8 rounded-lg border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
+        <label for="device_name" class="block text-sm font-medium leading-6 text-gray-900">Add a device</label>
+        <div class="mt-2 flex max-w-lg rounded-md shadow-sm">
+            <input type="text" name="device_name" id="device_name" required
+                   class="block w-full min-w-0 flex-1 rounded-none rounded-l-md border-0 py-1.5 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
+                   placeholder="e.g. Ali's phone, or Warehouse bot">
+            <button type="submit"
+                    class="relative -ml-px inline-flex items-center rounded-r-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">Add</button>
+        </div>
+    </form>
+
+    <!-- Device list -->
+    <div class="space-y-4">
+        {% for row in rows %}
+        {% set device = row.device %}
+        <div class="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm"
+             x-data="{ open: {{ 'true' if device.id == just_created else 'false' }}, showKey: false, renaming: false }">
+
+            <!-- Summary -->
+            <div class="flex flex-wrap items-start justify-between gap-3 p-4 sm:p-5">
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                        <h2 class="truncate text-base font-semibold text-gray-900">{{ device.name }}</h2>
+                        {{ status_pill(device.status) }}
+                    </div>
+                    <dl class="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500">
+                        <div><dt class="inline">Receipts:</dt> <dd class="inline font-medium text-gray-700">{{ row.receipt_count }}</dd></div>
+                        <div><dt class="inline">Submissions:</dt> <dd class="inline font-medium text-gray-700">{{ row.submission_count }}</dd></div>
+                        <div>
+                            <dt class="inline">Last seen:</dt>
+                            <dd class="inline font-medium text-gray-700">
+                                {{ device.last_seen_at.strftime('%d %b %Y, %H:%M') if device.last_seen_at else 'never' }}
+                            </dd>
+                        </div>
+                        {% if device.session_user_agent %}
+                        <div class="basis-full truncate" title="{{ device.session_user_agent }}">
+                            <dt class="inline">Phone:</dt>
+                            <dd class="inline font-mono text-gray-600">{{ device.session_user_agent }}</dd>
+                        </div>
+                        {% endif %}
+                    </dl>
+                </div>
+
+                <div class="flex shrink-0 items-center gap-2">
+                    {% if row.activation_url %}
+                    <button type="button" @click="open = !open"
+                            class="rounded-md bg-indigo-50 px-3 py-1.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-100">
+                        <span x-text="open ? 'Hide activation' : 'Show activation'">Show activation</span>
+                    </button>
+                    {% endif %}
+                    <button type="button" @click="open = !open"
+                            class="rounded-md px-2 py-1.5 text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700">
+                        Manage
+                    </button>
+                </div>
+            </div>
+
+            <!-- Expanded panel -->
+            <div x-show="open" x-cloak class="border-t border-gray-200 bg-gray-50 p-4 sm:p-5">
+
+                {% if row.activation_url %}
+                <!-- Activation -->
+                <div class="sm:flex sm:gap-6">
+                    <div class="shrink-0">
+                        <img src="{{ row.activation_qr }}" alt="Activation QR code for {{ device.name }}"
+                             class="h-44 w-44 rounded-md border border-gray-200 bg-white p-1">
+                    </div>
+                    <div class="mt-4 min-w-0 flex-1 sm:mt-0">
+                        <h3 class="text-sm font-semibold text-gray-900">Activate this phone</h3>
+                        <ol class="mt-2 list-decimal space-y-1 pl-5 text-sm text-gray-600">
+                            <li>On the phone, open <span class="font-mono text-xs text-gray-800">{{ url_for('scan_home', _external=True) }}</span> and add it to the home screen.</li>
+                            <li>Open it from the home screen. The scanner will ask to be activated.</li>
+                            <li>Point it at this QR code.</li>
+                        </ol>
+                        <p class="mt-2 text-xs text-gray-500">
+                            On Android you can simply open the link below instead. On iPhone, install first
+                            and scan the code &mdash; a home-screen app there does not share its login with Safari.
+                        </p>
+
+                        <div class="mt-3 flex rounded-md shadow-sm">
+                            <input type="text" readonly value="{{ row.activation_url }}"
+                                   x-ref="link{{ device.id }}"
+                                   class="block w-full min-w-0 flex-1 rounded-none rounded-l-md border-0 bg-white py-1.5 font-mono text-xs text-gray-700 ring-1 ring-inset ring-gray-300">
+                            <button type="button" @click="copy($refs.link{{ device.id }}, {{ device.id }})"
+                                    class="relative -ml-px inline-flex items-center rounded-r-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                                <span x-text="copied === {{ device.id }} ? 'Copied' : 'Copy'">Copy</span>
+                            </button>
+                        </div>
+                        <p class="mt-2 text-xs text-amber-700">
+                            This link works once. Whoever activates it first gets the device.
+                        </p>
+                    </div>
+                </div>
+                {% elif not device.is_revoked %}
+                <div class="rounded-md bg-white p-4 ring-1 ring-gray-200">
+                    <p class="text-sm text-gray-700">
+                        {% if device.status == 'active' %}
+                            This device is activated and holds a live session. To move it to a
+                            different phone, issue a new activation link &mdash; the current phone is
+                            signed out the moment the new one activates.
+                        {% else %}
+                            This device has no activation link outstanding. Issue one to bring it
+                            back into service.
+                        {% endif %}
+                    </p>
+                </div>
+                {% endif %}
+
+                <!-- Rename -->
+                <div class="mt-5 border-t border-gray-200 pt-4">
+                    <button type="button" x-show="!renaming" @click="renaming = true"
+                            class="text-sm font-medium text-indigo-600 hover:text-indigo-800">Rename device</button>
+                    <form x-show="renaming" x-cloak method="POST"
+                          action="{{ url_for('rename_device', device_id=device.id) }}" class="flex max-w-md rounded-md shadow-sm">
+                        <input type="text" name="device_name" value="{{ device.name }}" required
+                               class="block w-full min-w-0 flex-1 rounded-none rounded-l-md border-0 py-1.5 text-sm text-gray-900 ring-1 ring-inset ring-gray-300">
+                        <button type="submit" class="relative -ml-px inline-flex items-center rounded-r-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Save</button>
+                    </form>
+                </div>
+
+                <!-- API key: for bots, not phones -->
+                <div class="mt-4 border-t border-gray-200 pt-4">
+                    <div class="flex flex-wrap items-center gap-3">
+                        <span class="text-sm font-medium text-gray-900">API key</span>
+                        <span class="text-xs text-gray-500">For server-side integrations posting to <span class="font-mono">/receipt</span>. Phones do not use this.</span>
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                        <code class="rounded bg-white px-2 py-1 font-mono text-xs text-gray-800 ring-1 ring-gray-200"
+                              x-text="showKey ? '{{ device.api_key }}' : '•'.repeat(24)"></code>
+                        <button type="button" @click="showKey = !showKey"
+                                class="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                                x-text="showKey ? 'Hide' : 'Show'">Show</button>
+                        <form method="POST" action="{{ url_for('rotate_device_key', device_id=device.id) }}"
+                              @submit="return confirm('Rotate the API key? Any integration using the old key stops working immediately.')">
+                            <button type="submit" class="text-xs font-medium text-gray-600 hover:text-gray-900">Rotate</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Lifecycle actions -->
+                <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-4">
+                    {% if device.is_revoked %}
+                    <form method="POST" action="{{ url_for('restore_device', device_id=device.id) }}">
+                        <button type="submit" class="rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Restore</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="{{ url_for('issue_device_link', device_id=device.id) }}"
+                          @submit="return confirm('Issue a new activation link? Any earlier link stops working, and the phone currently using this device is signed out as soon as the new link is used.')">
+                        <button type="submit" class="rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                            {{ 'New activation link' if row.activation_url else 'Issue activation link' }}
+                        </button>
+                    </form>
+
+                    {% if device.session_token_hash %}
+                    <form method="POST" action="{{ url_for('sign_out_device', device_id=device.id) }}"
+                          @submit="return confirm('Sign this device out? Anything it has not yet uploaded stays safe on the phone.')">
+                        <button type="submit" class="rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Sign out</button>
+                    </form>
+                    {% endif %}
+
+                    <form method="POST" action="{{ url_for('revoke_device', device_id=device.id) }}"
+                          @submit="return confirm('Revoke this device? Its session and its API key both stop working. Receipts it already submitted are kept.')">
+                        <button type="submit" class="rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-red-700 ring-1 ring-inset ring-red-200 hover:bg-red-50">Revoke</button>
+                    </form>
+                    {% endif %}
+
+                    {% if row.deletable %}
+                    <form method="POST" action="{{ url_for('delete_device', device_id=device.id) }}" class="ml-auto"
+                          @submit="return confirm('Delete this device permanently?')">
+                        <button type="submit" class="rounded-md px-3 py-1.5 text-sm font-medium text-gray-500 hover:text-red-700">Delete</button>
+                    </form>
+                    {% else %}
+                    <span class="ml-auto text-xs text-gray-400">Has receipts &mdash; revoke rather than delete</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="rounded-lg border border-dashed border-gray-300 bg-white py-12 text-center">
+            <p class="text-sm text-gray-500">No devices yet. Add one above to get a phone scanning.</p>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<script>
+function devicesPage(justCreated) {
+    return {
+        justCreated: justCreated,
+        copied: null,
+
+        copy(input, deviceId) {
+            input.select();
+            // navigator.clipboard needs a secure context, which a self-hosted instance
+            // on plain HTTP will not have. execCommand still works there.
+            const done = () => { this.copied = deviceId; setTimeout(() => { this.copied = null; }, 2000); };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(input.value).then(done, () => { document.execCommand('copy'); done(); });
+            } else {
+                document.execCommand('copy');
+                done();
+            }
+        },
+    };
+}
+</script>
+{% endblock %}

@@ -10,6 +10,17 @@ class Config:
     # Session timeout configuration
     PERMANENT_SESSION_LIFETIME = timedelta(days=365)
 
+    # The admin session cookie. This matters more now that the scanner PWA puts a
+    # second kind of principal on the same origin: a device must never be able to
+    # reach the dashboard, and script on any page must never be able to read this.
+    # (Device sessions deliberately use a bearer header instead - see
+    # utils/device_auth - so they carry no CSRF surface at all.)
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    # Defaults on. Turned off only for local HTTP development, where a Secure cookie
+    # would simply never be sent and login would appear to silently fail.
+    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'true').lower() != 'false'
+
     # --- THE SEAMLESS DATABASE CONFIGURATION ---
     # Define a single, conventional path inside the project's root directory.
     # The project lives at '/app' inside the container. DATA_DIR can be overridden so

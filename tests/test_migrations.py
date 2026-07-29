@@ -119,8 +119,72 @@ def test_migration_adds_the_new_schema(legacy_database):
     receipt_columns = main._table_columns('receipt')
     assert {'total_incl_tax_cents', 'is_cancelled', 'source_html', 'vendor_id',
             'efd_serial', 'z_number', 'tax_office', 'receipt_time'} <= receipt_columns
-    assert {'next_attempt_at', 'claimed_at'} <= main._table_columns('submission')
+    assert {'next_attempt_at', 'claimed_at', 'client_uuid', 'captured_at'} <= main._table_columns('submission')
     assert {'business_name', 'business_tin', 'business_vrn'} <= main._table_columns('instance_config')
+    assert {'enrolment_token', 'session_token_hash', 'revoked_at', 'last_seen_at',
+            'activated_at', 'created_at'} <= main._table_columns('device')
+
+
+def test_migration_gives_existing_devices_an_activation_link(legacy_database):
+    """
+    A device that predates enrolment has to be activatable without being recreated.
+
+    Recreating it would be the obvious workaround and the wrong one: device_id is on
+    every submission and receipt, so a new row means the history stops following the
+    device that produced it.
+    """
+    import main
+    from models.user import Device
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    device = Device.query.one()
+    assert device.name == 'Old device'
+    assert device.enrolment_token is not None
+    assert device.enrolment_token.startswith(f'{device.id}.')
+    assert device.status == 'awaiting_activation'
+    # Its original API key is untouched: whatever bot holds it keeps working.
+    assert device.api_key == 'old-key'
+    assert len(device.submissions) == 2
+
+
+def test_migration_does_not_disturb_an_activated_device(legacy_database):
+    """The backfill must not hand out a second activation link to a live phone."""
+    import main
+    from models.user import Device
+    from utils.device_auth import consume_enrolment_token
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    device = Device.query.one()
+    session_token, _ = consume_enrolment_token(device.enrolment_token)
+    assert device.enrolment_token is None
+
+    main.apply_pending_migrations()
+
+    assert device.enrolment_token is None
+    assert device.session_token_hash is not None
+
+
+def test_migration_adds_the_unique_indexes(legacy_database):
+    """
+    SQLite cannot add a UNIQUE column with ALTER TABLE, so uniqueness on client_uuid
+    arrives as its own index. Existing rows have NULL there, which SQLite treats as
+    distinct - the index would otherwise fail to build on any populated database.
+    """
+    import main
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    indexes = {row[1] for row in db.session.execute(sa_text('PRAGMA index_list(submission)'))}
+    assert 'uq_submission_client_uuid' in indexes
+
+    # Two legacy submissions, both with a NULL client_uuid, survived the index.
+    from models.user import Submission
+    assert Submission.query.count() == 2
 
 
 def test_migration_keeps_an_existing_instance_configured(legacy_database):

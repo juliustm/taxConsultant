@@ -35,9 +35,63 @@ class InstanceConfig(db.Model):
         return all([self.llm_provider, self.llm_api_key])
 
 class Device(db.Model):
+    """
+    A thing that submits receipts: a phone running the scanner, or a bot.
+
+    Two credentials live here and they are deliberately different in kind.
+
+    `api_key` is the original one - a permanent bearer token pasted into a server-side
+    integration. It is kept unchanged because existing bots hold it.
+
+    The scanner's credential is a *session*, held by exactly one phone at a time. An
+    admin issues a single-use `enrolment_token`; the phone spends it and receives a
+    session token whose hash lands in `session_token_hash`. Because that is one column
+    rather than a table, activating a second phone necessarily overwrites the first,
+    which is what makes "one link, one device" true by construction instead of by a
+    rule somewhere that has to be remembered.
+    """
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     api_key = db.Column(db.String(100), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
+
+    created_at = db.Column(db.DateTime, nullable=True, default=datetime.utcnow)
+
+    # --- Enrolment: the single-use credential an admin hands out ---
+    # Held in the clear, unlike the session token, because the admin has to be able to
+    # re-render its QR on screen for as long as it is outstanding. It is set to NULL
+    # the moment it is spent, so at rest only unclaimed tokens exist unhashed.
+    enrolment_token = db.Column(db.String(80), nullable=True, unique=True)
+    enrolment_issued_at = db.Column(db.DateTime, nullable=True)
+
+    # --- Session: the credential the activated phone holds ---
+    activated_at = db.Column(db.DateTime, nullable=True)
+    session_token_hash = db.Column(db.String(64), nullable=True)
+    session_started_at = db.Column(db.DateTime, nullable=True)
+    session_user_agent = db.Column(db.String(255), nullable=True)
+    last_seen_at = db.Column(db.DateTime, nullable=True)
+
+    # Soft kill. A device with receipts behind it cannot be deleted without orphaning
+    # them, so revocation is how a device is taken out of service.
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    @property
+    def is_revoked(self):
+        return self.revoked_at is not None
+
+    @property
+    def has_session(self):
+        return self.session_token_hash is not None and not self.is_revoked
+
+    @property
+    def status(self):
+        """One word for the admin list. Order matters: revoked outranks everything."""
+        if self.is_revoked:
+            return 'revoked'
+        if self.session_token_hash:
+            return 'active'
+        if self.enrolment_token:
+            return 'awaiting_activation'
+        return 'signed_out'
 
 class Submission(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -59,6 +113,13 @@ class Submission(db.Model):
     # something to show the admin, and ties such a submission to a vendor later if the
     # same receipt does eventually arrive. See utils/tra.parse_receipt_url.
     receipt_code = db.Column(db.String(50), nullable=True, index=True)
+    # The scanner's idempotency key, minted on the phone before the receipt has ever
+    # been near a network. A queued scan is retried until it is acknowledged, and
+    # without this every dropped response would leave a duplicate behind.
+    client_uuid = db.Column(db.String(64), nullable=True, unique=True)
+    # When the person actually scanned it, as opposed to received_at, which is when
+    # the server heard about it. Offline queuing puts days between the two.
+    captured_at = db.Column(db.DateTime, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
     # When a queued job becomes eligible again. NULL means "now". Set instead of
     # sleeping inside the task runner when a fetch has to be retried later.

@@ -1,0 +1,588 @@
+{% extends "scan/base.html" %}
+{% block title %}Scan Receipts{% endblock %}
+
+{% block head %}
+<script>
+    /*
+     * Opens the camera before anything else on the page has parsed.
+     *
+     * The permission prompt and the sensor warm-up dominate a cold launch - far more
+     * than script parsing or layout - so they are started here, in <head>, and the
+     * result is collected later by scanner.js. Waiting for Alpine to hydrate first
+     * would add most of a second to every single launch.
+     */
+    window.__cameraPromise = null;
+    // Set when the Permissions API can see this has never been decided either way.
+    // scannerApp() waits for an explicit tap in that case rather than firing an OS
+    // permission dialog at someone the instant the icon opens - see the camera gate
+    // below. Once a person has answered it once, this branch is never taken again:
+    // the state comes back 'granted' (or 'denied') and the app starts exactly as it
+    // always did, with no gate and no extra tap. Safari has no Permissions entry for
+    // 'camera' at all, so it always falls into the immediate branch, unchanged.
+    window.__cameraNeedsGate = false;
+    (function () {
+        var constraints = {
+            audio: false,
+            video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+                frameRate: { ideal: 30 },
+            },
+        };
+        function startNow() {
+            try { window.__cameraPromise = navigator.mediaDevices.getUserMedia(constraints); }
+            catch (e) { /* scanner.js surfaces this once it actually looks */ }
+        }
+        try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+            if (navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query({ name: 'camera' })
+                    .then(function (status) {
+                        if (status.state === 'prompt') window.__cameraNeedsGate = true;
+                        else startNow();
+                    })
+                    .catch(startNow);
+            } else {
+                startNow();
+            }
+        } catch (e) { /* fall through: scanner.js asks when it starts */ }
+    })();
+</script>
+<script src="{{ url_for('static', filename='js/vendor/zxing-reader.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<div x-data="scannerApp()" x-init="boot()" class="h-full">
+
+    <!-- Viewfinder. Always mounted: it is also how a device gets activated. -->
+    <video x-ref="video" class="viewfinder" playsinline muted autoplay></video>
+
+    <!-- Sync state. Two different shapes for the same underlying state rather than one
+         indicator with a color swap - offline is the one state a driving, half-looking
+         user has to notice without reading anything, so it gets the whole width and
+         the word itself, not just a dot that changed color. -->
+    <template x-if="!!session && online">
+        <div class="sync-pill" x-cloak x-transition.opacity.duration.200ms>
+            <span class="sync-dot" :class="dotClass"></span>
+            <span x-text="syncLabel"></span>
+        </div>
+    </template>
+    <template x-if="!!session && !online">
+        <div class="offline-banner safe-top" x-cloak
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0 -translate-y-2"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition ease-in duration-150"
+             x-transition:leave-start="opacity-100 translate-y-0"
+             x-transition:leave-end="opacity-0 -translate-y-2">
+            <span class="sync-dot is-offline"></span>
+            <span x-text="pending ? `Offline — ${pending} will send once you're back online` : 'Offline — receipts are saved on this phone'"></span>
+        </div>
+    </template>
+
+    <!-- Success flash -->
+    <template x-if="flash">
+        <div class="hit-flash"></div>
+    </template>
+
+    <!-- ================= CAMERA GATE ================= -->
+    {# Only shown where the Permissions API can tell us in advance that the camera has
+       never been granted or refused. One deliberate tap opens it from here rather than
+       an OS dialog appearing unprompted the moment the app launches - see the head
+       script above. Sits above everything, activation included: both activation and
+       scanning read the same camera. #}
+    <div x-show="cameraGate" x-cloak class="fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-black p-8 text-center"
+         x-transition.opacity.duration.200ms>
+        <div class="flex h-16 w-16 items-center justify-center rounded-full bg-white/10">
+            <svg class="h-8 w-8 text-white/80" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.132.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.804-2.169a47.865 47.865 0 00-1.132-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/>
+            </svg>
+        </div>
+        <div>
+            <h1 class="text-lg font-semibold">Enable the camera to scan</h1>
+            <p class="mt-1 max-w-xs text-sm text-white/60">
+                One tap, once — after this it opens on its own every time you launch the app.
+            </p>
+        </div>
+        <button type="button" class="control control-primary" @click="enableCamera()">Enable camera</button>
+    </div>
+
+    <!-- ================= ACTIVATION ================= -->
+    {# fixed, not absolute: the viewfinder behind these is fixed too, and an absolute
+       overlay would start resolving against any wrapper that later gains a position. #}
+    <div x-show="!session" x-cloak class="fixed inset-0 flex flex-col">
+        <div class="flex-1 flex items-center justify-center p-6">
+            <div class="reticle" :class="{ 'is-hit': flash }"></div>
+        </div>
+
+        <div class="safe-bottom bg-black/80 px-6 pt-5 pb-6 backdrop-blur">
+            <template x-if="signOutMessage">
+                <p class="mb-3 rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-amber-200"
+                   x-text="signOutMessage"></p>
+            </template>
+
+            <template x-if="activating">
+                <div class="flex items-center gap-3">
+                    <span class="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
+                    <h1 class="text-lg font-semibold">Activating this device…</h1>
+                </div>
+            </template>
+
+            <template x-if="!activating">
+                <div>
+                    <h1 class="text-lg font-semibold">Activate this device</h1>
+                    <p class="mt-1 text-sm text-white/70">
+                        Point the camera at the activation QR code from your admin's Devices page.
+                    </p>
+                </div>
+            </template>
+
+            <template x-if="activationError">
+                <p class="mt-3 rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-200"
+                   x-text="activationError"></p>
+            </template>
+
+            <div class="mt-4" x-show="showManual" x-cloak>
+                <label for="manual-token" class="text-xs font-medium text-white/60">Or paste the activation link</label>
+                <div class="mt-1 flex gap-2">
+                    <input id="manual-token" type="text" x-model="manualToken"
+                           placeholder="https://…/scan/a/…"
+                           class="min-w-0 flex-1 rounded-lg border-0 bg-white/10 px-3 py-2.5 text-sm text-white placeholder:text-white/40 focus:ring-2 focus:ring-indigo-500">
+                    <button type="button" class="control control-primary px-4"
+                            @click="activateManually()" x-bind:disabled="activating">Go</button>
+                </div>
+            </div>
+
+            <button type="button" class="mt-3 text-sm text-white/50 underline"
+                    @click="showManual = !showManual"
+                    x-text="showManual ? 'Hide manual entry' : 'Camera not working?'"></button>
+        </div>
+    </div>
+
+    <!-- ================= SCANNING ================= -->
+    <div x-show="!!session" x-cloak class="fixed inset-0 flex flex-col">
+
+        <!-- Camera failure is the one thing that stops this screen being usable, so it
+             takes over rather than sitting in a corner. -->
+        <template x-if="cameraError">
+            <div class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-black/90 p-8 text-center">
+                <p class="text-base font-semibold">The camera could not start</p>
+                <p class="max-w-xs text-sm text-white/60" x-text="cameraError"></p>
+                <button type="button" class="control control-primary" @click="boot()">Try again</button>
+                <a href="{{ url_for('scan_diagnostics') }}" class="text-sm text-white/50 underline">Run diagnostics</a>
+            </div>
+        </template>
+
+        <!-- The decoder cannot run at all. Not a frame without a code in it - a
+             scanner that will never find one, which must say so rather than look busy. -->
+        <template x-if="engineError">
+            <div class="absolute inset-x-4 top-16 z-20 rounded-xl bg-red-600/95 p-4 text-center">
+                <p class="text-sm font-semibold">The QR reader could not start</p>
+                <p class="mt-1 text-xs text-red-100" x-text="engineError"></p>
+                <p class="mt-2 text-xs text-red-100">Use <strong>Photo</strong> below &mdash; we will read the receipt for you.</p>
+            </div>
+        </template>
+
+        <div class="flex-1"></div>
+
+        <!-- QR mode: a box, because only the box is read. -->
+        <div class="reticle" x-show="mode === 'qr'" :class="{ 'is-hit': flash }"></div>
+
+        <!-- Photo mode: the whole frame, because the whole frame is what gets captured. -->
+        <div class="photo-frame" x-show="mode === 'photo'" x-cloak>
+            <span></span><span></span><span></span><span></span>
+        </div>
+
+        <div class="flex-1"></div>
+
+        <!-- Hint. What just got saved is the confirmation sheet's job now, not this
+             line's - see CONFIRM below. -->
+        <div class="px-6 pb-3 text-center">
+            <template x-if="mode === 'photo'">
+                <p class="text-sm text-white/70">
+                    Fit the <strong>whole receipt</strong> in the frame. The full picture is saved.
+                </p>
+            </template>
+            <template x-if="mode === 'qr' && struggling">
+                <button type="button" @click="setMode('photo')"
+                        class="animate-pulse text-sm font-semibold text-amber-300 underline">
+                    Can't read it? Take a photo instead
+                </button>
+            </template>
+            <template x-if="mode === 'qr' && !struggling">
+                <p class="text-sm text-white/60">Point at the QR code on the receipt</p>
+            </template>
+            <template x-if="foreignCode">
+                <p class="mt-1 text-xs text-red-300">That isn't a TRA receipt code.</p>
+            </template>
+        </div>
+
+        <!-- Mode switch -->
+        <div class="flex justify-center pb-3">
+            <div class="mode-switch">
+                <button type="button" :class="{ 'is-active': mode === 'qr' }" @click="setMode('qr')">Scan QR</button>
+                <button type="button" :class="{ 'is-active': mode === 'photo' }" @click="setMode('photo')">Photo</button>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="safe-bottom flex items-center justify-between px-8 pb-5">
+            <a href="{{ url_for('scan_history') }}" class="control control-round" aria-label="History">
+                <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+            </a>
+
+            <!-- In QR mode scanning is automatic, so a shutter would invite pointless
+                 taps; the slot keeps the row from shifting when modes change. -->
+            <button type="button" class="shutter" x-show="mode === 'photo'"
+                    @click="takePhoto()" :disabled="capturing" aria-label="Take photo"></button>
+            <div x-show="mode === 'qr'" class="h-[4.5rem] w-[4.5rem] flex items-center justify-center">
+                <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-white/70"></span>
+            </div>
+
+            <button type="button" class="control control-round" :class="{ 'is-on': torchOn }"
+                    x-show="torchAvailable" @click="toggleTorch()" aria-label="Torch">
+                <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88"/>
+                </svg>
+            </button>
+            <div x-show="!torchAvailable" class="h-13 w-13"></div>
+        </div>
+
+        <!-- ================= CONFIRM ================= -->
+        {# The point of this screen: the camera does not go back to looking the moment
+           a code decodes. It waits, on purpose, for a tap - which is the only thing
+           that stops the same receipt, still sitting in frame, being read and queued
+           again on the very next one. The wait doubles as where a note gets attached,
+           since asking after the fact means asking never happens. #}
+        <div x-show="!!confirming" x-cloak class="fixed inset-0 z-30 flex flex-col justify-end"
+             x-transition.opacity.duration.200ms>
+            <button type="button" class="flex-1 bg-black/50" @click="continueScanning()"
+                    aria-label="Continue scanning"></button>
+
+            <div class="confirm-sheet safe-bottom rounded-t-3xl bg-zinc-900/98 px-5 pt-4 pb-6 backdrop-blur"
+                 x-transition:enter="transition ease-out duration-200"
+                 x-transition:enter-start="translate-y-full"
+                 x-transition:enter-end="translate-y-0"
+                 x-transition:leave="transition ease-in duration-150"
+                 x-transition:leave-start="translate-y-0"
+                 x-transition:leave-end="translate-y-full">
+                <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20"></div>
+
+                <template x-if="confirming && confirming.previewUrl">
+                    <img :src="confirming.previewUrl" alt="" class="mb-3 max-h-40 w-full rounded-xl object-cover">
+                </template>
+
+                <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-green-500/20 text-base text-green-400">✓</span>
+                    <div class="min-w-0">
+                        <p class="text-sm font-semibold text-white">Receipt saved on this phone</p>
+                        <p class="truncate font-mono text-xs text-white/50" x-text="confirming && confirming.label"></p>
+                    </div>
+                </div>
+
+                <label for="confirm-note" class="mt-4 block text-xs font-medium text-white/50">Note (optional)</label>
+                <textarea id="confirm-note" x-model="noteText" rows="2" maxlength="200"
+                          placeholder="e.g. fuel, client lunch, office supplies"
+                          class="mt-1 w-full resize-none rounded-xl border-0 bg-white/10 px-3 py-2.5 text-sm text-white placeholder:text-white/30 focus:ring-2 focus:ring-indigo-500"></textarea>
+
+                <button type="button" class="control control-primary mt-4 w-full" @click="continueScanning()">
+                    Scan next receipt
+                </button>
+                <button type="button" class="mt-2 w-full py-1 text-center text-xs text-white/40 underline"
+                        @click="discardConfirming()">
+                    Wrong receipt? Discard it
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function scannerApp() {
+    return {
+        session: null,
+        scanner: null,
+        // 'qr' reads a small box; 'photo' captures the whole frame. The two show
+        // different guides because they capture different things - a QR box drawn over
+        // a full-frame photo tells the user to fit a receipt inside a crop that is
+        // never applied.
+        mode: 'qr',
+        cameraError: null,
+        cameraGate: false,
+        engineError: null,
+        torchAvailable: false,
+        torchOn: false,
+        struggling: false,
+        capturing: false,
+        flash: false,
+        confirming: null,
+        noteText: '',
+        foreignCode: false,
+        pending: 0,
+        syncing: false,
+        online: navigator.onLine !== false,
+        signOutMessage: null,
+        activationError: null,
+        activating: false,
+        showManual: false,
+        manualToken: '',
+
+        async boot() {
+            PWA.start();
+            PWA.onChange(() => this.refresh());
+            await this.refresh();
+            await this.claimTokenFromUrl();
+
+            this.cameraError = null;
+            this.scanner = Scanner.create(this.$refs.video, {
+                onResult: (text) => this.handleResult(text),
+                onStruggling: () => { this.struggling = true; },
+                onEngineFailure: (e) => {
+                    this.engineError = e.message;
+                    // Nothing can be scanned, so put the user where they can still work.
+                    this.setMode('photo');
+                },
+            });
+
+            if (window.__cameraNeedsGate) {
+                // Permission has never been decided and the platform told us so in
+                // advance. Wait for the tap in the gate pane instead of surprising
+                // whoever just opened the icon - see enableCamera().
+                this.cameraGate = true;
+                return;
+            }
+            await this.openCamera();
+        },
+
+        async openCamera() {
+            this.cameraGate = false;
+            try {
+                await this.scanner.start();
+                this.torchAvailable = this.scanner.torchAvailable;
+                // Started here rather than at PWA.start(): geolocation is its own
+                // permission prompt, and stacking it on top of the camera one at the
+                // very first instant of a cold launch is exactly the pile-up of
+                // prompts this app is trying to avoid. The camera is what someone is
+                // looking at; by the time they have it framed on a receipt, this fix
+                // has had time to resolve.
+                PWA.watchLocation();
+            } catch (e) {
+                this.cameraError = e && e.name === 'NotAllowedError'
+                    ? 'Camera permission was refused. Allow it in your browser settings, then try again.'
+                    : (e && e.message) || 'Unknown error.';
+            }
+        },
+
+        /* The tap that is allowed to open the OS permission dialog. */
+        async enableCamera() {
+            window.__cameraPromise = null;
+            await this.openCamera();
+        },
+
+        /*
+         * Activates from the token the launcher icon carries, if there is one.
+         *
+         * This is what makes "Add to Home Screen" enough on its own: the manifest's
+         * start_url carries the activation token, so the installed app opens already
+         * holding it and spends it here - in the storage the app actually runs in,
+         * which on iOS is not the one Safari uses.
+         *
+         * Every subsequent launch carries the same spent token, because start_url is
+         * fixed at install time. So a session always wins, and a token that no longer
+         * works is not an error worth showing - it is just an old shortcut.
+         */
+        async claimTokenFromUrl() {
+            const token = new URLSearchParams(location.search).get('t');
+            if (!token) return;
+
+            if (!this.session) {
+                this.activating = true;
+                const result = await PWA.activate(token);
+                this.activating = false;
+                if (result.ok) {
+                    if (navigator.vibrate) navigator.vibrate([40, 60, 40]);
+                    await this.refresh();
+                } else if (result.reason !== 'unknown') {
+                    // A real problem - offline, revoked, timed out - is worth saying.
+                    this.activationError = result.error;
+                }
+            }
+
+            // Cleaned either way, so a reload does not retry a token that is spent and
+            // the address bar does not carry a credential around.
+            history.replaceState({}, '', '{{ url_for("scan_home") }}');
+        },
+
+        async refresh() {
+            const status = await PWA.status();
+            this.session = status.session;
+            this.pending = status.pending;
+            this.syncing = status.syncing;
+            this.online = status.online;
+            this.signOutMessage = status.signOutReason ? status.signOutReason.message : null;
+        },
+
+        /*
+         * One decode, two possible meanings.
+         *
+         * The same camera loop serves activation and scanning, so what a decoded string
+         * means depends on whether this device has a session yet. Returning false tells
+         * the scanner to ignore it and keep looking, which is what should happen when a
+         * poster or a product barcode wanders into shot.
+         */
+        handleResult(text) {
+            const activationToken = PWA.activationTokenFrom(text);
+            if (activationToken) {
+                if (!this.session) { this.activate(activationToken); return true; }
+                return false;   // Already activated; a stray activation QR is not for us.
+            }
+
+            if (!this.session) return false;
+            if (this.confirming) return false;   // Already holding one; do not stack a second.
+
+            const receipt = Scanner.parseReceipt(text);
+            if (!receipt) {
+                this.foreignCode = true;
+                setTimeout(() => { this.foreignCode = false; }, 2000);
+                return false;
+            }
+
+            this.foreignCode = false;
+            this.confirm({ kind: 'qr', receipt, label: receipt.code });
+            return true;
+        },
+
+        /*
+         * Holds a decoded receipt for a beat rather than queuing it straight away.
+         *
+         * The camera keeps decoding every frame it is pointed at, and a receipt that
+         * was just read is still sitting dead center in that frame - without this, the
+         * very next frame reads the same code again and queues a second copy of the
+         * same receipt before anyone has moved the phone. Pausing the scanner here is
+         * what actually stops that; the sheet it shows is what turns the pause into
+         * something useful, by giving whoever is scanning a moment to attach a note.
+         */
+        confirm(item) {
+            if (this.scanner) this.scanner.pause();
+            this.noteText = '';
+            this.confirming = item;
+            this.struggling = false;
+            if (navigator.vibrate) navigator.vibrate(60);
+            this.flash = true;
+            setTimeout(() => { this.flash = false; }, 500);
+        },
+
+        async continueScanning() {
+            const item = this.confirming;
+            if (!item) return;
+            const note = this.noteText.trim();
+
+            if (item.kind === 'photo') {
+                await PWA.queueScan({ photo: item.blob, description: note || null, location: PWA.currentLocation() });
+            } else {
+                await PWA.queueScan({ receipturl: item.receipt.raw, description: note || null, location: PWA.currentLocation() });
+            }
+
+            this.dismissConfirm();
+            await this.refresh();
+        },
+
+        /* A mis-scan - the wrong receipt, someone else's - without a way back out of
+           this sheet would just teach people to stop checking. */
+        discardConfirming() {
+            this.dismissConfirm();
+        },
+
+        dismissConfirm() {
+            if (this.confirming && this.confirming.previewUrl) URL.revokeObjectURL(this.confirming.previewUrl);
+            this.confirming = null;
+            this.noteText = '';
+            if (this.scanner) this.scanner.resume();
+        },
+
+        async takePhoto() {
+            if (!this.scanner || this.capturing) return;
+            this.capturing = true;
+            try {
+                const shot = await this.scanner.capture();
+
+                // A still at full sensor resolution frequently decodes what the preview
+                // stream could not. When it does, this becomes an ordinary scan and the
+                // photo is thrown away - a verified receipt beats a picture of one.
+                const receipt = shot.text ? Scanner.parseReceipt(shot.text) : null;
+                if (receipt) {
+                    this.confirm({ kind: 'qr', receipt, label: receipt.code });
+                    return;
+                }
+
+                const previewUrl = URL.createObjectURL(shot.blob);
+                this.confirm({ kind: 'photo', blob: shot.blob, previewUrl, label: 'Photo' });
+            } catch (e) {
+                this.cameraError = (e && e.message) || 'Could not take a photo.';
+            } finally {
+                this.capturing = false;
+            }
+        },
+
+        /*
+         * Switching modes changes what is framed, not what is decoded.
+         *
+         * Automatic QR detection keeps running in photo mode: it costs nothing extra,
+         * and if the code happens to be readable the user gets a verified receipt
+         * instead of a picture of one without having to think about it.
+         */
+        setMode(mode) {
+            this.mode = mode;
+            this.struggling = false;
+        },
+
+        async toggleTorch() {
+            const next = !this.torchOn;
+            if (await this.scanner.setTorch(next)) this.torchOn = next;
+        },
+
+        async activate(token) {
+            if (this.activating) return;
+            this.activating = true;
+            this.activationError = null;
+            const result = await PWA.activate(token);
+            if (result.ok) {
+                if (navigator.vibrate) navigator.vibrate([40, 60, 40]);
+                this.flash = true;
+                setTimeout(() => { this.flash = false; }, 500);
+                this.signOutMessage = null;
+                await this.refresh();
+            } else {
+                this.activationError = result.error;
+            }
+            this.activating = false;
+        },
+
+        activateManually() {
+            const token = PWA.activationTokenFrom(this.manualToken.trim())
+                || this.manualToken.trim();
+            if (token) this.activate(token);
+        },
+
+        get dotClass() {
+            if (!this.online) return 'is-offline';
+            if (this.syncing) return 'is-syncing';
+            if (this.pending > 0) return 'is-pending';
+            return 'is-synced';
+        },
+
+        get syncLabel() {
+            if (!this.online) return this.pending ? `Offline · ${this.pending} waiting` : 'Offline';
+            if (this.syncing) return 'Syncing…';
+            if (this.pending > 0) return `${this.pending} waiting`;
+            return 'Synced';
+        },
+    };
+}
+</script>
+{% endblock %}

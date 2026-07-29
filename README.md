@@ -25,6 +25,7 @@ This project empowers you to build your own internal, automated accounting assis
 ## Key Features
 
 -   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint.
+-   **A Scanner That Works With No Signal**: An installable phone app (`/scan/`) that opens straight into a fullscreen QR scanner — no menu, no login screen, camera live in about a second. It is offline-first in the literal sense: with the network switched off it still opens, still scans, still shows history, and queues everything in IndexedDB until connectivity returns. Nothing is loaded from a CDN at runtime.
 -   **Exact Extraction from TRA**: The verified receipt page is structured HTML, so it is parsed, not guessed at — vendor, TIN, VRN, EFD serial, Z number, tax office, line items, each printed tax rate and the totals, exactly as TRA issued them. Amounts are stored as integer cents, never floats.
 -   **AI for Judgment, Not Facts**: The LLM (Groq, OpenAI) is given the parsed JSON and asked only what the purchase *means* — expense category, deductibility, input VAT and withholding tax. It cannot invent a date or an amount, it costs a fraction of the tokens the scraped page did, and when it is unreachable the receipt is still recorded in full.
 -   **Compliance Checks, Computed Not Guessed**: Every receipt is scored 0–100 against checks that decide real money — is the invoice made out to *your* TIN (input VAT is not claimable otherwise), does the printed tax follow from the line items at the rate shown, did an unregistered supplier charge VAT, how many days are left in the six-month claim window. Each answer is a sentence you can act on, and none of them involves a model. See `utils/compliance.py`.
@@ -56,6 +57,26 @@ To ensure compatibility with simple, single-app hosting platforms (like Deploy.t
     -   **Instant Trigger**: A non-blocking background task is spawned on receipt submission to call the `/tasks/run` endpoint after a 10-second delay.
     -   **Cron Job (Fallback)**: You use a free external service like [cron-job.org](https://cron-job.org/) to call the `/tasks/run` endpoint on a schedule (e.g., every 5 minutes). This ensures any failed or missed jobs are always processed.
 5.  **Retries**: A receipt the vendor has not uploaded to TRA yet is rescheduled on the job row (`next_attempt_at`) with an increasing backoff, rather than being retried inside the request. Failures that can never succeed - a wrong time in the receipt URL, for instance - fail straight away instead of hammering a rate-limited portal.
+
+## How It Works: The Field Scanner
+
+The people who hold the receipts are not the person who runs the dashboard. They are standing in a shop, often with one bar of signal or none, and the whole interaction has to be: open app, point at receipt, done.
+
+**Setup is one link, used once.** An admin adds a device under **Devices** and gets an activation QR code and a copyable link. The field user installs the app and scans that code, and the device is signed in for good. There is no password and nothing to type.
+
+**One device is one phone.** The session lives in a single column on the device row, so activating a device somewhere new necessarily signs out wherever it was before — the old phone is told exactly that, rather than being left guessing at a generic error. To move a device to a replacement handset, the admin issues a new link; the receipt history stays attached to the device.
+
+> On iPhone, install the app to the home screen *before* activating. A home-screen web app on iOS does not share storage with Safari, so activating in the browser would leave the installed app signed out. The activation page says so when it detects an iPhone.
+
+**Reading the code is the hard part.** An EFD QR code is printed by a thermal head onto a narrow roll, so in practice it arrives small, faded, creased, and sitting on watermarked stock, photographed in a dim shop. The scanner uses the platform's native `BarcodeDetector` where there is one, and falls back to ZXing-C++ compiled to WebAssembly — chosen for its local-average binarizer, which thresholds per region and is what survives uneven fade and watermark bleed-through where a single global threshold does not. The camera is asked for full resolution and the region of interest is cut out at 1:1 and never downscaled, because downscaling is what makes a marginal code unreadable. Failed frames periodically retry with contrast stretched and against the whole frame.
+
+**And there is always a way out.** After a few seconds of not decoding, the app offers a photo instead. Taking one first tries a decode at full sensor resolution — which often succeeds where the preview stream could not — and only otherwise submits the image to the vision path that already exists.
+
+**Nothing waits on the network.** A scan is written to IndexedDB and the UI is finished with it; a separate loop drains that queue whenever the server is actually reachable. Every scan carries a `client_uuid` minted on the phone, which is also the server's idempotency key, so a response lost on the way back can never produce a second submission. `navigator.onLine` is not trusted — every request has an explicit deadline and repeated failures open a circuit breaker.
+
+Losing a session never loses receipts: a 401 clears the credential and leaves the outbox alone, because unsent receipts are the only copy in existence.
+
+`/scan/diagnostics` is a self-service screen for when something is wrong and no admin is nearby — it names what is missing (HTTPS, camera permission, undownloaded app files) and can repair a precache that a weak connection left half-filled.
 
 ## How It Works: Facts vs. Judgment
 
@@ -160,6 +181,18 @@ The first time you visit the application, you'll be guided through a secure setu
 ## Configuration Guide
 
 After logging in, navigate to the **Configuration** page to set up the LLM provider and your desired data export destinations (Google Sheets, Webhook, S3). Detailed instructions are provided on the page itself.
+
+### Getting a phone scanning
+
+1.  Go to **Devices** and add one, named for whoever will carry it.
+2.  On the phone, open `https://your-instance/scan/` and add it to the home screen.
+3.  Open it from the home screen and point it at the activation QR code on the Devices page. (On Android you can just open the activation link instead.)
+
+The activation link works once. To move a device to a different phone, issue a new link from the same page — the old phone is signed out as soon as the new one activates, and the device keeps its receipt history.
+
+The **Devices** page also handles renaming, signing a phone out, revoking a device entirely (which kills its API key too), and rotating the API key used by server-side integrations posting to `/receipt`.
+
+> **HTTPS is required.** Browsers only grant camera access and offline mode in a secure context, so the scanner will not work over plain `http://` except on `localhost`. `/scan/diagnostics` reports this in plain language if it is the problem.
 
 ---
 

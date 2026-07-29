@@ -4,9 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TaxConsult AI Agent</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+    {# Served from this instance, not a CDN. These are the same files the scanner PWA
+       precaches, and a self-hosted deployment on a link that cannot reach jsdelivr
+       should still render. #}
+    <script src="{{ url_for('static', filename='js/vendor/tailwind.min.js') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/vendor/alpine-collapse.min.js') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/vendor/alpine.min.js') }}"></script>
 
     <!-- Primary Meta Tags -->
     <title>TaxConsult AI Agent | Automate Your EFD Receipts</title>
@@ -83,6 +86,7 @@
                             ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
                             ('vendors', 'Vendors', ['vendors']),
                             ('queue_status', 'Queue', ['queue_status']),
+                            ('manage_devices', 'Devices', ['manage_devices']),
                             ('configure_instance', 'Configuration', ['configure_instance']),
                         ] %}
                         {% for endpoint, label, active_on in nav_items %}

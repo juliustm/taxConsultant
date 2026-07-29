@@ -14,6 +14,9 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault('DATA_DIR', tempfile.mkdtemp(prefix='taxconsult-tests-'))
+# The test client speaks http, and a Secure cookie is never sent back over http - so
+# with the production default every logged-in test would silently be anonymous.
+os.environ.setdefault('SESSION_COOKIE_SECURE', 'false')
 
 import pytest
 

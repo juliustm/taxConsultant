@@ -1,0 +1,290 @@
+/*
+ * scan.css - the field app's own styling.
+ *
+ * Tailwind is vendored and precached, but it is the browser build: it compiles at
+ * runtime, so there is a moment on every launch before any utility class has any
+ * effect. On a scanner that opens straight into a black fullscreen camera, that moment
+ * is a white flash in a dark shop. Everything here is either what has to be right
+ * before Tailwind runs, or what Tailwind cannot express.
+ */
+
+:root {
+    color-scheme: dark;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+    /* Explicit rather than relied-on: a document tall enough to scroll must always be
+       able to, and momentum scrolling is what makes it read as smooth on iOS rather
+       than as a page that stops dead the instant a finger lifts. */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Native-app feel: no tap flash, no accidental text selection while aiming a camera,
+   no long-press callout over the viewfinder. Inputs opt back in below. */
+body {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+input, textarea, [contenteditable] {
+    -webkit-user-select: auto;
+    user-select: auto;
+}
+
+/* Alpine sets x-cloak until it has hydrated. Without this rule the un-initialised
+   markup is visible for a beat, which on this app means every screen at once. */
+[x-cloak] { display: none !important; }
+
+/* Home indicator and notch. Buttons at the bottom of a fullscreen camera land exactly
+   where iOS puts its swipe bar otherwise. */
+.safe-top { padding-top: env(safe-area-inset-top, 0px); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* A `position: fixed; inset: 0` pane is exactly the viewport, always - it does not
+   grow, and by default it does not scroll either. Its content normally fits, but the
+   activation sheet and the confirm sheet can both grow past that (a long error message
+   plus the manual-entry field, both open, on a small phone with the keyboard up) and
+   without this rule the part that no longer fits is not clipped so much as simply
+   gone - not visible, not reachable, no scrollbar anywhere to say so. This is what
+   "the app feels rigid, nothing scrolls" was: fixed panes with nowhere for their own
+   overflow to go. */
+.fixed.inset-0 {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* --- Viewfinder --------------------------------------------------------- */
+
+.viewfinder {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+}
+
+/* The cut-out matches ROI_RATIO in scanner.js. It is not decoration: it tells the user
+   where the decoder is actually looking, which is most of what makes a scanner feel
+   fast rather than unreliable. */
+.reticle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 70vmin;
+    height: 70vmin;
+    max-width: 22rem;
+    max-height: 22rem;
+    border-radius: 1.5rem;
+    box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55);
+    outline: 2px solid rgba(255, 255, 255, 0.85);
+    outline-offset: -2px;
+    transition: outline-color 150ms ease;
+}
+
+.reticle.is-hit { outline-color: #22c55e; outline-width: 4px; }
+
+/* Photo mode frames the whole sensor, because that is what a photo captures.
+   Showing the small QR box while taking a full-frame picture told the user their
+   receipt had to fit inside a box it was never cropped to. */
+.photo-frame {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 3.5rem);
+    right: 1rem;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 8.5rem);
+    left: 1rem;
+    pointer-events: none;
+}
+
+/* Corner brackets only. A full border reads as a crop boundary; corners read as
+   "line the edges up", which is the actual instruction. */
+.photo-frame span {
+    position: absolute;
+    width: 2rem;
+    height: 2rem;
+    border: 3px solid rgba(255, 255, 255, 0.9);
+}
+
+.photo-frame span:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 0.75rem; }
+.photo-frame span:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 0.75rem; }
+.photo-frame span:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 0.75rem; }
+.photo-frame span:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 0.75rem; }
+
+/* --- Mode switch -------------------------------------------------------- */
+
+.mode-switch {
+    display: inline-flex;
+    padding: 0.2rem;
+    border-radius: 9999px;
+    background: rgba(24, 24, 27, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.mode-switch button {
+    border: 0;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.5rem 1.1rem;
+    border-radius: 9999px;
+    cursor: pointer;
+    transition: background-color 150ms ease, color 150ms ease;
+}
+
+.mode-switch button.is-active { background: #fff; color: #111; }
+
+/* The shutter, deliberately shaped like a camera shutter so it is not confused with
+   the scanner's own automatic behaviour. */
+.shutter {
+    width: 4.5rem;
+    height: 4.5rem;
+    border-radius: 9999px;
+    border: 4px solid rgba(255, 255, 255, 0.9);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    transition: transform 100ms ease, opacity 150ms ease;
+}
+
+.shutter:active { transform: scale(0.93); }
+.shutter:disabled { opacity: 0.5; }
+
+/* One green pulse on a successful decode. The scanner resumes immediately afterwards,
+   so this flash is the only acknowledgement - it has to be unmissable and over fast. */
+@keyframes hit-flash {
+    0%   { opacity: 0.85; }
+    100% { opacity: 0; }
+}
+
+.hit-flash {
+    position: fixed;
+    inset: 0;
+    background: #22c55e;
+    pointer-events: none;
+    animation: hit-flash 500ms ease-out forwards;
+}
+
+/* --- Sync indicator ----------------------------------------------------- */
+
+/* A pill rather than a banner, and fixed rather than in flow: a background sync must
+   never push the viewfinder or a list around while someone is reading it. */
+.sync-pill {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.625rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(24, 24, 27, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.sync-dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 9999px;
+    background: #9ca3af;
+    flex: none;
+}
+
+.sync-dot.is-offline { background: #ef4444; }
+.sync-dot.is-syncing { background: #3b82f6; animation: pulse 1.2s ease-in-out infinite; }
+.sync-dot.is-synced  { background: #22c55e; }
+.sync-dot.is-pending { background: #f59e0b; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+
+/* Offline gets the pill's spot but the full width and the word itself, not just a
+   dot that changed color - the one state a driving, half-looking user has to notice
+   without reading anything closely. */
+.offline-banner {
+    position: fixed;
+    top: 0;
+    left: 0.75rem;
+    right: 0.75rem;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.875rem;
+    border-radius: 0.875rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: center;
+    color: #fff;
+    background: rgba(185, 28, 28, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.offline-banner .sync-dot { background: #fff; }
+
+/* --- Controls ----------------------------------------------------------- */
+
+/* Sized for a thumb on a phone held one-handed, often by someone wearing gloves or
+   standing in a queue. 44px is the floor; these are comfortably above it. */
+.control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-height: 3.25rem;
+    padding: 0 1.25rem;
+    border: 0;
+    border-radius: 9999px;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(39, 39, 42, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    cursor: pointer;
+    /* Without a duration, :active's transform applies in a single frame - a snap
+       rather than a press. This is most of what read as "rigid". */
+    transition: transform 100ms ease, background-color 150ms ease;
+}
+
+.control:active { transform: scale(0.97); }
+.control-primary { background: #4f46e5; }
+.control-round { width: 3.25rem; padding: 0; }
+.control-round.is-on { background: #f59e0b; color: #111; }
+
+/* --- Light surfaces ----------------------------------------------------- */
+
+/* History and diagnostics are reading screens, not camera screens, so they invert out
+   of the scanner's black. */
+.sheet {
+    min-height: 100%;
+    background: #f9fafb;
+    color: #111827;
+}

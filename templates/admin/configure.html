@@ -116,29 +116,22 @@
             </form>
 
             <!-- Devices Panel -->
+            {# Devices outgrew a tab once they gained a lifecycle - activation, sign-out,
+               revocation - so this points at the page that owns them. #}
             <div x-show="activeTab === 'devices'" class="shadow sm:rounded-md">
                 <div class="bg-white py-6 px-4 sm:p-6">
-                    <h3 class="text-base font-semibold leading-6 text-gray-900">Manage Devices</h3>
-                    <p class="mt-1 text-sm text-gray-500">Add or view devices that can submit receipts.</p>
-                    <div class="mt-6">
-                        <ul role="list" class="divide-y divide-gray-200 border-t border-b border-gray-200">
-                            {% for device in devices %}
-                            <li class="flex items-center justify-between py-3">
-                                <p class="text-sm font-medium text-gray-900">{{ device.name }}</p>
-                                <p class="truncate text-sm text-gray-500 font-mono">{{ device.api_key }}</p>
-                            </li>
-                            {% else %}
-                            <li class="py-4 text-sm text-gray-500 text-center">No devices have been added yet.</li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                    <form method="POST" action="{{ url_for('add_device') }}" class="mt-6">
-                        <label for="device_name" class="block text-sm font-medium leading-6 text-gray-900">Add New Device</label>
-                        <div class="mt-2 flex rounded-md shadow-sm">
-                            <input type="text" name="device_name" id="device_name" class="block w-full min-w-0 flex-1 rounded-none rounded-l-md border-0 py-1.5 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" placeholder="e.g., WhatsApp Bot">
-                            <button type="submit" class="relative -ml-px inline-flex items-center gap-x-1.5 rounded-r-md px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Add</button>
-                        </div>
-                    </form>
+                    <h3 class="text-base font-semibold leading-6 text-gray-900">Devices</h3>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Phones running the scanner, and any bots posting to the API, are managed
+                        on their own page &mdash; including activation links, sign-out and revocation.
+                    </p>
+                    <p class="mt-4 text-sm text-gray-500">
+                        {{ devices|length }} device{{ '' if devices|length == 1 else 's' }} configured.
+                    </p>
+                    <a href="{{ url_for('manage_devices') }}"
+                       class="mt-4 inline-flex items-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700">
+                        Manage devices
+                    </a>
                 </div>
             </div>
         </div>

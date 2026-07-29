@@ -1,14 +1,18 @@
 # main.py
-import os, time, json, csv, io, pyotp, requests, gevent
+import os, time, json, csv, io, uuid, pyotp, requests, gevent
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory, Response
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory, Response, g, make_response
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
 from utils import analytics, compliance, geo, peek
+from utils.device_auth import (
+    consume_enrolment_token, device_required, end_session, issue_enrolment_token,
+    REJECTION_MESSAGES,
+)
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import analyse_receipt, extract_receipt_details, LlmUnavailable
@@ -51,6 +55,19 @@ PENDING_COLUMNS = {
         ('claimed_at', 'DATETIME'),
         ('failure_reason', 'VARCHAR(50)'),
         ('receipt_code', 'VARCHAR(50)'),
+        ('client_uuid', 'VARCHAR(64)'),
+        ('captured_at', 'DATETIME'),
+    ),
+    'device': (
+        ('created_at', 'DATETIME'),
+        ('enrolment_token', 'VARCHAR(80)'),
+        ('enrolment_issued_at', 'DATETIME'),
+        ('activated_at', 'DATETIME'),
+        ('session_token_hash', 'VARCHAR(64)'),
+        ('session_started_at', 'DATETIME'),
+        ('session_user_agent', 'VARCHAR(255)'),
+        ('last_seen_at', 'DATETIME'),
+        ('revoked_at', 'DATETIME'),
     ),
     'receipt': (
         ('vendor_id', 'INTEGER'),
@@ -82,6 +99,15 @@ PENDING_INDEXES = (
     ('ix_receipt_is_cancelled', 'receipt', 'is_cancelled'),
     ('ix_receipt_is_test', 'receipt', 'is_test'),
     ('ix_receipt_category', 'receipt', 'category'),
+    ('ix_device_last_seen_at', 'device', 'last_seen_at'),
+)
+
+# Kept apart from PENDING_INDEXES because SQLite cannot add a UNIQUE column with
+# ALTER TABLE - uniqueness on a column added after the fact has to arrive as its own
+# index. NULLs are distinct in a SQLite unique index, so existing rows are unaffected.
+PENDING_UNIQUE_INDEXES = (
+    ('uq_submission_client_uuid', 'submission', 'client_uuid'),
+    ('uq_device_enrolment_token', 'device', 'enrolment_token'),
 )
 
 def _table_columns(table):
@@ -109,10 +135,13 @@ def apply_pending_migrations():
 
     for name, table, column in PENDING_INDEXES:
         db.session.execute(sa_text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})"))
+    for name, table, column in PENDING_UNIQUE_INDEXES:
+        db.session.execute(sa_text(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({column})"))
     db.session.commit()
 
     _backfill_money(columns_by_table.get('receipt', set()))
     _backfill_vendors()
+    _backfill_device_tokens()
 
 def _backfill_money(receipt_columns):
     """
@@ -151,6 +180,28 @@ def _backfill_vendors():
 
     db.session.commit()
     print(f"[Migration] Attached {attached} receipt(s) to {Vendor.query.count()} vendor(s).")
+
+def _backfill_device_tokens():
+    """
+    Gives devices that predate enrolment an activation token.
+
+    Without this, every device already in the database would show as un-activatable on
+    the new admin page and an admin would have to recreate them - losing the link
+    between a device and the receipts it has already submitted.
+    """
+    stale = Device.query.filter(
+        Device.enrolment_token.is_(None), Device.session_token_hash.is_(None)
+    ).all()
+    if not stale:
+        return
+
+    for device in stale:
+        if device.created_at is None:
+            device.created_at = datetime.utcnow()
+        issue_enrolment_token(device)
+
+    db.session.commit()
+    print(f"[Migration] Issued activation tokens to {len(stale)} pre-existing device(s).")
 
 # Create database tables and seed with dummy data for demo
 with app.app_context():
@@ -600,6 +651,10 @@ def prepare_submissions_for_frontend(submissions, detailed=True):
             "receipt_time": receipt_time_from_url(sub.input_data) if sub.input_type == 'url' else None,
             "failure_reason": sub.failure_reason,
             "retry": retry_plan(sub),
+            # How a scanner reconciles what it sent against what the server has, and
+            # when the person actually stood in front of the receipt.
+            "client_uuid": sub.client_uuid,
+            "captured_at": sub.captured_at.isoformat() if sub.captured_at else None,
         }
         output.append(data)
     return output
@@ -1648,15 +1703,16 @@ def submission_detail(submission_id):
         ),
     )
 
-@app.route('/submissions/<int:submission_id>/retry', methods=['POST'])
-@login_required
-def retry_submission(submission_id):
+def requeue_submission(submission_id):
     """
-    Puts a failed submission back on the queue.
+    Puts a failed submission back on the queue. Returns a (body, status) response.
 
     Most failures here are a vendor who has not uploaded the receipt to TRA yet, so the
     retry count is cleared as well: this is a fresh attempt at a job whose circumstances
     have probably changed, not the next tick of an exhausted schedule.
+
+    Shared by the admin dashboard and the scanner, which reach it through different
+    front doors but must not drift into two different definitions of "retry".
     """
     submission = db.session.get(Submission, submission_id)
     if submission is None:
@@ -1681,10 +1737,15 @@ def retry_submission(submission_id):
         'device_name': submission.device.name if submission.device else 'Unknown Device',
     }, get_instance_config())
 
-    runner_url = url_for('run_tasks', secret=current_app.config['TASK_RUNNER_SECRET_KEY'], _external=True)
-    gevent.spawn(trigger_url_in_background, runner_url)
+    wake_task_runner()
 
     return jsonify({'submission_id': submission.id, 'status': submission.status}), 202
+
+
+@app.route('/submissions/<int:submission_id>/retry', methods=['POST'])
+@login_required
+def retry_submission(submission_id):
+    return requeue_submission(submission_id)
 
 @app.route('/receipts/<int:receipt_id>/reanalyse', methods=['POST'])
 @login_required
@@ -1867,18 +1928,472 @@ def configure_instance():
     # Pass the active_tab variable to the template
     return render_template('admin/configure.html', config=config, devices=devices, active_tab=active_tab)
 
+# --- DEVICE MANAGEMENT ---
+
+def _activation_url(device):
+    """The link an admin hands out. Also what the activation QR encodes."""
+    if not device.enrolment_token:
+        return None
+    return url_for('scan_activate', token=device.enrolment_token, _external=True)
+
+
+def _device_rows():
+    """
+    Devices with everything the admin list needs, counted in two queries rather than
+    two per device.
+    """
+    submission_counts = dict(
+        db.session.query(Submission.device_id, db.func.count(Submission.id))
+        .group_by(Submission.device_id).all()
+    )
+    receipt_counts = dict(
+        db.session.query(Receipt.device_id, db.func.count(Receipt.id))
+        .group_by(Receipt.device_id).all()
+    )
+
+    rows = []
+    for device in Device.query.order_by(Device.id.asc()).all():
+        submissions = submission_counts.get(device.id, 0)
+        receipts = receipt_counts.get(device.id, 0)
+        activation = _activation_url(device)
+        rows.append({
+            'device': device,
+            'submission_count': submissions,
+            'receipt_count': receipts,
+            'activation_url': activation,
+            'activation_qr': generate_qr_code_base64(activation) if activation else None,
+            # A device with history cannot be deleted without orphaning rows whose
+            # device_id is NOT NULL, so the UI offers revoking instead.
+            'deletable': submissions == 0 and receipts == 0,
+        })
+    return rows
+
+
+def _get_device_or_404(device_id):
+    device = db.session.get(Device, device_id)
+    if device is None:
+        flash('No such device.', 'danger')
+    return device
+
+
+@app.route('/admin/devices')
+@login_required
+def manage_devices():
+    return render_template(
+        'admin/devices.html',
+        rows=_device_rows(),
+        just_created=request.args.get('new', type=int),
+    )
+
+
 @app.route('/admin/devices', methods=['POST'])
 @login_required
 def add_device():
-    device_name = request.form.get('device_name')
+    device_name = (request.form.get('device_name') or '').strip()
     if not device_name:
         flash('Device name cannot be empty.', 'danger')
-        return redirect(url_for('configure_instance'))
-    new_device = Device(name=device_name)
+        return redirect(url_for('manage_devices'))
+
+    new_device = Device(name=device_name, created_at=datetime.utcnow())
     db.session.add(new_device)
+    # Flushed so the device has an id, which the token embeds - see utils/device_auth.
+    db.session.flush()
+    issue_enrolment_token(new_device)
     db.session.commit()
-    flash(f'Device "{device_name}" added successfully.', 'success')
-    return redirect(url_for('configure_instance'))
+
+    flash(f'Device "{device_name}" added. Scan or send its activation link below.', 'success')
+    return redirect(url_for('manage_devices', new=new_device.id))
+
+
+@app.route('/admin/devices/<int:device_id>/rename', methods=['POST'])
+@login_required
+def rename_device(device_id):
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    name = (request.form.get('device_name') or '').strip()
+    if not name:
+        flash('Device name cannot be empty.', 'danger')
+    else:
+        device.name = name
+        db.session.commit()
+        flash(f'Device renamed to "{name}".', 'success')
+    return redirect(url_for('manage_devices'))
+
+
+@app.route('/admin/devices/<int:device_id>/issue-link', methods=['POST'])
+@login_required
+def issue_device_link(device_id):
+    """
+    Mints a new activation link, invalidating any outstanding one.
+
+    This is the routine path, not an exceptional one: activation tokens are single
+    use, so replacing a phone means issuing another. The device keeps its identity and
+    therefore its receipt history.
+    """
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+    if device.is_revoked:
+        flash('Restore this device before issuing a new activation link.', 'danger')
+        return redirect(url_for('manage_devices'))
+
+    issue_enrolment_token(device)
+    db.session.commit()
+    flash(f'New activation link issued for "{device.name}". Any earlier link is now dead.', 'success')
+    return redirect(url_for('manage_devices', new=device.id))
+
+
+@app.route('/admin/devices/<int:device_id>/sign-out', methods=['POST'])
+@login_required
+def sign_out_device(device_id):
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    end_session(device)
+    db.session.commit()
+    flash(f'"{device.name}" has been signed out. Issue an activation link to bring it back.', 'success')
+    return redirect(url_for('manage_devices'))
+
+
+@app.route('/admin/devices/<int:device_id>/revoke', methods=['POST'])
+@login_required
+def revoke_device(device_id):
+    """Takes a device out of service without touching the receipts it submitted."""
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    device.revoked_at = datetime.utcnow()
+    device.enrolment_token = None
+    device.enrolment_issued_at = None
+    end_session(device)
+    db.session.commit()
+    flash(f'"{device.name}" revoked. Its API key and session no longer work.', 'success')
+    return redirect(url_for('manage_devices'))
+
+
+@app.route('/admin/devices/<int:device_id>/restore', methods=['POST'])
+@login_required
+def restore_device(device_id):
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    device.revoked_at = None
+    issue_enrolment_token(device)
+    db.session.commit()
+    flash(f'"{device.name}" restored with a fresh activation link.', 'success')
+    return redirect(url_for('manage_devices', new=device.id))
+
+
+@app.route('/admin/devices/<int:device_id>/rotate-key', methods=['POST'])
+@login_required
+def rotate_device_key(device_id):
+    """Issues a new API key for a server-side integration. Breaks the old one."""
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    device.api_key = str(uuid.uuid4())
+    db.session.commit()
+    flash(f'API key rotated for "{device.name}". Update any integration using the old key.', 'success')
+    return redirect(url_for('manage_devices'))
+
+
+@app.route('/admin/devices/<int:device_id>/delete', methods=['POST'])
+@login_required
+def delete_device(device_id):
+    """
+    Removes a device outright, but only one that never submitted anything.
+
+    Submission.device_id and Receipt.device_id are NOT NULL with no ON DELETE, so
+    deleting a device with history would leave rows pointing at nothing. Revoking is
+    the answer for those, and the UI only ever offers delete where it is safe.
+    """
+    device = _get_device_or_404(device_id)
+    if device is None:
+        return redirect(url_for('manage_devices'))
+
+    has_history = (
+        Submission.query.filter_by(device_id=device.id).first() is not None
+        or Receipt.query.filter_by(device_id=device.id).first() is not None
+    )
+    if has_history:
+        flash(
+            f'"{device.name}" has submitted receipts and cannot be deleted without '
+            'orphaning them. Revoke it instead.', 'danger'
+        )
+        return redirect(url_for('manage_devices'))
+
+    name = device.name
+    db.session.delete(device)
+    db.session.commit()
+    flash(f'Device "{name}" deleted.', 'success')
+    return redirect(url_for('manage_devices'))
+
+
+# --- SCANNER PWA ---
+#
+# Everything the field app needs lives under /scan/, and its service worker is scoped
+# to that prefix. The admin dashboard, /stream and /api/* are therefore not reachable
+# by the worker at all, so no scanner bug can serve a stale financial view or sit on
+# an open event stream. It also means no Service-Worker-Allowed header is needed.
+#
+# The three shells are deliberately unauthenticated. A service worker has to be able
+# to precache them and hand them to a phone that is offline, or offline and signed
+# out; they carry no data, and every byte of data behind them is on /scan/api/*.
+
+SCAN_HISTORY_PAGE_SIZE = 50
+
+
+@app.route('/scan/')
+def scan_home():
+    """The scanner. This is the PWA's start_url and the whole point of the app."""
+    return render_template('scan/scanner.html')
+
+
+@app.route('/scan/history')
+def scan_history():
+    return render_template('scan/history.html')
+
+
+@app.route('/scan/diagnostics')
+def scan_diagnostics():
+    return render_template('scan/diagnostics.html')
+
+
+@app.route('/scan/a/<token>')
+def scan_activate(token):
+    """
+    Where an activation link lands.
+
+    Renders; does not activate. Spending a single-use credential on a mere GET would
+    let a link preview or a mail scanner burn it before the field user ever sees it,
+    so the token is only consumed by the explicit POST the page makes.
+    """
+    return render_template('scan/activate.html', token=token)
+
+
+@app.route('/scan/sw.js')
+def scan_service_worker():
+    """
+    Served from a route rather than /static so the version bump inside it can never be
+    masked by an HTTP cache. A service worker nobody can update is a bricked app.
+    """
+    response = make_response(send_from_directory(app.static_folder, 'js/service-worker.js'))
+    response.headers['Content-Type'] = 'application/javascript'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+
+@app.route('/scan/manifest.json')
+def scan_manifest():
+    """
+    The install manifest, optionally carrying an activation token.
+
+    `?t=<token>` puts the token in `start_url`, so a phone that adds the app to its
+    home screen from an activation link launches straight into activating itself. That
+    is the only thing that makes this work on iOS, where a home-screen app does not
+    share storage with Safari: activating in the browser first leaves the installed app
+    signed out, and the single-use token already spent. Carrying it through the install
+    means the token is spent once, in the storage the app will actually run in.
+
+    `id` is fixed so the browser still recognises every one of these as the same
+    installed app, however the start_url differs.
+    """
+    config = get_instance_config()
+    name = (config.business_name if config and config.business_name else 'TaxConsult')
+
+    token = (request.args.get('t') or '').strip()
+    start_url = url_for('scan_home', t=token) if token else '/scan/'
+
+    return jsonify({
+        'name': f'{name} Receipts',
+        'short_name': 'Receipts',
+        'description': 'Scan and submit EFD receipts, online or off.',
+        'id': '/scan/',
+        'start_url': start_url,
+        'scope': '/scan/',
+        'display': 'standalone',
+        'orientation': 'portrait',
+        'background_color': '#000000',
+        'theme_color': '#000000',
+        'icons': [
+            {'src': url_for('static', filename='icons/icon-192.png'),
+             'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+            {'src': url_for('static', filename='icons/icon-512.png'),
+             'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+            {'src': url_for('static', filename='icons/icon-maskable-512.png'),
+             'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'},
+        ],
+    })
+
+
+# --- Scanner API ---
+
+@app.route('/scan/api/activate', methods=['POST'])
+def scan_api_activate():
+    """
+    Spends an activation token and returns the session token the phone will hold.
+
+    Activating necessarily signs out whichever phone held this device before; see
+    utils/device_auth.start_session.
+    """
+    payload = request.get_json(silent=True) or {}
+    token = (payload.get('token') or '').strip()
+    if not token:
+        return jsonify({'error': 'No activation token supplied.', 'reason': 'unknown'}), 400
+
+    session_token, result = consume_enrolment_token(token, user_agent=request.headers.get('User-Agent'))
+    if session_token is None:
+        reason = result
+        return jsonify({
+            'error': REJECTION_MESSAGES.get(reason, REJECTION_MESSAGES['unknown']),
+            'reason': reason,
+        }), 401
+
+    device = result
+    return jsonify({
+        'session_token': session_token,
+        'device': {'id': device.id, 'name': device.name},
+    }), 200
+
+
+@app.route('/scan/api/me')
+@device_required
+def scan_api_me():
+    device = g.device
+    return jsonify({
+        'device': {'id': device.id, 'name': device.name},
+        'server_time': datetime.utcnow().isoformat(),
+    })
+
+
+def _parse_captured_at(value):
+    """A client clock is not to be trusted with anything but its own timeline."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+@app.route('/scan/api/sync', methods=['POST'])
+@device_required
+def scan_api_sync():
+    """
+    Takes a batch of scanned receipt URLs from a device's outbox.
+
+    Every item carries the client_uuid the phone minted for it, and the response maps
+    each one to its submission so the phone knows exactly what to clear. Items are
+    handled independently: one malformed row does not cost the other twenty-nine.
+    """
+    payload = request.get_json(silent=True) or {}
+    items = payload.get('items')
+    if not isinstance(items, list):
+        return jsonify({'error': '`items` must be a list.'}), 400
+    if len(items) > SCAN_HISTORY_PAGE_SIZE:
+        return jsonify({'error': f'At most {SCAN_HISTORY_PAGE_SIZE} items per request.'}), 413
+
+    results = []
+    accepted = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        client_uuid = (item.get('client_uuid') or '').strip()
+        receipt_url = (item.get('receipturl') or '').strip()
+        if not client_uuid or not receipt_url:
+            results.append({'client_uuid': client_uuid or None, 'status': 'rejected',
+                            'error': 'client_uuid and receipturl are both required.'})
+            continue
+
+        submission, created = ingest_submission(
+            g.device,
+            url=receipt_url,
+            description=item.get('description'),
+            location=item.get('location'),
+            client_uuid=client_uuid,
+            captured_at=_parse_captured_at(item.get('captured_at')),
+        )
+        accepted += 1
+        results.append({
+            'client_uuid': client_uuid,
+            'submission_id': submission.id,
+            # 'duplicate' means we already had this exact scan, so the phone can drop
+            # it from the outbox just as confidently as if it were new.
+            'status': 'accepted' if created else 'duplicate',
+        })
+
+    # One wake-up for the whole batch. A device back from a day offline should not
+    # spawn thirty runner triggers against a rate-limited portal.
+    if accepted:
+        wake_task_runner()
+
+    return jsonify({'results': results}), 200
+
+
+@app.route('/scan/api/sync/photo', methods=['POST'])
+@device_required
+def scan_api_sync_photo():
+    """
+    Takes one photo. Deliberately not batched: a multi-megabyte blob that fails
+    should not take the rest of the queue down with it.
+    """
+    photo = request.files.get('receiptphoto')
+    client_uuid = (request.form.get('client_uuid') or '').strip()
+    if not photo:
+        return jsonify({'error': '`receiptphoto` is required.'}), 400
+    if not client_uuid:
+        return jsonify({'error': '`client_uuid` is required.'}), 400
+
+    submission, created = ingest_submission(
+        g.device,
+        photo=photo,
+        description=request.form.get('description'),
+        location=request.form.get('location'),
+        client_uuid=client_uuid,
+        captured_at=_parse_captured_at(request.form.get('captured_at')),
+    )
+    wake_task_runner()
+
+    return jsonify({
+        'client_uuid': client_uuid,
+        'submission_id': submission.id,
+        'status': 'accepted' if created else 'duplicate',
+    }), 200
+
+
+@app.route('/scan/api/submissions')
+@device_required
+def scan_api_submissions():
+    """This device's own history, for the phone to cache and read back offline."""
+    query = Submission.query.options(
+        joinedload(Submission.receipt), joinedload(Submission.device)
+    ).filter(Submission.device_id == g.device.id)
+
+    since = _parse_captured_at(request.args.get('since'))
+    if since is not None:
+        query = query.filter(Submission.received_at >= since)
+
+    submissions = query.order_by(Submission.received_at.desc()).limit(SCAN_HISTORY_PAGE_SIZE).all()
+    return jsonify({
+        'submissions': prepare_submissions_for_frontend(submissions, detailed=False),
+        'server_time': datetime.utcnow().isoformat(),
+    })
+
+
+@app.route('/scan/api/submissions/<int:submission_id>/retry', methods=['POST'])
+@device_required
+def scan_api_retry(submission_id):
+    """Re-queues a failed submission, but only one this device sent."""
+    submission = db.session.get(Submission, submission_id)
+    if submission is None or submission.device_id != g.device.id:
+        return jsonify({'error': 'No such submission.'}), 404
+    return requeue_submission(submission_id)
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
@@ -1892,29 +2407,28 @@ def queue_status():
     runner_secret = current_app.config['TASK_RUNNER_SECRET_KEY']
     return render_template('admin/queue.html', jobs=pending_jobs, runner_secret=runner_secret)
 
-@app.route('/receipt', methods=['POST'])
-def receipt_endpoint():
+def ingest_submission(device, photo=None, url=None, description=None, location=None,
+                      client_uuid=None, captured_at=None):
     """
-    ### MODIFIED ###
-    Handles new submissions. Saves the full filesystem path for photos to the DB
-    for the backend, but sends a public URL in the SSE payload for the frontend.
+    Puts one receipt on the queue. Returns (submission, created).
+
+    The single place a submission is born, shared by the bot endpoint and the
+    scanner's sync. Photos are stored as an absolute filesystem path for the backend
+    and announced as a public URL for the dashboard - two different strings for two
+    different readers, which is the one subtlety here.
+
+    Idempotent on client_uuid: an offline device retries a scan until it is
+    acknowledged, and a response lost on the way back must not leave a second copy
+    behind. Re-ingesting a known uuid returns the original submission untouched.
+
+    Does *not* trigger the task runner. That is the caller's job, because a device
+    coming back from a day offline syncs thirty receipts in one request and should
+    wake the runner once, not thirty times.
     """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({'error': 'Authorization header is missing or invalid'}), 401
-    
-    device_key = auth_header.split(' ')[1]
-    device = Device.query.filter_by(api_key=device_key).first()
-    if not device:
-        return jsonify({'error': 'Invalid device API key'}), 403
-
-    receipt_photo = request.files.get('receiptphoto')
-    receipt_url = request.form.get('receipturl')
-    if not receipt_photo and not receipt_url:
-        return jsonify({'error': '`receiptphoto` (file) or `receipturl` (form field) is required'}), 400
-
-    description = request.form.get('description')
-    location = request.form.get('location')
+    if client_uuid:
+        existing = Submission.query.filter_by(client_uuid=client_uuid).first()
+        if existing is not None:
+            return existing, False
 
     input_type = ''
     # This will be the path saved to the database.
@@ -1922,36 +2436,36 @@ def receipt_endpoint():
     # This will be the path sent to the frontend via SSE.
     frontend_input_data = ''
 
-    if receipt_photo:
+    if photo:
         input_type = 'photo'
-        filename = secure_filename(f"{datetime.utcnow().timestamp()}_{receipt_photo.filename}")
-        
+        filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
+
         # The full, absolute path for backend processing.
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        receipt_photo.save(filepath)
-        
+        photo.save(filepath)
+
         # Set the two different paths for their specific purposes.
         db_input_data = filepath
         frontend_input_data = url_for('uploaded_file', filename=filename)
 
-    elif receipt_url:
+    elif url:
         input_type = 'url'
         # For URLs, the path is the same for both backend and frontend.
-        db_input_data = receipt_url
-        frontend_input_data = receipt_url
+        db_input_data = url
+        frontend_input_data = url
 
     new_submission = Submission(
         device_id=device.id, input_type=input_type,
         input_data=db_input_data, # Save the full filesystem path to the DB
         description=description, location=location,
+        client_uuid=client_uuid, captured_at=captured_at,
         # Read before anything is queued. A submission that never verifies still has
         # its receipt's identity on it, which is what the admin needs to chase it.
         receipt_code=_code_from_url(db_input_data) if input_type == 'url' else None,
     )
     db.session.add(new_submission)
     db.session.commit()
-    
-    config = get_instance_config()
+
     payload = {
         "id": new_submission.id, "device_name": device.name, "status": new_submission.status,
         "received_at": new_submission.received_at.isoformat(),
@@ -1959,13 +2473,50 @@ def receipt_endpoint():
         "input_data": frontend_input_data, # Send the public URL to the frontend
         "description": new_submission.description, "location": new_submission.location
     }
-    dispatch_event('submission.queued', payload, config)
-    
+    dispatch_event('submission.queued', payload, get_instance_config())
+    return new_submission, True
+
+
+def wake_task_runner():
+    """Nudges the in-app cron so a fresh submission is not left waiting for a tick."""
     runner_secret = current_app.config['TASK_RUNNER_SECRET_KEY']
     runner_url = url_for('run_tasks', secret=runner_secret, _external=True)
     gevent.spawn(trigger_url_in_background, runner_url)
-    
-    return jsonify({ "message": "Receipt accepted and queued for processing.", "submission_id": new_submission.id }), 202
+
+
+@app.route('/receipt', methods=['POST'])
+def receipt_endpoint():
+    """
+    Handles new submissions from a device holding a long-lived API key.
+
+    This is the original integration contract - a WhatsApp bot and anything else built
+    against it hold these keys - so it is kept exactly as it was.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'error': 'Authorization header is missing or invalid'}), 401
+
+    device_key = auth_header.split(' ')[1]
+    device = Device.query.filter_by(api_key=device_key).first()
+    if not device:
+        return jsonify({'error': 'Invalid device API key'}), 403
+    if device.is_revoked:
+        return jsonify({'error': 'This device has been revoked.'}), 403
+
+    receipt_photo = request.files.get('receiptphoto')
+    receipt_url = request.form.get('receipturl')
+    if not receipt_photo and not receipt_url:
+        return jsonify({'error': '`receiptphoto` (file) or `receipturl` (form field) is required'}), 400
+
+    submission, _created = ingest_submission(
+        device,
+        photo=receipt_photo, url=receipt_url,
+        description=request.form.get('description'),
+        location=request.form.get('location'),
+    )
+    wake_task_runner()
+
+    return jsonify({ "message": "Receipt accepted and queued for processing.", "submission_id": submission.id }), 202
 
 @app.route('/tasks/run', methods=['GET'])
 def run_tasks():
