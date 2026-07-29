@@ -14,6 +14,7 @@ rate-limits at roughly eight rapid requests, so a device returning from a day of
 with thirty receipts must nudge it once, not thirty times.
 """
 import io
+from datetime import date
 
 import pytest
 
@@ -295,6 +296,100 @@ def test_a_device_cannot_retry_someone_elses_submission(phone):
 
     assert response.status_code == 404
     assert db.session.get(Submission, theirs.id).status == 'failed'
+
+
+# --- The numbers above the list -----------------------------------------------
+
+def _completed_receipt(phone, uuid, code, **fields):
+    phone.post('/scan/api/sync', json={'items': [scan(uuid, code)]})
+    submission = Submission.query.filter_by(client_uuid=uuid).one()
+    submission.status = 'completed'
+    receipt = Receipt(device_id=phone.device.id, submission_id=submission.id, **fields)
+    db.session.add(receipt)
+    db.session.commit()
+    return receipt
+
+
+def test_the_summary_totals_this_devices_month(phone):
+    _completed_receipt(phone, 'a', 'AAA1111', receipt_date=date.today(),
+                       total_incl_tax_cents=118_00, total_tax_cents=18_00)
+    _completed_receipt(phone, 'b', 'BBB1111', receipt_date=date.today(),
+                       total_incl_tax_cents=236_00, total_tax_cents=36_00)
+
+    body = phone.get('/scan/api/summary').get_json()
+
+    assert body['month']['receipts'] == 2
+    assert body['month']['spend_cents'] == 354_00
+    assert body['month']['vat_cents'] == 54_00
+
+
+def test_the_summary_excludes_cancelled_and_test_receipts(phone):
+    """A voided receipt is not money anybody spent, and must not read as if it were."""
+    _completed_receipt(phone, 'real', 'AAA1111', receipt_date=date.today(),
+                       total_incl_tax_cents=100_00)
+    _completed_receipt(phone, 'void', 'BBB1111', receipt_date=date.today(),
+                       total_incl_tax_cents=900_00, is_cancelled=True)
+    _completed_receipt(phone, 'demo', 'CCC1111', receipt_date=date.today(),
+                       total_incl_tax_cents=900_00, is_test=True)
+
+    body = phone.get('/scan/api/summary').get_json()
+
+    assert body['month']['receipts'] == 1
+    assert body['month']['spend_cents'] == 100_00
+
+
+def test_an_old_receipt_captured_today_counts_as_this_months_work(phone):
+    """
+    The field app counts capture, not spend - the opposite of the dashboard, on
+    purpose. An afternoon spent clearing a shoebox of last year's receipts has to show
+    as an afternoon's work, not as a month that reads zero.
+    """
+    _completed_receipt(phone, 'old', 'AAA1111', receipt_date=date(2022, 3, 8),
+                       total_incl_tax_cents=50_00)
+    # And a receipt whose date could not be read at all still counts.
+    _completed_receipt(phone, 'photo', 'BBB1111', receipt_date=None,
+                       total_incl_tax_cents=25_00)
+
+    body = phone.get('/scan/api/summary').get_json()
+
+    assert body['month']['receipts'] == 2
+    assert body['month']['spend_cents'] == 75_00
+    assert body['today']['receipts'] == 2
+
+
+def test_the_summary_counts_work_in_flight_and_work_needing_attention(phone):
+    phone.post('/scan/api/sync', json={'items': [scan('waiting', 'AAA1111')]})
+    phone.post('/scan/api/sync', json={'items': [scan('broken', 'BBB1111')]})
+    Submission.query.filter_by(client_uuid='broken').one().status = 'failed'
+    db.session.commit()
+
+    body = phone.get('/scan/api/summary').get_json()
+
+    assert body['in_flight'] == 1
+    assert body['needs_attention'] == 1
+
+
+def test_the_summary_never_shows_another_devices_money(phone):
+    other = Device(name='Someone else')
+    db.session.add(other)
+    db.session.flush()
+    their_submission = Submission(
+        device_id=other.id, input_type='url', status='completed',
+        input_data='https://verify.tra.go.tz/OTHER_010101',
+    )
+    db.session.add(their_submission)
+    db.session.flush()
+    db.session.add(Receipt(device_id=other.id, submission_id=their_submission.id,
+                           receipt_date=date.today(), total_incl_tax_cents=999_00))
+    db.session.commit()
+
+    body = phone.get('/scan/api/summary').get_json()
+
+    assert body['month'] == {'receipts': 0, 'spend_cents': 0, 'vat_cents': 0}
+
+
+def test_the_summary_requires_a_session(app):
+    assert app.test_client().get('/scan/api/summary').status_code == 401
 
 
 # --- The bot path is untouched -----------------------------------------------

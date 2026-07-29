@@ -157,3 +157,96 @@ def test_the_dashboard_component_initialises(dashboard_scripts, tmp_path):
     assert 'TZS' in state['cardTotal']
     assert state['tabCount'] == 1
     assert state['activeTab'] == 'processed'
+
+
+LIVE_DRIVER = """
+// The live feed, driven. EventSource does not exist in node, so it is stubbed with
+// something that records what the page attached to it and lets the test fire the
+// events a browser would.
+const opened = [];
+global.document = { hidden: false };
+global.EventSource = class {
+    constructor(url) { this.url = url; this.readyState = 0; this.listeners = {}; opened.push(this); }
+    addEventListener(name, fn) { this.listeners[name] = fn; }
+    close() { this.readyState = 2; }
+};
+
+const component = dashboard();
+const reloads = [];
+component.reload = (page, options) => { reloads.push({ page, options }); };
+component.addNotification = () => {};
+component.showBrowserNotification = () => {};
+component.soundGenerator = {
+    playSuccess() {}, playFailed() {}, playDuplicate() {}, playQueued() {},
+};
+
+component.openStream();
+const stream = opened[0];
+
+// Opening is itself a catch-up: whatever happened while the page had no connection
+// has to be fetched, not waited for.
+stream.onopen();
+const reloadsAfterOpen = reloads.length;
+const liveAfterOpen = component.live;
+
+// A burst - one runner tick finishing several receipts - is one refetch, not several.
+stream.onmessage({ data: JSON.stringify({ event_type: 'submission.processed', data: { submission_id: 1, stats: {} } }) });
+stream.onmessage({ data: JSON.stringify({ event_type: 'submission.processed', data: { submission_id: 2, stats: {} } }) });
+stream.onmessage({ data: JSON.stringify({ event_type: 'submission.processing', data: { submission_id: 3 } }) });
+
+setTimeout(() => {
+    const burst = reloads.length - reloadsAfterOpen;
+
+    // A dropped connection is visible, and the watchdog opens a new one.
+    stream.onerror();
+    const liveAfterError = component.live;
+    component.lastBeat = Date.now() - 120000;   // Long past the server's heartbeat.
+    component.checkStreamHealth();
+
+    console.log(JSON.stringify({
+        url: stream.url,
+        liveAfterOpen,
+        reloadsAfterOpen,
+        burst,
+        liveAfterError,
+        streams: opened.length,
+        closedFirst: stream.readyState === 2,
+        allQuiet: reloads.every((r) => r.options && r.options.quiet),
+        heartbeatListener: typeof stream.listeners.ping === 'function',
+    }));
+}, 500);
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_live_feed_catches_up_coalesces_and_reconnects(dashboard_scripts, tmp_path):
+    """
+    The behaviour the dashboard was missing, executed rather than read.
+
+    What shipped was one EventSource with an onmessage handler and nothing else: no
+    catch-up on connect, no way to notice a connection that had died, and a full page
+    request per event. A receipt processed while the connection was down never appeared
+    at all until somebody reloaded the page by hand.
+    """
+    bundle = tmp_path / 'live.js'
+    bundle.write_text('\n'.join(dashboard_scripts) + LIVE_DRIVER)
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+
+    assert state['url'] == '/stream'
+    assert state['liveAfterOpen'] is True
+    # Connecting is a catch-up, not just a subscription.
+    assert state['reloadsAfterOpen'] == 1
+    # Three events, one refetch.
+    assert state['burst'] == 1
+    # Every automatic refetch is quiet: no spinner over a table someone is reading.
+    assert state['allQuiet'] is True
+    # The heartbeat has somewhere to land, which is what makes silence detectable.
+    assert state['heartbeatListener'] is True
+
+    # A failed connection says so, and is replaced rather than left to sit there.
+    assert state['liveAfterError'] is False
+    assert state['streams'] == 2
+    assert state['closedFirst'] is True

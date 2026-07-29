@@ -59,7 +59,16 @@
     <!-- Header -->
     <div class="md:flex md:items-center md:justify-between">
         <h1 class="text-3xl font-bold tracking-tight text-gray-900">Receipts Dashboard</h1>
-        <div class="mt-4 flex flex-shrink-0 md:ml-4 md:mt-0">
+        <div class="mt-4 flex flex-shrink-0 items-center gap-x-3 md:ml-4 md:mt-0">
+            <!-- Whether this page is actually being told about new receipts. Without it,
+                 a feed that has died looks exactly like an afternoon with no receipts,
+                 and the first sign of trouble is a number that turns out to be hours old. -->
+            <span class="inline-flex items-center gap-x-1.5 rounded-md px-2 py-1 text-xs font-medium"
+                  :class="live ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20' : 'bg-gray-50 text-gray-600 ring-1 ring-inset ring-gray-500/20'"
+                  :title="live ? 'Receiving updates as they happen' : 'Not connected - refreshing on a timer instead'">
+                <span class="h-1.5 w-1.5 rounded-full" :class="live ? 'bg-green-500' : 'bg-gray-400 animate-pulse'"></span>
+                <span x-text="live ? 'Live' : 'Reconnecting'"></span>
+            </span>
              <button @click="enableBrowserNotifications()" type="button" class="inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm" :class="browserNotificationsEnabled ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20' : 'bg-white text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50'">
                 <svg x-show="!browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor"><path d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-3a1 1 0 00-1-1H9a1 1 0 00-1 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-6H3a1 1 0 01-.707-1.707l7-7z" /></svg>
                 <svg x-show="browserNotificationsEnabled" class="-ml-0.5 mr-1.5 h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>
@@ -448,6 +457,12 @@ function dashboard() {
         tabLabels: { processed: 'Processed', with_vat: 'With VAT', queued: 'Queued', failed: 'Failed', duplicates: 'Duplicates' },
         // Rising edge of a request, so a slow response cannot overwrite a newer one.
         requestId: 0,
+        // The live feed's own state. `live` is shown to the user, because a dashboard
+        // that has silently stopped updating looks identical to a quiet afternoon.
+        live: false,
+        lastBeat: 0,
+        eventSource: null,
+        reloadTimer: null,
 
         get statCards() {
             const periods = [
@@ -487,10 +502,74 @@ function dashboard() {
             this.$watch('filters', () => this.reload(1));
             window.addEventListener('click', () => { this.soundGenerator.init(); }, { once: true });
         },
+
+        /*
+         * The live feed, and three separate safety nets under it.
+         *
+         * The feed alone was the whole mechanism once, and the dashboard sat stale
+         * behind a connection that had quietly died until somebody reloaded. So:
+         *
+         *  1. Every event carries an id, and EventSource resends the last one it saw
+         *     as Last-Event-ID, so a reconnect is told what it missed rather than
+         *     resuming at "now". Reconnection itself is the browser's job, not ours.
+         *  2. A watchdog. The server sends a `ping` event every 15s, so silence longer
+         *     than STALE_AFTER_MS means the connection is dead in a way the browser has
+         *     not noticed - the failure that is invisible from JavaScript otherwise.
+         *     We tear it down and open a new one.
+         *  3. A poll, running only while the stream is not live. It is the floor: even
+         *     with events failing entirely, the page is never more than POLL_MS stale.
+         *
+         * Plus the obvious human moments - coming back to the tab, the machine coming
+         * back online - because those are exactly when a laptop's stream was killed
+         * while it slept.
+         */
         listenForUpdates() {
-            const eventSource = new EventSource("{{ url_for('stream') }}");
-            eventSource.onmessage = (event) => { if (!event.data.startsWith(':')) this.handleSseUpdate(JSON.parse(event.data)); };
-            eventSource.onerror = (err) => { console.error("EventSource failed:", err); };
+            this.openStream();
+
+            setInterval(() => this.checkStreamHealth(), 5000);
+            setInterval(() => { if (!this.live && !document.hidden) this.reload(null, { quiet: true }); }, 20000);
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) return;
+                // Both, and in this order: the connection may have been killed while
+                // the tab slept, and either way the list on screen is now old.
+                this.checkStreamHealth(true);
+                this.reload(null, { quiet: true });
+            });
+            window.addEventListener('online', () => { this.checkStreamHealth(true); this.reload(null, { quiet: true }); });
+            window.addEventListener('pageshow', (event) => { if (event.persisted) this.reload(null, { quiet: true }); });
+        },
+
+        openStream() {
+            if (this.eventSource) { try { this.eventSource.close(); } catch (e) { /* already gone */ } }
+            const source = new EventSource("{{ url_for('stream') }}");
+            this.lastBeat = Date.now();
+            // A connection that has just opened has, by definition, missed whatever
+            // happened while it was down. Last-Event-ID replays the events; this
+            // refetches the rows, so a missed event that predates this page's cursor
+            // (a first connection, a resync) cannot leave the list wrong either.
+            source.onopen = () => { this.live = true; this.lastBeat = Date.now(); this.reload(null, { quiet: true }); };
+            source.onmessage = (event) => {
+                this.live = true;
+                this.lastBeat = Date.now();
+                try { this.handleSseUpdate(JSON.parse(event.data)); }
+                catch (e) { console.error('Unreadable event', e); }
+            };
+            source.addEventListener('ping', () => { this.live = true; this.lastBeat = Date.now(); });
+            source.onerror = () => { this.live = false; };
+            this.eventSource = source;
+        },
+
+        /* Silence past the server's heartbeat interval means the connection is gone,
+           whatever its readyState claims. `force` reconnects regardless, for the
+           moments we already know the connection cannot have survived. */
+        checkStreamHealth(force = false) {
+            if (document.hidden && !force) return;
+            const silentFor = Date.now() - (this.lastBeat || 0);
+            if (force || silentFor > 45000 || (this.eventSource && this.eventSource.readyState === 2)) {
+                this.live = false;
+                this.openStream();
+            }
         },
 
         // --- Data ---
@@ -502,10 +581,18 @@ function dashboard() {
             }
             return params.toString();
         },
-        async reload(page = null) {
+        /* Coalesces a burst into one refetch. Ten receipts finishing together used to
+           be ten full page requests, each one overtaking the last. */
+        scheduleReload(delay = 250) {
+            clearTimeout(this.reloadTimer);
+            this.reloadTimer = setTimeout(() => this.reload(null, { quiet: true }), delay);
+        },
+        async reload(page = null, { quiet = false } = {}) {
             const target = page || this.page.page || 1;
             const ticket = ++this.requestId;
-            this.loading = true;
+            // A refetch nobody asked for must not flash the spinner over a table
+            // somebody is reading; one they did ask for still shows it.
+            if (!quiet) this.loading = true;
             try {
                 const response = await fetch(`/api/submissions?${this.queryString({ page: target })}`, {
                     headers: { 'Accept': 'application/json' },
@@ -520,9 +607,12 @@ function dashboard() {
                 }
             } catch (error) {
                 console.error(error);
-                this.addNotification('Could not load receipts', error.message, 'error');
+                // A background refetch that fails is not the user's problem - the next
+                // one is seconds away. Only a refetch they are waiting on is worth a
+                // toast, otherwise a flaky connection buries the screen in them.
+                if (!quiet) this.addNotification('Could not load receipts', error.message, 'error');
             } finally {
-                if (ticket === this.requestId) this.loading = false;
+                if (ticket === this.requestId && !quiet) this.loading = false;
             }
         },
         goToPage(page) { if (page >= 1) this.reload(page); },
@@ -571,6 +661,10 @@ function dashboard() {
         },
 
         handleSseUpdate({ event_type, data: payload }) {
+            // The server admitting it cannot say what we missed. Everything on screen
+            // is suspect, so refetch it - the same thing a cold load does.
+            if (event_type === 'stream.resync') { this.scheduleReload(0); return; }
+
             const submissionId = payload.submission_id || payload.id;
             if (!submissionId) return;
 
@@ -596,7 +690,11 @@ function dashboard() {
             }
             // The row's new state, its position under the current sort and the counts on
             // every tab all just changed. Asking the server is both simpler and correct.
-            this.reload();
+            // Debounced, because a runner tick finishes a dozen of these at once and one
+            // refetch answers all of them. 'submission.processing' lands here too, with
+            // no sound and no notification, so a row starts saying "Checking" the moment
+            // it is picked up rather than only once it is finished.
+            this.scheduleReload();
         },
 
         // --- Formatting ---

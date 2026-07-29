@@ -1,0 +1,425 @@
+{% extends "landing/base.html" %}
+
+{#
+  The public page that sells Karani.
+
+  Written to be read at a glance by somebody standing up. The whole argument is four
+  numbers - 5s, the 20th, every receipt, nothing to learn - and everything else on the
+  page exists to give those four numbers enough room to land.
+#}
+
+{% block title %}Karani — scan the receipt, that's the whole job{% endblock %}
+{% block description %}Scan a receipt with your phone. Karani checks it with TRA, counts it, and keeps your books ready to file. Built for businesses in Tanzania.{% endblock %}
+{#
+  The story page sells Karani, so it signs itself Karani whatever the host business
+  is called. The admin's own name and logo belong on the plain page and above the
+  sign-in form - the places that are about them rather than about the software.
+#}
+{% block mark %}
+<a class="mark" href="{{ url_for('index') }}">
+    <span class="mark__badge">K</span>
+    <span>Karani</span>
+</a>
+{% endblock %}
+
+{% block styles %}
+        /* --- Hero --------------------------------------------------------- */
+
+        .hero {
+            display: grid;
+            gap: clamp(3rem, 7vw, 5rem);
+            align-items: center;
+            padding-block: clamp(3rem, 9vw, 7rem) clamp(4rem, 10vw, 7rem);
+        }
+
+        @media (min-width: 62rem) {
+            /* The receipt pair takes the width it needs and the words take the rest.
+               Split as fractions instead, the pair gets a column narrower than itself
+               and quietly overlaps its own figures. The headline comes down a size to
+               match, because what is left over is a column, not a page. */
+            .hero { grid-template-columns: minmax(0, 1fr) auto; }
+            .hero .display { font-size: clamp(3.25rem, 5vw, 4.75rem); }
+        }
+
+        .hero__actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.875rem 1.25rem;
+            margin-top: clamp(2rem, 4vw, 2.75rem);
+        }
+
+        .hero__note {
+            font-size: 0.9375rem;
+            color: var(--ink-soft);
+        }
+
+        /* --- The receipt, and what it becomes ----------------------------- */
+
+        /* Paper on the left, the answer on the right, overlapping just enough to read
+           as one turning into the other rather than as two pictures. */
+        .proof {
+            display: grid;
+            /* Centred as a pair. Without this the two auto tracks swallow the spare
+               width of a wide single-column hero and drift apart. */
+            justify-content: center;
+            justify-items: center;
+            margin: 0;
+        }
+
+        @media (min-width: 34rem) {
+            .proof { grid-template-columns: auto auto; align-items: center; }
+            /* Set down and to the right of the paper rather than over it: the two
+               totals reading the same is the point being made, so nothing may cover
+               the figures on the receipt. */
+            .verdict { margin-left: 1rem; margin-top: 3.5rem; }
+        }
+
+        @media (max-width: 33.999rem) {
+            .verdict { margin-top: -1.75rem; margin-left: 2.5rem; }
+        }
+
+        .slip {
+            --zig: 8px;
+            width: min(13.5rem, 74vw);
+            padding: 1.25rem 1.125rem calc(var(--zig) + 1.25rem);
+            background: #fff;
+            box-shadow: 0 18px 40px -18px rgba(0, 0, 0, .28), 0 2px 6px -2px rgba(0, 0, 0, .12);
+            font-family: var(--mono);
+            font-size: 0.6875rem;
+            line-height: 1.7;
+            color: #1b1b19;
+            transform: rotate(-1.6deg);
+            -webkit-mask:
+                conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) bottom / calc(2 * var(--zig)) var(--zig) repeat-x,
+                linear-gradient(#000 0 0) top / 100% calc(100% - var(--zig)) no-repeat;
+            mask:
+                conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) bottom / calc(2 * var(--zig)) var(--zig) repeat-x,
+                linear-gradient(#000 0 0) top / 100% calc(100% - var(--zig)) no-repeat;
+            animation: slip-in 700ms cubic-bezier(.2, .7, .3, 1) both;
+        }
+
+        .slip__head { text-align: center; font-weight: 700; letter-spacing: 0.04em; }
+        .slip__sub { text-align: center; color: #6b6b66; }
+
+        .slip__tear {
+            border-top: 1px dashed #c9c6bf;
+            margin-block: 0.625rem;
+        }
+
+        .slip__line { display: flex; justify-content: space-between; gap: 1rem; }
+        .slip__line--total { font-weight: 700; }
+        .slip__qr { margin: 0.75rem auto 0; display: block; }
+
+        .verdict {
+            position: relative;
+            z-index: 1;
+            width: min(15.5rem, 78vw);
+            padding: 1.25rem 1.25rem 1.375rem;
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 1.125rem;
+            box-shadow: 0 24px 50px -24px rgba(0, 0, 0, .3);
+            animation: card-in 700ms cubic-bezier(.2, .7, .3, 1) 900ms both;
+        }
+
+        .verdict__stamp {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.3125rem 0.75rem 0.3125rem 0.5rem;
+            border-radius: 999px;
+            background: var(--accent-soft);
+            color: var(--accent-dark);
+            font-size: 0.75rem;
+            font-weight: 650;
+            animation: stamp 500ms cubic-bezier(.2, 1.5, .4, 1) 1300ms both;
+        }
+
+        .verdict__tick {
+            display: grid;
+            place-items: center;
+            width: 1.125rem;
+            height: 1.125rem;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--on-accent);
+            font-size: 0.6875rem;
+        }
+
+        .verdict__name { margin-top: 0.875rem; font-weight: 700; letter-spacing: -0.01em; }
+        .verdict__meta { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-soft); }
+
+        .verdict__amount {
+            margin-top: 0.875rem;
+            font-size: 1.5rem;
+            font-weight: 750;
+            letter-spacing: -0.03em;
+        }
+
+        .verdict__claim { font-size: 0.8125rem; color: var(--accent-dark); font-weight: 600; }
+
+        @keyframes slip-in {
+            from { opacity: 0; transform: translateY(1.5rem) rotate(-6deg); }
+        }
+
+        @keyframes card-in {
+            from { opacity: 0; transform: translateY(1.75rem) scale(.96); }
+        }
+
+        @keyframes stamp {
+            from { opacity: 0; transform: scale(.6); }
+        }
+
+        /* --- Who it is for ------------------------------------------------ */
+
+        .strip {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1.5rem;
+            padding-block: 1.75rem;
+        }
+
+        /* --- The four numbers --------------------------------------------- */
+
+        .claim {
+            display: grid;
+            gap: 0.75rem clamp(2rem, 6vw, 5rem);
+            padding-block: clamp(2.5rem, 6vw, 4.5rem);
+            border-top: 1px solid var(--line);
+        }
+
+        @media (min-width: 48rem) {
+            .claim { grid-template-columns: 9rem 1fr; align-items: start; }
+        }
+
+        .claim__figure {
+            font-family: var(--mono);
+            font-size: clamp(2.25rem, 6vw, 3.25rem);
+            font-weight: 700;
+            line-height: 1;
+            letter-spacing: -0.04em;
+            color: var(--accent);
+        }
+
+        .claim__body h3 { max-width: 22ch; font-size: clamp(1.5rem, 3.4vw, 2.25rem); line-height: 1.1; letter-spacing: -0.03em; font-weight: 750; text-wrap: balance; }
+        .claim__body p { margin-top: 0.875rem; max-width: 46ch; color: var(--ink-soft); font-size: clamp(1rem, 1.7vw, 1.1875rem); text-wrap: pretty; }
+
+        /* --- The night before --------------------------------------------- */
+
+        .night__lines {
+            display: grid;
+            gap: 0.5rem;
+            margin-top: clamp(2rem, 5vw, 3rem);
+            font-family: var(--mono);
+            font-size: clamp(0.9375rem, 2vw, 1.125rem);
+            opacity: 0.7;
+        }
+
+        .night__punch {
+            margin-top: clamp(2.5rem, 6vw, 4rem);
+            font-size: clamp(1.25rem, 3vw, 1.875rem);
+            font-weight: 650;
+            letter-spacing: -0.02em;
+            max-width: 26ch;
+            line-height: 1.25;
+        }
+
+        /* --- Three steps --------------------------------------------------- */
+
+        .steps {
+            display: grid;
+            gap: clamp(2rem, 5vw, 3.5rem);
+            margin-top: clamp(2.5rem, 6vw, 4rem);
+        }
+
+        @media (min-width: 48rem) {
+            .steps { grid-template-columns: repeat(3, 1fr); }
+        }
+
+        .step__num {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            letter-spacing: 0.18em;
+            color: var(--accent);
+        }
+
+        .step h3 { margin-top: 0.75rem; font-size: clamp(1.375rem, 2.6vw, 1.75rem); letter-spacing: -0.025em; font-weight: 750; }
+        .step p { margin-top: 0.5rem; color: var(--ink-soft); max-width: 30ch; }
+
+        /* --- Closing ------------------------------------------------------- */
+
+        .close { text-align: center; }
+        .close .subhead { margin-inline: auto; }
+        .close .btn { margin-top: clamp(2rem, 4vw, 2.5rem); }
+
+        .close__signin {
+            margin-top: 1.5rem;
+            font-size: 0.9375rem;
+            color: var(--ink-soft);
+        }
+
+        .close__signin a { font-weight: 600; color: var(--ink); }
+{% endblock %}
+
+{% block main %}
+
+<!-- ------------------------------------------------------------------ Hero -->
+<section class="wrap hero">
+    <div>
+        <p class="eyebrow">For businesses in Tanzania</p>
+        <h1 class="display" style="margin-top:1.25rem">Scan it.<br>Forget it.</h1>
+        <p class="subhead" style="margin-top:1.75rem">
+            Your receipts turn into clean books by themselves. Checked, counted, ready to file.
+        </p>
+        <div class="hero__actions">
+            {% if brand.cta_url %}
+            <a class="btn" href="{{ brand.cta_url }}">{{ brand.cta_label }}</a>
+            {% endif %}
+            <a class="hero__note" href="#how" style="text-decoration:none;border-bottom:1px solid var(--line)">See how it works</a>
+        </div>
+    </div>
+
+    {# The promise, drawn: paper in, answer out. #}
+    <figure class="proof" aria-label="A paper receipt becomes a checked, counted entry.">
+        <div class="slip" role="presentation">
+            <p class="slip__head">PLASCO LIMITED</p>
+            <p class="slip__sub">TIN 100-147-181</p>
+            <div class="slip__tear"></div>
+            <p class="slip__line"><span>Cement 50kg &times;4</span><span>100,000</span></p>
+            <p class="slip__line"><span>Delivery</span><span>&mdash;</span></p>
+            <div class="slip__tear"></div>
+            <p class="slip__line slip__line--total"><span>TOTAL</span><span>118,000</span></p>
+            <p class="slip__line"><span>VAT 18%</span><span>18,000</span></p>
+            <svg class="slip__qr" width="46" height="46" viewBox="0 0 21 21" aria-hidden="true" fill="#1b1b19">
+                <path d="M0 0h7v7H0zM2 2h3v3H2zM14 0h7v7h-7zM16 2h3v3h-3zM0 14h7v7H0zM2 16h3v3H2z"/>
+                <path d="M9 0h2v2H9zM9 3h2v2H9zM12 9h2v2h-2zM9 9h2v2H9zM16 9h2v2h-2zM19 9h2v2h-2zM9 12h2v2H9zM12 12h2v2h-2zM15 12h2v2h-2zM9 16h2v2H9zM12 16h2v2h-2zM17 15h2v2h-2zM19 18h2v2h-2zM14 19h2v2h-2z"/>
+            </svg>
+        </div>
+
+        <div class="verdict">
+            <span class="verdict__stamp"><span class="verdict__tick">&#10003;</span> Checked with TRA</span>
+            <p class="verdict__name">Plasco Limited</p>
+            <p class="verdict__meta">Materials &middot; 12 Jul</p>
+            <p class="verdict__amount">118,000</p>
+            <p class="verdict__claim">18,000 you can claim back</p>
+        </div>
+    </figure>
+</section>
+
+<!-- ------------------------------------------------------------ Who for -->
+<div class="wrap rule">
+    <p class="strip">
+        <span>Shops</span><span>Contractors</span><span>Pharmacies</span><span>Schools</span>
+        <span>Restaurants</span><span>NGOs</span><span>Anyone who keeps receipts</span>
+    </p>
+</div>
+
+<!-- ------------------------------------------------------- The night before -->
+<section class="band band--ink">
+    <div class="wrap reveal">
+        <p class="eyebrow">The last week of every month</p>
+        <h2 class="headline" style="margin-top:1.25rem;max-width:16ch">Somewhere tonight, someone is typing receipts.</h2>
+        <div class="night__lines">
+            <p>A box of paper.</p>
+            <p>A long evening.</p>
+            <p>Numbers you hope are right.</p>
+        </div>
+        <p class="night__punch">And the ones that got lost were money you had already spent.</p>
+    </div>
+</section>
+
+<!-- --------------------------------------------------------- Four numbers -->
+<section class="band">
+    <div class="wrap">
+        <p class="eyebrow reveal">What changes</p>
+
+        <div class="claim reveal" style="margin-top:2.5rem">
+            <p class="claim__figure">5s</p>
+            <div class="claim__body">
+                <h3>Five seconds to close the month.</h3>
+                <p>Everything you spent, added up and checked, in one place. Nobody stays late. Nobody types anything.</p>
+            </div>
+        </div>
+
+        <div class="claim reveal">
+            <p class="claim__figure">20th</p>
+            <div class="claim__body">
+                <h3>On time to file. On time to claim.</h3>
+                <p>Karani watches the calendar and tells you what is still missing while there is still time to find it.</p>
+            </div>
+        </div>
+
+        <div class="claim reveal">
+            <p class="claim__figure">100%</p>
+            <div class="claim__body">
+                <h3>Every receipt verified.</h3>
+                <p>Each one confirmed with TRA before it reaches your books. Real supplier, real numbers. Anything else is flagged.</p>
+            </div>
+        </div>
+
+        <div class="claim reveal">
+            <p class="claim__figure">0</p>
+            <div class="claim__body">
+                <h3>Nothing new to learn.</h3>
+                <p>No forms, no training, no accounting words. Your books stay tidy while you get on with the work.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ------------------------------------------------------------ How it works -->
+<section id="how" class="band band--tight" style="background:var(--paper-deep)">
+    <div class="wrap reveal">
+        <p class="eyebrow">How it works</p>
+        <h2 class="headline" style="margin-top:1rem;max-width:14ch">Three seconds of your day.</h2>
+
+        <div class="steps">
+            <div class="step">
+                <p class="step__num">01</p>
+                <h3>Scan</h3>
+                <p>Point your phone at the receipt. It works with no network, in any shop.</p>
+            </div>
+            <div class="step">
+                <p class="step__num">02</p>
+                <h3>Checked</h3>
+                <p>Karani reads every line and confirms it with TRA. Not guessed &mdash; confirmed.</p>
+            </div>
+            <div class="step">
+                <p class="step__num">03</p>
+                <h3>Counted</h3>
+                <p>It lands in your books, sorted and added up. That is the end of it.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ---------------------------------------------------------------- Money -->
+<section class="band band--accent">
+    <div class="wrap reveal">
+        <h2 class="headline" style="max-width:18ch">You already paid that tax. Get your share of it back.</h2>
+        <p class="subhead" style="margin-top:1.5rem">
+            Every claim has a window, and a receipt nobody entered is a window nobody watched.
+            Karani knows where each one stands.
+        </p>
+    </div>
+</section>
+
+<!-- ---------------------------------------------------------------- Close -->
+<section class="band close">
+    <div class="wrap reveal">
+        <h2 class="headline" style="max-width:14ch;margin-inline:auto">Start with this month.</h2>
+        <p class="subhead" style="margin-top:1.5rem">Tell us about your business. We take it from there.</p>
+        {% if brand.cta_url %}
+        <p><a class="btn" href="{{ brand.cta_url }}">{{ brand.cta_label }}</a></p>
+        {% endif %}
+        <p class="close__signin">Already running Karani? <a href="{{ url_for('admin_login') }}">Sign in</a></p>
+    </div>
+</section>
+
+{% endblock %}

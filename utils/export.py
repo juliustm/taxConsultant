@@ -7,7 +7,7 @@ import boto3
 import requests
 from botocore.exceptions import NoCredentialsError, ClientError
 from datetime import datetime
-from .sse_broker import announcer
+from .sse_broker import event_bus
 import traceback
 
 # Expanded headers for comprehensive logging. Appended to, never reordered: a sheet
@@ -45,8 +45,10 @@ def dispatch_event(event_type: str, payload: dict, config):
     """
     print(f"--- Dispatching event: {event_type} ---")
 
-    sse_payload = {"event_type": event_type, "data": payload}
-    announcer.announce(msg=json.dumps(sse_payload, default=str))
+    # Recorded before anything is exported, and never conditional on any of it. This
+    # is what every open screen is waiting on; a slow webhook or an unreachable Google
+    # Sheet must not be able to delay it, and a broken one must not be able to lose it.
+    event_bus.publish(event_type, payload)
 
     if config is None:
         print(f"[Dispatch] No instance config; {event_type} announced but not exported.")

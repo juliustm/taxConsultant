@@ -193,7 +193,7 @@ input, textarea, [contenteditable] {
    never push the viewfinder or a list around while someone is reading it. */
 .sync-pill {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+    top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
     left: 50%;
     transform: translateX(-50%);
     z-index: 50;
@@ -250,10 +250,10 @@ input, textarea, [contenteditable] {
 .sync-events .sync-event-when { flex: none; color: rgba(255, 255, 255, 0.45); font-size: 0.6875rem; }
 .sync-events .sync-event-empty { padding: 0.5rem 0.6rem; font-size: 0.75rem; color: rgba(255, 255, 255, 0.5); text-align: center; }
 
-/* History's own header (title row + search field) runs to roughly 9.3rem; the
-   scanner screen has no header at all, just the pill floating over the viewfinder. */
-.sheet .sync-events {
-    top: calc(env(safe-area-inset-top, 0px) + 9.5rem);
+/* On the dashboard the pill sits lower and over open space, so its feed hangs
+   directly beneath it rather than being pushed clear of a header. */
+.dash .sync-events {
+    top: calc(env(safe-area-inset-top, 0px) + 4.25rem);
 }
 
 .sync-dot {
@@ -341,3 +341,166 @@ input, textarea, [contenteditable] {
     background: #f9fafb;
     color: #111827;
 }
+
+/* --- The dashboard ------------------------------------------------------ */
+
+/*
+ * Two layers, and the whole screen is built out of the relationship between them: a
+ * hero pinned to the viewport, and a sheet of content that slides up over it.
+ *
+ * The hero is fixed rather than scrolled away because it is the answer to the question
+ * someone opens this app holding - what have I captured this month - and it should not
+ * have to be scrolled back to. The sheet is ordinary page flow with a top margin, so
+ * the platform's own scroller moves it: no scroll listeners, no transforms driven from
+ * JavaScript, nothing that can stutter on a mid-range phone or fight momentum
+ * scrolling. Pushing everything up is what a scroll already does.
+ */
+.dash {
+    position: relative;
+    min-height: 100%;
+    background: #f9fafb;
+    color: #111827;
+    /* The hero's height, and therefore where the sheet starts. Roughly the top third
+       on a phone, clamped so it neither swallows a small screen nor floats in the
+       middle of a tablet. */
+    --hero-height: clamp(13.5rem, 34vh, 18rem);
+}
+
+.dash-hero {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--hero-height) + env(safe-area-inset-top, 0px) + 2.5rem);
+    z-index: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: calc(env(safe-area-inset-top, 0px) + 4rem) 1.5rem 2.75rem;
+    background:
+        radial-gradient(120% 90% at 15% 0%, rgba(79, 70, 229, 0.55) 0%, rgba(79, 70, 229, 0) 60%),
+        linear-gradient(180deg, #14141a 0%, #0a0a0c 100%);
+    color: #fff;
+}
+
+.dash-eyebrow {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+/* One number, large enough to read at arm's length in a shop. clamp() rather than a
+   fixed size: 'TZS 12,400' and 'TZS 12,480,000' have to survive the same box. */
+.dash-total {
+    font-size: clamp(2rem, 11vw, 2.75rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+}
+
+.dash-total-currency {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.5);
+    margin-right: 0.4rem;
+    vertical-align: 0.35rem;
+}
+
+/* Three figures, evenly divided. Deliberately three: this is the top of a phone
+   screen, and a fourth would turn a glance into a read. */
+.dash-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+}
+
+.dash-stat {
+    min-width: 0;
+    padding-left: 0.75rem;
+    border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.dash-stat:first-child { padding-left: 0; border-left: 0; }
+
+.dash-stat-value {
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dash-stat-label {
+    margin-top: 0.15rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.dash-stat.is-alert .dash-stat-value { color: #fca5a5; }
+.dash-stat.is-busy .dash-stat-value  { color: #fcd34d; }
+
+/* The sheet. Starts below the hero, overlapping it by its own corner radius so the
+   two read as one surface rather than two panels with a seam. */
+.dash-sheet {
+    position: relative;
+    z-index: 1;
+    margin-top: var(--hero-height);
+    /* Always taller than the viewport, so the sheet can always be pulled up over the
+       hero even with two receipts in it - a screen that refuses to scroll reads as
+       broken long before anyone works out that there was simply nothing below. */
+    min-height: 100vh;
+    border-radius: 1.5rem 1.5rem 0 0;
+    background: #f9fafb;
+    box-shadow: 0 -1rem 2.5rem rgba(0, 0, 0, 0.45);
+}
+
+/* The handle. Not interactive - this sheet is scrolled, not dragged - but it is the
+   convention that says "this moves", which is the instruction. */
+.dash-grabber {
+    display: block;
+    width: 2.25rem;
+    height: 0.25rem;
+    margin: 0 auto;
+    border-radius: 9999px;
+    background: #d1d5db;
+}
+
+/*
+ * The sheet's own header: title, refresh, Scan, search.
+ *
+ * Sticky, not fixed. It travels up with the sheet and stops at the top of the
+ * viewport, so the two actions someone came here to use are always one thumb-reach
+ * away no matter how far into a year of receipts they have scrolled.
+ */
+.dash-bar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding: 0.75rem 1rem 0.75rem;
+    border-radius: 1.5rem 1.5rem 0 0;
+    background: rgba(249, 250, 251, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+
+/* Only once it has actually stuck - a divider under a header that is still halfway
+   down the screen is just a line across the page. */
+.dash-bar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: #e5e7eb;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+
+.dash-bar.is-stuck::after { opacity: 1; }

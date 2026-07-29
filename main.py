@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
-from utils import analytics, compliance, geo, peek
+from utils import analytics, branding, compliance, geo, peek
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
     REJECTION_MESSAGES,
@@ -17,7 +17,7 @@ from utils.security import generate_totp_provisioning_uri, generate_qr_code_base
 from utils.export import dispatch_event, format_currency
 from utils.llm_processor import analyse_receipt, extract_receipt_details, LlmUnavailable
 from utils.money import format_cents, from_cents, to_cents, to_decimal
-from utils.sse_broker import announcer
+from utils import sse_broker
 from utils.tra import (
     fetch_receipt_html, parse_receipt_url, TraError, TraReceiptNotUploaded, TraThrottled,
     TraTransportError, TraUnexpectedResponse,
@@ -49,6 +49,13 @@ PENDING_COLUMNS = {
         ('business_name', 'VARCHAR(200)'),
         ('business_tin', 'VARCHAR(50)'),
         ('business_vrn', 'VARCHAR(50)'),
+        ('landing_mode', 'VARCHAR(20)'),
+        ('brand_name', 'VARCHAR(120)'),
+        ('brand_tagline', 'VARCHAR(200)'),
+        ('brand_accent', 'VARCHAR(20)'),
+        ('brand_logo_url', 'VARCHAR(500)'),
+        ('landing_cta_label', 'VARCHAR(60)'),
+        ('landing_cta_url', 'VARCHAR(500)'),
     ),
     'submission': (
         ('next_attempt_at', 'DATETIME'),
@@ -1185,9 +1192,66 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+@app.context_processor
+def inject_brand():
+    """
+    Who this instance says it is, available to every template that renders.
+
+    The public pages are built entirely out of it, and the sign-in pages behind them
+    share it so an admin arriving from a branded front page does not land on a stock
+    form in somebody else's colours. Safe before setup, when there is no config yet.
+    """
+    return {'brand': branding.of(get_instance_config())}
+
+
 @app.route('/')
-@login_required
 def index():
+    """
+    One address, two audiences.
+
+    A signed-in admin gets the dashboard, exactly as before. Everybody else gets the
+    front door - which is a setting, not a fixture, because an instance's URL is
+    shared with bookkeepers and suppliers long before its owner necessarily wants a
+    sales page hanging off it. See utils/branding for the three modes.
+    """
+    if not session.get('admin_logged_in'):
+        return _public_front_door()
+
+    return _dashboard()
+
+
+def _public_front_door():
+    """What a stranger sees at '/'."""
+    config = get_instance_config()
+    if config is None:
+        # Nothing has been set up yet, so there is no business to advertise and no
+        # admin to sign in as. First run comes before any of this.
+        return redirect(url_for('setup'))
+
+    mode = branding.mode_of(config)
+    if mode == branding.OFF:
+        return redirect(url_for('admin_login'))
+    return render_template(f'landing/{mode}.html')
+
+
+@app.route('/admin/front-page/preview')
+@login_required
+def preview_landing():
+    """
+    Either public page, on demand, whatever the saved setting is.
+
+    An admin cannot see their own front door by visiting it - '/' hands them the
+    dashboard - and choosing between the two modes is a choice you have to look at.
+    """
+    mode = request.args.get('mode')
+    if mode not in (branding.STORY, branding.SIMPLE):
+        mode = branding.mode_of(get_instance_config())
+    if mode == branding.OFF:
+        mode = branding.SIMPLE
+    return render_template(f'landing/{mode}.html')
+
+
+def _dashboard():
     """
     The dashboard shell, bootstrapped with the first page of submissions.
 
@@ -1967,6 +2031,21 @@ def configure_instance():
         config.business_name = optional('business_name')
         config.business_tin = optional('business_tin')
         config.business_vrn = optional('business_vrn')
+
+        # The public page. Everything here is optional and every blank falls back to
+        # something sensible in utils/branding, so a half-filled form still renders a
+        # page rather than an empty one. Guarded as a group: a post that does not carry
+        # the front-page fields at all is one that should leave the front page alone,
+        # not one that should quietly reset it to the default.
+        if 'landing_mode' in request.form:
+            mode = (request.form.get('landing_mode') or '').strip().lower()
+            config.landing_mode = mode if mode in branding.MODES else branding.DEFAULT_MODE
+            config.brand_name = optional('brand_name')
+            config.brand_tagline = optional('brand_tagline')
+            config.brand_accent = optional('brand_accent')
+            config.brand_logo_url = optional('brand_logo_url')
+            config.landing_cta_label = optional('landing_cta_label')
+            config.landing_cta_url = optional('landing_cta_url')
         config.llm_provider = request.form.get('llm_provider')
         config.llm_api_key = request.form.get('llm_api_key')
         config.google_sheet_id = request.form.get('google_sheet_id')
@@ -2513,28 +2592,99 @@ def scan_api_retry(submission_id):
     return requeue_submission(submission_id)
 
 
-def _sse_line_for_device(raw, device_id):
+def _device_summary(device_id):
     """
-    Whether one raw line off the announcer belongs on this device's stream.
+    The handful of numbers the field app puts above its list.
 
-    A pure function on purpose, kept apart from the generator below: it is the one
-    thing scan_api_stream must never get wrong (another device's events leaking
-    across), and it needs to be testable without also standing up the announcer's
-    actual blocking queue.
+    Deliberately small. This is the top of a phone screen belonging to someone standing
+    in a shop, not a report: what they have captured this month, what tax that carries,
+    and whether anything needs them to do something about it. Everything else is a tap
+    away in the list below it.
 
-    Returns the line to forward, or None to drop it. Keep-alive comment lines forward
-    unconditionally - they carry no device, and dropping them would starve every
-    device's connection of the thing that keeps it from timing out.
+    Money is summed in SQL over cents, never assembled in Python from floats - see
+    utils/money. Cancelled and test receipts are excluded here exactly as they are on
+    the dashboard, because a voided receipt is not money anybody spent.
+
+    Counted by when this device captured the receipt, not by the date printed on it -
+    the opposite of the admin dashboard, deliberately. The dashboard reports spending,
+    so it keys off the receipt date. This screen reports a person's own work, and
+    somebody who spends an afternoon clearing a shoebox of last quarter's receipts has
+    to see that afternoon's work, not a month that reads zero.
     """
-    if raw.startswith(': '):
-        return raw
-    try:
-        body = json.loads(raw[len('data: '):])
-    except (ValueError, IndexError):
-        return None
-    if (body.get('data') or {}).get('device_id') != device_id:
-        return None
-    return raw
+    today = date.today()
+    month_start = today.replace(day=1)
+    captured_on = db.func.date(Receipt.processed_at)
+
+    def totals_since(start):
+        row = db.session.query(
+            db.func.count(Receipt.id),
+            db.func.coalesce(db.func.sum(Receipt.total_incl_tax_cents), 0),
+            db.func.coalesce(db.func.sum(Receipt.total_tax_cents), 0),
+        ).filter(
+            Receipt.device_id == device_id,
+            Receipt.is_cancelled.is_(False),
+            Receipt.is_test.is_(False),
+            captured_on >= start,
+        ).one()
+        return {'receipts': row[0] or 0, 'spend_cents': int(row[1] or 0), 'vat_cents': int(row[2] or 0)}
+
+    in_flight = db.session.query(db.func.count(Submission.id)).filter(
+        Submission.device_id == device_id,
+        Submission.status.in_(('queued', 'processing')),
+    ).scalar() or 0
+
+    # Bounded to a month: a failure from six weeks ago is history, and a permanent
+    # badge counting it is a badge nobody can ever clear.
+    needs_attention = db.session.query(db.func.count(Submission.id)).filter(
+        Submission.device_id == device_id,
+        Submission.status == 'failed',
+        Submission.received_at >= datetime.utcnow() - timedelta(days=30),
+    ).scalar() or 0
+
+    return {
+        'month': totals_since(month_start),
+        'today': totals_since(today),
+        'month_label': today.strftime('%B'),
+        'in_flight': in_flight,
+        'needs_attention': needs_attention,
+        'server_time': datetime.utcnow().isoformat(),
+    }
+
+
+@app.route('/scan/api/summary')
+@device_required
+def scan_api_summary():
+    """This device's own numbers, for the top of the field app."""
+    return jsonify(_device_summary(g.device.id))
+
+
+def sse_response(cursor, device_id=None):
+    """
+    One open event stream, with the headers that decide whether it works at all.
+
+    The generator runs long after the request that started it has been torn down, so it
+    pushes its own app context: it needs a database session of its own to read the
+    event log through, and reaching for the request's would be reading through a
+    session somebody else is entitled to close.
+
+    The headers are not boilerplate. Without `X-Accel-Buffering: no` an nginx-style
+    proxy buffers the response and hands it over only once it is complete - which for a
+    stream that never completes means the browser sits on an open connection receiving
+    nothing, forever, which is indistinguishable from the feature being broken. Without
+    `no-transform` an intermediary is free to compress it and buffer to do so.
+    """
+    def frames():
+        with app.app_context():
+            try:
+                yield from sse_broker.stream(cursor, device_id=device_id)
+            finally:
+                db.session.remove()
+
+    response = app.response_class(frames(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache, no-store, no-transform, must-revalidate'
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Connection'] = 'keep-alive'
+    return response
 
 
 @app.route('/scan/api/stream')
@@ -2545,25 +2695,20 @@ def scan_api_stream():
     processed, failed, duplicate, retry_scheduled - so the app can update a receipt's
     status without waiting for the next poll.
 
-    Reuses the same announcer the admin dashboard's /stream runs on, which broadcasts
-    to every listener with no filtering of its own; _sse_line_for_device is what keeps
-    a device to its own events. Not built on EventSource, deliberately: device_required
-    reads the session from an Authorization header (see its own docstring on why -
-    never a cookie), and EventSource cannot set one. The client instead reads this
-    with fetch() + a stream reader, sending the same header every other /scan/api/*
-    call already does.
+    Reads the same event log the admin dashboard's /stream reads, filtered to this
+    device by an indexed WHERE clause rather than by inspecting payloads: the one thing
+    this endpoint must never do is show one device another's receipts, and an exact
+    match on a column cannot half-work the way string matching on a payload can.
+
+    Not built on EventSource, deliberately: device_required reads the session from an
+    Authorization header (see its own docstring on why - never a cookie), and
+    EventSource cannot set one. The client instead reads this with fetch() + a stream
+    reader, sending the same header every other /scan/api/* call already does, and
+    passes its cursor as ?since= because it has no Last-Event-ID to resend.
     """
-    device_id = g.device.id   # Captured before the generator - request context is not
-                               # guaranteed to still be meaningful once the response is
-                               # being streamed out, so nothing below touches g again.
-
-    def event_stream():
-        for raw in announcer.listen():
-            line = _sse_line_for_device(raw, device_id)
-            if line is not None:
-                yield line
-
-    return app.response_class(event_stream(), mimetype='text/event-stream')
+    # Captured before the generator: the request context is not guaranteed to still be
+    # meaningful once the response is being streamed out, so nothing below touches g.
+    return sse_response(sse_broker.parse_cursor(request), device_id=g.device.id)
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
@@ -2889,12 +3034,13 @@ def export_csv():
 @app.route('/stream')
 @login_required
 def stream():
-    """This endpoint holds open a connection and streams updates."""
-    def event_stream():
-        # Listen to the announcer and yield messages
-        messages = announcer.listen()
-        while True:
-            msg = next(messages)
-            yield msg
-    
-    return app.response_class(event_stream(), mimetype='text/event-stream')
+    """
+    Every event on the instance, live, for the dashboard.
+
+    Unfiltered on purpose - this is the admin's view of every device - and cursored, so
+    a dashboard that reconnects (a laptop lid closed, a wifi handover, a proxy timing
+    the connection out) is told what happened while it was away instead of resuming at
+    "now" with a hole behind it. EventSource resends the last id it saw as
+    Last-Event-ID by itself; see utils/sse_broker.parse_cursor.
+    """
+    return sse_response(sse_broker.parse_cursor(request))

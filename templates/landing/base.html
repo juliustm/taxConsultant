@@ -1,0 +1,367 @@
+{#
+  The shell every page a stranger can reach is built on: the public front door and
+  the sign-in pages behind it.
+
+  It carries its own CSS rather than the runtime Tailwind the dashboard uses. That is
+  deliberate. This is the one page whose whole job is the first two seconds, and a
+  stylesheet compiled in the browser spends some of those two seconds unstyled. It is
+  also the page most likely to be opened on a cheap phone on a slow connection.
+
+  Everything colourful comes from four custom properties computed in utils/branding,
+  so an admin changing one hex in Settings restyles the door without touching a
+  template - and never lands on white text over a yellow button.
+#}<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ brand.name }}{% endblock %}</title>
+    <meta name="description" content="{% block description %}Scan a receipt. Karani checks it, counts it and keeps your books ready to file.{% endblock %}">
+    <meta name="theme-color" content="{{ brand.accent }}">
+
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='favicon.png') }}">
+
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{{ request.url }}">
+    <meta property="og:title" content="{{ self.title() }}">
+    <meta property="og:description" content="{{ self.description() }}">
+    <meta property="og:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:title" content="{{ self.title() }}">
+    <meta property="twitter:description" content="{{ self.description() }}">
+    <meta property="twitter:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
+
+    <style>
+        :root {
+            --accent: {{ brand.accent }};
+            --accent-dark: {{ brand.accent_dark }};
+            --accent-soft: {{ brand.accent_soft }};
+            --on-accent: {{ brand.on_accent }};
+
+            --paper: #fbfaf7;
+            --paper-deep: #f4f2ed;
+            --ink: #121211;
+            --ink-soft: #605d57;
+            --line: #e4e0d8;
+
+            --gutter: clamp(1.25rem, 5vw, 4rem);
+            --measure: 68rem;
+            --band: clamp(4.5rem, 13vw, 10rem);
+
+            --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        html { -webkit-text-size-adjust: 100%; }
+
+        body {
+            margin: 0;
+            background: var(--paper);
+            color: var(--ink);
+            font-family: var(--sans);
+            font-size: 1rem;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            overflow-x: hidden;
+        }
+
+        h1, h2, h3, p, ul, ol, figure { margin: 0; }
+        ul { padding: 0; list-style: none; }
+        img { max-width: 100%; height: auto; display: block; }
+        a { color: inherit; }
+
+        /* --- Rhythm ------------------------------------------------------- */
+
+        .wrap {
+            width: 100%;
+            max-width: var(--measure);
+            margin-inline: auto;
+            padding-inline: var(--gutter);
+        }
+
+        .band { padding-block: var(--band); }
+        .band--tight { padding-block: clamp(3rem, 8vw, 6rem); }
+
+        .band--ink {
+            background: var(--ink);
+            color: var(--paper);
+        }
+
+        .band--accent {
+            background: var(--accent);
+            color: var(--on-accent);
+        }
+
+        .rule { border-top: 1px solid var(--line); }
+
+        /* --- Type --------------------------------------------------------- */
+
+        /* No text-wrap:balance here on purpose: the display line breaks where the
+           copy says it does, and balancing would move those breaks. */
+        .display {
+            font-size: clamp(2.75rem, 9vw, 5.5rem);
+            line-height: 0.95;
+            letter-spacing: -0.045em;
+            font-weight: 800;
+        }
+
+        .headline {
+            font-size: clamp(2rem, 6vw, 3.75rem);
+            line-height: 1.02;
+            letter-spacing: -0.035em;
+            font-weight: 800;
+            text-wrap: balance;
+        }
+
+        .subhead {
+            font-size: clamp(1.125rem, 2.4vw, 1.5rem);
+            line-height: 1.45;
+            color: var(--ink-soft);
+            max-width: 34ch;
+            text-wrap: pretty;
+        }
+
+        .band--ink .subhead, .band--accent .subhead { color: inherit; opacity: 0.78; }
+
+        .eyebrow {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+        }
+
+        .band--ink .eyebrow, .band--accent .eyebrow { color: inherit; opacity: 0.65; }
+
+        /* --- Buttons ------------------------------------------------------ */
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 1rem 1.75rem;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--on-accent);
+            font: inherit;
+            font-weight: 650;
+            font-size: 1.0625rem;
+            text-decoration: none;
+            cursor: pointer;
+            transition: transform 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+        }
+
+        .btn:hover { background: var(--accent-dark); transform: translateY(-2px); }
+        .btn:active { transform: translateY(0); }
+
+        .btn--block { width: 100%; }
+
+        :focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 3px;
+            border-radius: 4px;
+        }
+
+        .band--accent :focus-visible, .band--ink :focus-visible { outline-color: currentColor; }
+
+        /* --- Top bar ------------------------------------------------------ */
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding-block: 1.5rem;
+        }
+
+        .mark {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.625rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            text-decoration: none;
+        }
+
+        .mark__badge {
+            display: grid;
+            place-items: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.625rem;
+            background: var(--accent);
+            color: var(--on-accent);
+            font-size: 0.9375rem;
+            font-weight: 700;
+            overflow: hidden;
+            flex: none;
+        }
+
+        .mark__badge img { width: 100%; height: 100%; object-fit: cover; }
+
+        .quiet-link {
+            font-size: 0.9375rem;
+            font-weight: 550;
+            color: var(--ink-soft);
+            text-decoration: none;
+            padding: 0.5rem 0.875rem;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            white-space: nowrap;
+            transition: color 140ms ease, border-color 140ms ease;
+        }
+
+        .quiet-link:hover { color: var(--ink); border-color: var(--ink); }
+
+        /* --- Flash -------------------------------------------------------- */
+
+        .flash {
+            margin-top: 1rem;
+            padding: 0.875rem 1.125rem;
+            border-radius: 0.875rem;
+            font-size: 0.9375rem;
+            background: var(--paper-deep);
+            border: 1px solid var(--line);
+        }
+
+        .flash--danger { background: #fdf1f1; border-color: #f3c9c9; color: #8a1f1f; }
+        .flash--success { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }
+
+        /* --- Footer ------------------------------------------------------- */
+
+        .footer {
+            padding-block: 2.5rem 3rem;
+            font-size: 0.875rem;
+            color: var(--ink-soft);
+        }
+
+        .footer a { text-decoration: none; border-bottom: 1px solid var(--line); }
+        .footer a:hover { border-bottom-color: currentColor; }
+
+        .footer__row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem 1.5rem;
+        }
+
+        .skip {
+            position: absolute;
+            left: -9999px;
+            top: 0;
+            z-index: 50;
+            background: var(--paper);
+        }
+
+        .skip:focus { left: 1rem; top: 1rem; }
+
+        /* --- Motion ------------------------------------------------------- */
+
+        .js .reveal { opacity: 0; transform: translateY(1.25rem); }
+
+        .js .reveal.is-in {
+            opacity: 1;
+            transform: none;
+            transition: opacity 700ms cubic-bezier(.2, .7, .3, 1), transform 700ms cubic-bezier(.2, .7, .3, 1);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .js .reveal { opacity: 1; transform: none; }
+            *, *::before, *::after {
+                animation-duration: 0.001ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.001ms !important;
+            }
+        }
+
+        {% block styles %}{% endblock %}
+    </style>
+</head>
+
+<body>
+    <a href="#main" class="quiet-link skip">Skip to content</a>
+
+    {% block chrome %}
+    <header class="wrap topbar">
+        {% block mark %}
+        <a class="mark" href="{{ url_for('index') }}">
+            <span class="mark__badge">
+                {% if brand.logo_url %}<img src="{{ brand.logo_url }}" alt="">{% else %}{{ brand.initial }}{% endif %}
+            </span>
+            <span>{{ brand.name }}</span>
+        </a>
+        {% endblock %}
+        {% block topbar_action %}
+        <a class="quiet-link" href="{{ url_for('admin_login') }}">Sign in</a>
+        {% endblock %}
+    </header>
+    {% endblock %}
+
+    <div class="wrap">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <p class="flash flash--{{ category }}" role="alert">{{ message }}</p>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+    </div>
+
+    <main id="main">{% block main %}{% endblock %}</main>
+
+    {% block footer %}
+    <footer class="wrap footer rule">
+        <div class="footer__row">
+            <p>Built in Tanzania 🇹🇿</p>
+            <p><a href="https://github.com/juliustm/taxConsultant" target="_blank" rel="noopener">Open source</a></p>
+        </div>
+    </footer>
+    {% endblock %}
+
+    <script>
+        document.documentElement.classList.add('js');
+
+        // Sections arrive as you reach them. One observer, no library, and the page is
+        // fully readable without any of it - the opacity that hides them is only ever
+        // applied when this script has run.
+        //
+        // The timer is not decoration. This script is the only thing standing between
+        // a visitor and a page of invisible text, so nothing is allowed to depend on
+        // the observer firing: if it has not run within a few seconds, everything is
+        // shown anyway. A missed animation costs nothing; a missed section costs the
+        // whole page.
+        (function () {
+            var targets = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+
+            function showAll() {
+                targets.forEach(function (node) { node.classList.add('is-in'); });
+            }
+
+            if (!('IntersectionObserver' in window)) {
+                showAll();
+                return;
+            }
+
+            var observer = new IntersectionObserver(function (entries) {
+                entries.forEach(function (entry) {
+                    if (!entry.isIntersecting) return;
+                    entry.target.classList.add('is-in');
+                    observer.unobserve(entry.target);
+                });
+            }, { rootMargin: '0px 0px -8% 0px', threshold: 0 });
+
+            targets.forEach(function (node) { observer.observe(node); });
+            setTimeout(showAll, 3000);
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+
+</html>

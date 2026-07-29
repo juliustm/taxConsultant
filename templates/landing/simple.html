@@ -1,0 +1,81 @@
+{% extends "landing/base.html" %}
+
+{#
+  The plain door.
+
+  For an instance whose address belongs to one business and is not selling anything:
+  their name, one line if they want it, and the way in. Nothing about receipts, no
+  pitch, no scrolling. The small line at the bottom is the only trace of what is
+  running behind it - which is how a private instance still introduces the software
+  to whoever it was shown to.
+#}
+
+{% block title %}{{ brand.name }}{% endblock %}
+{% block description %}{{ brand.tagline or brand.name }}{% endblock %}
+
+{% block styles %}
+        body { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+        main { flex: 1; display: grid; place-items: center; }
+
+        .plain {
+            text-align: center;
+            padding-block: clamp(3rem, 12vw, 7rem);
+        }
+
+        .plain__logo {
+            width: clamp(3.5rem, 9vw, 4.5rem);
+            height: clamp(3.5rem, 9vw, 4.5rem);
+            margin: 0 auto clamp(1.5rem, 4vw, 2rem);
+            display: grid;
+            place-items: center;
+            border-radius: 1.125rem;
+            background: var(--accent);
+            color: var(--on-accent);
+            font-size: clamp(1.5rem, 4vw, 1.875rem);
+            font-weight: 700;
+            overflow: hidden;
+        }
+
+        .plain__logo img { width: 100%; height: 100%; object-fit: cover; }
+
+        .plain h1 {
+            font-size: clamp(2rem, 7vw, 3.5rem);
+            line-height: 1.05;
+            letter-spacing: -0.04em;
+            font-weight: 800;
+            text-wrap: balance;
+        }
+
+        .plain__tagline {
+            margin-top: 1.25rem;
+            font-size: clamp(1rem, 2.2vw, 1.25rem);
+            color: var(--ink-soft);
+            max-width: 34ch;
+            margin-inline: auto;
+            text-wrap: pretty;
+        }
+
+        .plain .btn { margin-top: clamp(2rem, 5vw, 2.75rem); }
+{% endblock %}
+
+{# The door is the page; a second 'Sign in' in the corner would only repeat it. #}
+{% block chrome %}{% endblock %}
+
+{% block main %}
+<section class="wrap plain">
+    <div class="plain__logo">
+        {% if brand.logo_url %}<img src="{{ brand.logo_url }}" alt="">{% else %}{{ brand.initial }}{% endif %}
+    </div>
+    <h1>{{ brand.name }}</h1>
+    {% if brand.tagline %}<p class="plain__tagline">{{ brand.tagline }}</p>{% endif %}
+    <p><a class="btn" href="{{ url_for('admin_login') }}">Sign in</a></p>
+</section>
+{% endblock %}
+
+{% block footer %}
+<footer class="wrap footer">
+    <div class="footer__row" style="justify-content:center">
+        <p>Receipts handled by <a href="https://github.com/juliustm/taxConsultant" target="_blank" rel="noopener">Karani</a></p>
+    </div>
+</footer>
+{% endblock %}

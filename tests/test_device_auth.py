@@ -175,23 +175,30 @@ def test_the_api_explains_why_it_refused(app, enrolled):
     assert 'another phone' in body['error']
 
 
-def test_a_device_session_is_not_an_admin_session(app, enrolled):
+def test_a_device_session_is_not_an_admin_session(app, config, enrolled):
     """
     A device token must not open the dashboard.
 
     Both live on the same origin, so the only thing keeping them apart is that one is
     a bearer header and the other a signed cookie. This asserts they have not been
     quietly unified.
+
+    '/' answers everyone now - it is the public front page until an admin cookie says
+    otherwise - so the check is that the phone is treated as a member of the public,
+    and that the dashboard's own data is still shut to it.
     """
     _device, token = enrolled
     session_token, _ = consume_enrolment_token(token)
+    headers = {'Authorization': f'Bearer {session_token}'}
+    client = app.test_client()
 
-    response = app.test_client().get(
-        '/', headers={'Authorization': f'Bearer {session_token}'}
-    )
+    front_door = client.get('/', headers=headers)
+    assert front_door.status_code == 200
+    assert 'Receipts Dashboard' not in front_door.get_data(as_text=True)
 
-    assert response.status_code == 302
-    assert '/admin/login' in response.headers['Location']
+    submissions = client.get('/api/submissions', headers=headers)
+    assert submissions.status_code == 302
+    assert '/admin/login' in submissions.headers['Location']
 
 
 def test_last_seen_is_recorded(app, enrolled):

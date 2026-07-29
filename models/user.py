@@ -22,6 +22,21 @@ class InstanceConfig(db.Model):
     business_tin = db.Column(db.String(50), nullable=True)
     business_vrn = db.Column(db.String(50), nullable=True)
 
+    # --- The front door: what a stranger sees at '/' ---
+    # An instance's address gets shared - with a bookkeeper, in a WhatsApp group, on a
+    # business card - long before its owner necessarily wants a sales page hanging off
+    # it. So the public page is a setting, not a fixture. See utils/branding.
+    landing_mode = db.Column(db.String(20), nullable=True)
+    brand_name = db.Column(db.String(120), nullable=True)
+    brand_tagline = db.Column(db.String(200), nullable=True)
+    brand_accent = db.Column(db.String(20), nullable=True)
+    brand_logo_url = db.Column(db.String(500), nullable=True)
+    # Where an interested visitor is sent. Deliberately a URL rather than a form: the
+    # people who ask are qualified by hand, and that conversation does not belong in
+    # somebody's private receipt database.
+    landing_cta_label = db.Column(db.String(60), nullable=True)
+    landing_cta_url = db.Column(db.String(500), nullable=True)
+
     post_callback_url = db.Column(db.String(500), nullable=True)
     s3_bucket_name = db.Column(db.String(200), nullable=True)
     s3_access_key_id = db.Column(db.String(200), nullable=True)
@@ -128,6 +143,34 @@ class Submission(db.Model):
     claimed_at = db.Column(db.DateTime, nullable=True)
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('submissions', lazy=True))
+
+class EventLog(db.Model):
+    """
+    Every live event the app has announced recently, in order.
+
+    The push channel used to be memory only: an event was handed to whichever SSE
+    connections happened to be attached at that instant, and anything else - a phone
+    with its screen off, a dashboard reconnecting after a dropped connection, a browser
+    that had been backgrounded for ten minutes - simply never heard about it, and the
+    screen stayed wrong until someone reloaded the page. That is what this table fixes.
+    Events are written here first and read back by id, so a client that was away for a
+    while asks "what happened after 412?" and is told, rather than being silently
+    started from now with a gap behind it.
+
+    Deliberately a log, not a queue: rows are not consumed, and every listener keeps
+    its own cursor. It is trimmed rather than kept forever (see utils/sse_broker) -
+    this is a catch-up buffer measured in minutes, and the submissions themselves are
+    the record of truth.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    event_type = db.Column(db.String(50), nullable=False)
+    # Denormalised out of the payload so a device's own stream is a WHERE clause rather
+    # than every listener parsing every other device's events to discard them. NULL
+    # means "not tied to a device", which a device stream must therefore never match.
+    device_id = db.Column(db.Integer, nullable=True, index=True)
+    payload = db.Column(db.Text, nullable=False)
+
 
 class Vendor(db.Model):
     """

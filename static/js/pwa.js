@@ -652,6 +652,8 @@
         await withDeadline(tx.done, DB_OP_TIMEOUT_MS, 'Saving history locally timed out.');
 
         await metaSet('historySyncedAt', Date.now());
+        // Whatever moved in that page moved the totals with it.
+        scheduleSummary();
         emit();
         return rows;
     }
@@ -984,10 +986,61 @@
             signOutReason: signOutReason,
             storageOk: storageOk,
             storageError: storageError,
+            // Whether this app is currently being told about changes as they happen,
+            // as opposed to finding out at the next poll. Shown, not hidden: "up to
+            // date" and "not listening" must not look the same on a screen someone is
+            // relying on.
+            live: streamLive,
+            // Last known numbers for the top of the screen. Served from the cache when
+            // offline, so the figures do not blank out the moment a phone loses signal.
+            summary: summary,
             // A copy: the sync pill's expanded view must not be able to mutate the
             // internal feed by holding a reference to it.
             recentEvents: recentEvents.slice(),
         };
+    }
+
+    // ---------------------------------------------------------------- summary
+    //
+    // The few numbers above the history list. Cached in `meta` rather than recomputed
+    // on the phone: the server already holds every receipt this device has sent, and
+    // a total assembled locally from a partial cache would quietly disagree with it.
+
+    var summary = null;
+    var summaryTimer = null;
+
+    async function cachedSummary() {
+        if (summary) return summary;
+        try { summary = await metaGet('summary', null); } catch (e) { /* storage is down */ }
+        return summary;
+    }
+
+    async function pullSummary() {
+        if (!sessionToken()) return summary;
+        var response;
+        try {
+            response = await apiFetch('/scan/api/summary');
+        } catch (e) {
+            return summary;   // Offline. The cached figures stand; they are still true.
+        }
+        if (response.status === 401) {
+            await handleAuthFailure(response);
+            return summary;
+        }
+        if (!response.ok) return summary;
+
+        summary = await response.json();
+        try { await metaSet('summary', summary); } catch (e) { /* not worth failing over */ }
+        emit();
+        return summary;
+    }
+
+    /* Debounced: a runner tick finishing eight receipts is one change to these totals,
+       not eight. */
+    function scheduleSummary(delay) {
+        clearTimeout(summaryTimer);
+        summaryTimer = setTimeout(function () { pullSummary().catch(function () {}); },
+                                  delay == null ? 500 : delay);
     }
 
     // ---------------------------------------------------------------- live updates
@@ -1004,11 +1057,22 @@
     // EventSource cannot set one. fetch() with a streamed body reads the same
     // `data: {...}\n\n` framing by hand instead.
 
-    var STREAM_RECONNECT_MS = 4000;       // First retry after a stream drops.
+    var STREAM_RECONNECT_MS = 2000;       // First retry after a stream drops.
     var STREAM_RECONNECT_MAX_MS = 30000;  // Ceiling - a nicety reconnecting, not the outbox.
+    // The server sends a ping every 15s. Silence past this means the connection is
+    // gone in the one way a reader cannot otherwise detect: still open, still awaiting
+    // bytes that will never come, which is what a mobile network dropping a long-lived
+    // socket looks like from in here.
+    var STREAM_SILENCE_MS = 45000;
     var streamGeneration = 0;
     var streamController = null;
     var streamReconnectTimer = null;
+    var streamWatchdog = null;
+    var streamLive = false;
+    // The cursor. Every frame carries the id of the event that produced it, and
+    // reconnecting with the last one seen is what turns a dropped connection into a
+    // gap the server can fill rather than events nobody will ever hear about.
+    var lastEventId = null;
 
     /*
      * Applies one pushed event to the local cache.
@@ -1040,6 +1104,13 @@
     }
 
     async function applyStreamEvent(eventType, data) {
+        // The server saying it cannot account for what we missed: everything cached is
+        // suspect, so refetch rather than patch. Same thing a cold start does.
+        if (eventType === 'stream.resync') {
+            pullHistory().catch(function () {});
+            scheduleSummary(0);
+            return;
+        }
         if (!data || data.submission_id == null) return;
         var db = await getDB();
         var existing = await withDeadline(
@@ -1061,19 +1132,55 @@
             await withDeadline(
                 db.put('submissions', patched), DB_OP_TIMEOUT_MS, 'Saving history locally timed out.'
             );
+        } else {
+            // An event about a receipt this phone has never cached - sent from another
+            // device on the same account, or queued before this install existed. There
+            // is nothing to patch, so fetch it: leaving it out is how a receipt ends up
+            // existing on the server and nowhere on the screen.
+            pullHistory().catch(function () {});
         }
 
+        // The totals above the list just moved.
+        scheduleSummary();
         emit();
     }
 
     /*
-     * Turns raw chunks off a fetch body into `data: {...}` frames.
+     * Parses one SSE frame into its fields.
+     *
+     * The wire format is a block of `field: value` lines, and a frame now carries more
+     * than one of them - an `id:` the reconnect resumes from, an `event:` naming the
+     * heartbeat, and the `data:` itself. Reading only the first line, as this used to,
+     * means a frame whose id happens to come first parses as nothing at all.
+     *
+     * Returns null for anything with no usable payload: comment lines, `retry:`, and
+     * blank blocks.
+     */
+    function parseEventFrame(frame) {
+        var out = { id: null, event: 'message', data: '' };
+        var lines = frame.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (!line || line.charAt(0) === ':') continue;   // Comment, or padding.
+            var colon = line.indexOf(':');
+            if (colon < 0) continue;
+            var field = line.slice(0, colon);
+            var value = line.slice(colon + 1).replace(/^ /, '');
+            if (field === 'id') out.id = value;
+            else if (field === 'event') out.event = value;
+            else if (field === 'data') out.data = out.data ? out.data + '\n' + value : value;
+        }
+        return out.data === '' && out.id === null ? null : out;
+    }
+
+    /*
+     * Turns raw chunks off a fetch body into parsed frames.
      *
      * Frames are not guaranteed to land in one chunk or even one read() - TCP does
      * not know or care where a frame boundary is - so this buffers across reads and
      * only ever acts on text up to the last complete `\n\n` it has seen.
      */
-    async function readEventStream(response, onEvent) {
+    async function readEventStream(response, onFrame) {
         var reader = response.body.getReader();
         var decoder = new TextDecoder();
         var buffer = '';
@@ -1081,14 +1188,11 @@
             var chunk = await reader.read();
             if (chunk.done) return;
             buffer += decoder.decode(chunk.value, { stream: true });
-            var frames = buffer.split('\n\n');
-            buffer = frames.pop(); // Last entry: whatever came after the final \n\n, possibly incomplete.
-            for (var i = 0; i < frames.length; i++) {
-                var frame = frames[i];
-                if (frame.indexOf('data: ') !== 0) continue; // Keep-alive comment line, or blank.
-                try {
-                    onEvent(JSON.parse(frame.slice(6)));
-                } catch (e) { /* one malformed frame is not worth dropping the connection */ }
+            var blocks = buffer.split('\n\n');
+            buffer = blocks.pop(); // Last entry: whatever came after the final \n\n, possibly incomplete.
+            for (var i = 0; i < blocks.length; i++) {
+                var frame = parseEventFrame(blocks[i]);
+                if (frame) onFrame(frame);
             }
         }
     }
@@ -1100,13 +1204,33 @@
         streamGeneration++;
         if (streamController) { try { streamController.abort(); } catch (e) { /* already gone */ } }
         streamController = null;
+        streamLive = false;
         clearTimeout(streamReconnectTimer);
+        clearTimeout(streamWatchdog);
     }
 
     function startEventStream() {
         if (!sessionToken()) return;
         stopEventStream();
         connectStream(streamGeneration, STREAM_RECONNECT_MS);
+    }
+
+    /*
+     * Restarts the silence timer.
+     *
+     * Called on every frame, heartbeats included. A stream that stops delivering
+     * without closing is the failure mode that leaves an app confidently showing
+     * yesterday's state, and nothing else here can see it: the fetch has not rejected,
+     * the reader has not finished, there is simply nothing arriving. Aborting is what
+     * turns that into an ordinary reconnect.
+     */
+    function armStreamWatchdog(generation) {
+        clearTimeout(streamWatchdog);
+        streamWatchdog = setTimeout(function () {
+            if (generation !== streamGeneration) return;
+            streamLive = false;
+            if (streamController) { try { streamController.abort(); } catch (e) { /* already gone */ } }
+        }, STREAM_SILENCE_MS);
     }
 
     async function connectStream(generation, delay) {
@@ -1119,8 +1243,14 @@
 
         streamController = new AbortController();
         var reconnect = true;
+        var openedAt = 0;
         try {
-            var response = await fetch('/scan/api/stream', {
+            // ?since= rather than a header: this is fetch(), not EventSource, so there
+            // is no Last-Event-ID being resent on our behalf. Without a cursor the
+            // server can only start us at "now", and anything that happened while the
+            // phone was in a pocket is lost.
+            var url = '/scan/api/stream' + (lastEventId ? '?since=' + encodeURIComponent(lastEventId) : '');
+            var response = await fetch(url, {
                 headers: { Authorization: 'Bearer ' + token },
                 credentials: 'same-origin',
                 signal: streamController.signal,
@@ -1131,20 +1261,50 @@
             } else if (!response.ok || !response.body) {
                 throw new Error('stream unavailable');
             } else {
-                await readEventStream(response, function (envelope) {
-                    var data = envelope && envelope.data;
-                    applyStreamEvent(envelope && envelope.event_type, data).catch(function () {});
+                openedAt = Date.now();
+                streamLive = true;
+                markServerUp();
+                armStreamWatchdog(generation);
+                emit();
+                // Anything that happened between this app last listening and now is
+                // replayed by the cursor above - but a first connection has no cursor,
+                // so catch up the ordinary way too.
+                if (!lastEventId) { pullHistory().catch(function () {}); }
+                scheduleSummary(0);
+
+                await readEventStream(response, function (frame) {
+                    armStreamWatchdog(generation);
+                    if (frame.id) lastEventId = frame.id;
+                    if (frame.event === 'ping') return;   // Liveness only; nothing to apply.
+                    var envelope;
+                    try { envelope = JSON.parse(frame.data); }
+                    catch (e) { return; }   // One malformed frame is not worth dropping the connection.
+                    applyStreamEvent(envelope && envelope.event_type, envelope && envelope.data)
+                        .catch(function () {});
                 });
             }
         } catch (e) {
-            // Aborted on purpose by stopEventStream(), or a network hiccup - either
-            // way the reconnect logic below is what decides what happens next.
+            // Aborted on purpose by stopEventStream() or the watchdog, or a network
+            // hiccup - either way the reconnect logic below decides what happens next.
         }
+
+        streamLive = false;
+        clearTimeout(streamWatchdog);
+        emit();
 
         if (!reconnect || generation !== streamGeneration) return;
         if (global.document.visibilityState !== 'visible') return;
-        var nextDelay = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
-        streamReconnectTimer = setTimeout(function () { connectStream(generation, nextDelay); }, delay);
+
+        // A connection that actually held resets the backoff. Without this, a phone
+        // moving between cells all morning ends the morning waiting half a minute
+        // before each reconnect, having been on a working connection the whole time.
+        // "Held" is measured, not assumed: a server or proxy that accepts the request
+        // and closes it a moment later would otherwise be reconnected to in a tight
+        // loop, from a device on metered data.
+        var healthy = openedAt && (Date.now() - openedAt) > 5000;
+        var nextDelay = healthy ? STREAM_RECONNECT_MS : Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
+        streamReconnectTimer = setTimeout(function () { connectStream(generation, nextDelay); },
+                                          healthy ? 500 : delay);
     }
 
     // ---------------------------------------------------------------- boot
@@ -1174,7 +1334,13 @@
         // POST - which then queues behind all of it and times out. The app is no use
         // offline until it is activated anyway, so there is nothing to lose by waiting;
         // activate() installs the worker the moment a session exists.
-        if (sessionToken()) { registerServiceWorker().then(topUpShellCache); startEventStream(); }
+        if (sessionToken()) {
+            registerServiceWorker().then(topUpShellCache);
+            startEventStream();
+            // Cache first so the numbers are on screen before the network answers -
+            // and, on a phone with no signal, instead of it.
+            cachedSummary().then(function () { emit(); scheduleSummary(0); });
+        }
         // Not started here. Geolocation is its own permission prompt, and history and
         // diagnostics - which also call start() - have no use for a location fix at
         // all. The scan screen, the one place that attaches one to a receipt, asks for
@@ -1183,15 +1349,20 @@
 
         global.addEventListener('online', function () {
             markServerUp();
-            if (sessionToken()) { topUpShellCache(); startEventStream(); }
+            if (sessionToken()) { topUpShellCache(); startEventStream(); scheduleSummary(0); }
             sync({ force: true }).catch(function () {});
             emit();
         });
-        global.addEventListener('offline', emit);
+        global.addEventListener('offline', function () { streamLive = false; emit(); });
 
         global.document.addEventListener('visibilitychange', function () {
             if (global.document.visibilityState === 'visible') {
-                if (sessionToken()) { topUpShellCache(); startEventStream(); }
+                // Coming back is the moment the screen is most likely to be wrong: the
+                // stream was stopped when the phone went away, and whatever happened in
+                // between is exactly what the person is looking for now. The stream
+                // reconnects with its cursor and replays it; the sync and the summary
+                // cover anything older than the log still holds.
+                if (sessionToken()) { topUpShellCache(); startEventStream(); scheduleSummary(0); }
                 sync().catch(function () {});
             } else {
                 // Whoever is holding the phone may not open this tab again for hours -
@@ -1221,8 +1392,10 @@
         // sync
         sync: sync, pullHistory: pullHistory, loadOlderHistory: loadOlderHistory,
         cachedHistory: cachedHistory, retrySubmission: retrySubmission, apiFetch: apiFetch,
+        pullSummary: pullSummary, cachedSummary: cachedSummary,
         // live updates
         startEventStream: startEventStream, stopEventStream: stopEventStream,
+        parseEventFrame: parseEventFrame,
         // misc
         currentLocation: currentLocation, watchLocation: watchLocation,
         status: status, onChange: onChange, emit: emit,

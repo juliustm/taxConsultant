@@ -316,8 +316,12 @@ def test_the_app_shell_is_not_downloaded_before_activation():
     """
     pwa = (STATIC / 'js' / 'pwa.js').read_text()
 
-    # Registration in start() is conditional on already holding a session...
-    assert 'if (sessionToken()) { registerServiceWorker()' in pwa
+    # Registration in start() is conditional on already holding a session. Asserted on
+    # the shape rather than on one exact line, so reformatting that block does not read
+    # as the guard having been removed.
+    start_body = pwa.split('function start()')[1].split('global.addEventListener')[0]
+    guard = start_body.split('if (sessionToken()) {')[1]
+    assert 'registerServiceWorker()' in guard
     # ...and activate() is what installs it, once there is something to install it for.
     activate_body = pwa.split('async function activate(token)')[1].split('\n    }')[0]
     assert 'registerServiceWorker()' in activate_body
@@ -844,3 +848,191 @@ def test_starting_the_pwa_twice_does_not_double_its_timers():
 
     assert 'if (started) return;' in body
     assert 'started = true;' in body
+
+
+# --- The live channel ---------------------------------------------------------
+#
+# The scanner reads the event stream by hand, with fetch() and a stream reader, because
+# device sessions live in an Authorization header and EventSource cannot send one. That
+# hand-written parser is the single point where the whole push channel can fail
+# silently: a frame it does not understand is not an error, it is just an update that
+# never arrives - and the screen then looks exactly like a quiet afternoon.
+
+STREAM_HARNESS = """
+const fs = require('fs');
+// pwa.js is an IIFE over `window`. Nothing at load time touches the DOM, so a shim
+// with the handful of properties it reads is enough to get at its exports.
+global.window = {
+    navigator: { onLine: true },
+    document: { addEventListener() {}, visibilityState: 'visible' },
+    addEventListener() {},
+    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    setTimeout: setTimeout,
+};
+global.indexedDB = undefined;
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+
+const parse = global.window.PWA.parseEventFrame;
+console.log(JSON.stringify({
+    withId: parse('id: 42\\ndata: {"event_type":"submission.processed"}'),
+    idLast: parse('data: {"event_type":"submission.failed"}\\nid: 7'),
+    ping: parse('event: ping\\ndata: {}'),
+    retry: parse('retry: 3000'),
+    comment: parse(': keep-alive'),
+    blank: parse(''),
+    multiline: parse('id: 9\\ndata: {"a":1,\\ndata: "b":2}'),
+}));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_scanner_reads_every_field_of_a_frame(tmp_path):
+    """
+    Parsed, not grepped for.
+
+    The parser used to require `data: ` to be the very first thing in a frame. Adding
+    the `id:` line that makes reconnection possible would therefore have turned every
+    single event into a frame the phone silently ignored - the app would have looked
+    completely normal and never updated again.
+    """
+    harness = tmp_path / 'frames.js'
+    harness.write_text(STREAM_HARNESS)
+
+    result = subprocess.run(['node', str(harness), str(STATIC / 'js' / 'pwa.js')],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    frames = json.loads(result.stdout)
+
+    # The id is what a reconnect resumes from, wherever it sits in the frame.
+    assert frames['withId']['id'] == '42'
+    assert json.loads(frames['withId']['data'])['event_type'] == 'submission.processed'
+    assert frames['idLast']['id'] == '7'
+
+    # The heartbeat is recognised as itself, so it can prove the connection is alive
+    # without being mistaken for an update.
+    assert frames['ping']['event'] == 'ping'
+
+    # Nothing to apply, and nothing that should look like an event.
+    assert frames['retry'] is None
+    assert frames['comment'] is None
+    assert frames['blank'] is None
+
+    # SSE allows a payload to be split across several data lines.
+    assert json.loads(frames['multiline']['data']) == {'a': 1, 'b': 2}
+
+
+def test_the_scanner_reconnects_with_a_cursor_rather_than_from_now():
+    """
+    Without ?since=, a reconnecting phone is started at the present and everything that
+    happened while it was in a pocket is lost - which is the entire failure this
+    channel was rebuilt to fix.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+
+    assert "'/scan/api/stream' + (lastEventId ? '?since=' + encodeURIComponent(lastEventId) : '')" in pwa
+    assert 'if (frame.id) lastEventId = frame.id;' in pwa
+
+
+def test_a_stream_that_goes_silent_is_treated_as_dead():
+    """
+    The failure no client can otherwise see: the connection is open, the reader is
+    waiting, and nothing is ever going to arrive. Only the absence of the server's
+    heartbeat gives it away.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+    watchdog = pwa.split('function armStreamWatchdog')[1].split('\n    }')[0]
+
+    assert 'STREAM_SILENCE_MS' in watchdog
+    assert '.abort()' in watchdog
+    # Re-armed by every frame, heartbeats included, or it fires mid-conversation.
+    assert pwa.count('armStreamWatchdog(generation)') >= 2
+
+
+# --- The numbers above the list -----------------------------------------------
+
+def history_component_source():
+    """The history screen's own script, as the browser receives it."""
+    source = (TEMPLATES / 'scan' / '_history.html').read_text()
+    return source.rsplit('<script>', 1)[1].rsplit('</script>', 1)[0]
+
+
+HERO_DRIVER = """
+const page = historyPage();
+const populated = {
+    month: { receipts: 12, spend_cents: 124050000, vat_cents: 18900000 },
+    today: { receipts: 3, spend_cents: 4500000 },
+    month_label: 'July', in_flight: 0, needs_attention: 0,
+};
+
+function snapshot() {
+    return {
+        total: page.heroTotal,
+        label: page.heroLabel,
+        today: page.todayLine,
+        stats: page.heroStats.map((s) => [s.label, s.value, s.tone]),
+    };
+}
+
+const out = {};
+page.storageOk = true; page.online = true; page.pending = 0;
+
+page.summary = null;
+out.unknown = snapshot();
+
+page.summary = populated;
+out.clear = snapshot();
+
+page.pending = 4;
+out.unsent = snapshot();
+
+page.pending = null;
+out.storageUnknown = snapshot();
+
+page.pending = 0;
+page.summary = Object.assign({}, populated, { needs_attention: 2, in_flight: 5 });
+out.failing = snapshot();
+
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_dashboard_numbers_say_unknown_rather_than_zero(tmp_path):
+    """
+    The figures at the top of the field app, evaluated.
+
+    The rule they all follow: not knowing must never render as zero. "TZS 0 captured
+    this month" on a phone that simply has not reached the server yet is not a smaller
+    truth than the real figure, it is a different and alarming one - and it is exactly
+    what a screen shows when null is passed to a formatter without thinking.
+    """
+    bundle = tmp_path / 'hero.js'
+    bundle.write_text(
+        "global.PWA = { MAX_ATTEMPTS: 8 };\n"
+        "global.navigator = { onLine: true };\n"
+        + history_component_source() + HERO_DRIVER
+    )
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+
+    # Nothing known yet.
+    assert state['unknown']['total'] == '—'
+    assert [value for _, value, _ in state['unknown']['stats'][:2]] == ['—', '—']
+
+    # Known: shortened, because a hero figure that wraps is no longer a glance.
+    assert state['clear']['total'] == '1.24M'
+    assert state['clear']['label'] == 'Captured · July'
+    assert '3 today' in state['clear']['today']
+    assert state['clear']['stats'][0] == ['Receipts', '12', '']
+    assert state['clear']['stats'][1] == ['VAT', '189K', '']
+    # Nothing outstanding is itself worth saying.
+    assert state['clear']['stats'][2] == ['All sent', '✓', '']
+
+    # Receipts still on the phone outrank work in progress...
+    assert state['unsent']['stats'][2] == ['Sending', '4', 'is-busy']
+    # ...an outbox that cannot even be counted outranks that...
+    assert state['storageUnknown']['stats'][2] == ['Unsent', '?', 'is-alert']
+    # ...and a receipt that failed outright outranks everything.
+    assert state['failing']['stats'][2] == ['Need you', '2', 'is-alert']

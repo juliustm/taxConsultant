@@ -1,16 +1,23 @@
 {#
-  What this device has sent, and what became of it.
+  The field app's home screen: what this device has captured, and what became of it.
 
-  It reads entirely from IndexedDB, so it looks the same with or without a network -
-  the pull from the server just replaces what is cached. Two lists are merged into one
-  view: receipts still waiting on the phone, and receipts the server has. Without the
-  first half a field user has no way to tell "not sent yet" from "lost".
+  Two layers. A hero pinned to the viewport answers the question someone opens the app
+  holding - how much have I captured this month, and is anything wrong - in figures big
+  enough to read at arm's length. Below it a sheet of detail slides up over the hero as
+  it is scrolled, carrying the two actions that matter (refresh, Scan) in a header that
+  sticks to the top once it gets there. The movement is the platform's own scroller and
+  nothing else; see .dash in static/css/scan.css for why that matters on a cheap phone.
+
+  The list itself reads entirely from IndexedDB, so it looks the same with or without a
+  network - the pull from the server just replaces what is cached. Two lists are merged
+  into one view: receipts still waiting on the phone, and receipts the server has.
+  Without the first half a field user has no way to tell "not sent yet" from "lost".
 #}
 {# x-show rather than x-if so a list scrolled halfway down, its search query and its
    expanded row all survive a trip to the scanner and back. The cost of keeping it
    mounted is a hidden subtree; the cost of not doing is re-reading IndexedDB and
    losing the user's place every time they check a code against the receipt in hand. #}
-<div class="sheet" x-data="historyPage()" x-init="init()" x-show="active" x-cloak>
+<div class="dash" x-data="historyPage()" x-init="init()" x-show="active" x-cloak>
 
     <button type="button" class="sync-pill" x-cloak @click="toggleIsland()">
         <span class="sync-dot" :class="dotClass"></span>
@@ -38,40 +45,65 @@
         </div>
     </template>
 
-    <header class="safe-top sticky top-0 z-10 border-b border-gray-200 bg-white/90 px-4 pb-3 pt-12 backdrop-blur">
-        <div class="flex items-center justify-between gap-3">
-            <div class="min-w-0">
-                <h1 class="text-lg font-semibold text-gray-900">My receipts</h1>
-                <p class="truncate text-xs text-gray-500" x-text="deviceName"></p>
-            </div>
-            <div class="flex shrink-0 items-center gap-2">
-                {# An installed PWA has no browser chrome, so no reload button either -
-                   and iOS standalone apps do not support the pull-to-refresh gesture at
-                   all, so it cannot be the only way to ask the server for anything new. #}
-                <button type="button" @click="reload()" :disabled="reloading"
-                        class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-700 disabled:opacity-50"
-                        aria-label="Refresh">
-                    <svg class="h-5 w-5" :class="{ 'animate-spin': reloading }" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/>
-                    </svg>
-                </button>
-                <a href="{{ url_for('scan_home') }}" @click.prevent="ScanRouter.go('scan')"
-                   class="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">
-                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 013.75 9.375v-4.5zM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 01-1.125-1.125v-4.5zM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0113.5 9.375v-4.5z"/>
-                    </svg>
-                    Scan
-                </a>
-            </div>
-        </div>
+    {# The top third. Numbers only - every control on this screen lives in the sheet
+       below, where a thumb can reach it. #}
+    <header class="dash-hero">
+        <p class="dash-eyebrow" x-text="heroLabel"></p>
+        <p class="dash-total">
+            <span class="dash-total-currency">TZS</span><span x-text="heroTotal"></span>
+        </p>
+        <p class="text-xs text-white/45" x-text="todayLine"></p>
 
-        <div class="mt-3">
-            <input type="search" x-model="query" placeholder="Search code, vendor, item or note"
-                   class="w-full rounded-lg border-0 bg-gray-100 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-indigo-500">
+        <div class="dash-stats">
+            <template x-for="stat in heroStats" :key="stat.label">
+                <div class="dash-stat" :class="stat.tone">
+                    <p class="dash-stat-value" x-text="stat.value"></p>
+                    <p class="dash-stat-label" x-text="stat.label"></p>
+                </div>
+            </template>
         </div>
     </header>
 
-    <main class="px-4 py-4">
+    <div class="dash-sheet">
+        {# Watched rather than listened for: this is how the header knows it has
+           reached the top, without a scroll handler running on every frame. #}
+        <div x-ref="stickyEdge" class="h-px w-full"></div>
+
+        <div class="dash-bar" :class="{ 'is-stuck': stuck }">
+            <span class="dash-grabber"></span>
+            <div class="mt-3 flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                    <h1 class="text-base font-semibold text-gray-900">My receipts</h1>
+                    <p class="truncate text-xs text-gray-500" x-text="deviceName"></p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                    {# An installed PWA has no browser chrome, so no reload button either -
+                       and iOS standalone apps do not support the pull-to-refresh gesture at
+                       all, so it cannot be the only way to ask the server for anything new. #}
+                    <button type="button" @click="reload()" :disabled="reloading"
+                            class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-700 transition active:scale-95 disabled:opacity-50"
+                            aria-label="Refresh">
+                        <svg class="h-5 w-5" :class="{ 'animate-spin': reloading }" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/>
+                        </svg>
+                    </button>
+                    <a href="{{ url_for('scan_home') }}" @click.prevent="ScanRouter.go('scan')"
+                       class="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition active:scale-95">
+                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 013.75 9.375v-4.5zM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 01-1.125-1.125v-4.5zM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0113.5 9.375v-4.5z"/>
+                        </svg>
+                        Scan
+                    </a>
+                </div>
+            </div>
+
+            <div class="mt-3">
+                <input type="search" x-model="query" placeholder="Search code, vendor, item or note"
+                       class="w-full rounded-lg border-0 bg-gray-100 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-indigo-500">
+            </div>
+        </div>
+
+    <main class="px-4 pb-4 pt-3">
         <!-- Waiting on this phone -->
         <template x-if="filteredOutbox.length">
             <section class="mb-6">
@@ -223,6 +255,7 @@
             <a href="{{ url_for('scan_diagnostics') }}" @click.prevent="ScanRouter.go('diagnostics')" class="text-xs text-gray-400 underline">Diagnostics</a>
         </div>
     </main>
+    </div>
 </div>
 
 <script>
@@ -247,13 +280,21 @@ function historyPage() {
         booted: false,
         syncing: false,
         online: navigator.onLine !== false,
+        // Whether the push channel is actually attached. The one thing the old screen
+        // could not say, and the reason a stale list looked like a quiet day.
+        live: false,
+        // This device's own figures, from /scan/api/summary. null until the first
+        // answer - which is not zero, and must not be rendered as zero.
+        summary: null,
         deviceName: '',
         maxAttempts: PWA.MAX_ATTEMPTS,
         pageSize: 30,
         islandExpanded: false,
         recentEvents: [],
+        stuck: false,
         _searchDebounce: null,
         _observer: null,
+        _stickyObserver: null,
         _islandTimer: null,
 
         /*
@@ -298,6 +339,7 @@ function historyPage() {
             }).catch(() => {});
 
             this.initInfiniteScroll();
+            this.initStickyHeader();
         },
 
         async refresh() {
@@ -305,6 +347,8 @@ function historyPage() {
             this.pending = status.pending;
             this.syncing = status.syncing;
             this.online = status.online;
+            this.live = status.live;
+            this.summary = status.summary;
             this.deviceName = status.session && status.session.device ? status.session.device.name : '';
             this.recentEvents = status.recentEvents;
             this.storageOk = status.storageOk;
@@ -338,6 +382,7 @@ function historyPage() {
                 await PWA.sync({ force: true });
                 const rows = await PWA.pullHistory();
                 this.applyRows(rows);
+                await PWA.pullSummary();
                 await this.refresh();
             } catch (e) { /* offline or unreachable; the list just stays as it was */ }
             finally { this.reloading = false; }
@@ -453,6 +498,87 @@ function historyPage() {
             this._observer.observe(sentinel);
         },
 
+        /* The sheet header's divider, which should only appear once the header has
+           actually reached the top. An observer on the 1px above it, rather than a
+           scroll handler: this fires twice in the life of a scroll instead of on
+           every frame of one. */
+        initStickyHeader() {
+            const edge = this.$refs.stickyEdge;
+            if (!edge || !('IntersectionObserver' in window)) return;
+            this._stickyObserver = new IntersectionObserver((entries) => {
+                this.stuck = !entries[0].isIntersecting;
+            }, { threshold: 0 });
+            this._stickyObserver.observe(edge);
+        },
+
+        // --- The numbers above the list ---
+        //
+        // Every one of them reads null as "not known yet" and says so, rather than
+        // rendering it as zero. A phone that cannot reach the server showing "TZS 0
+        // captured this month" is not a smaller truth, it is a different and alarming
+        // one.
+
+        /* "Captured", not "spent": these are the receipts this phone put through this
+           month, whatever dates are printed on them. See _device_summary. */
+        get heroLabel() {
+            const month = this.summary && this.summary.month_label;
+            return month ? `Captured · ${month}` : 'Captured this month';
+        },
+
+        get heroTotal() {
+            if (!this.summary) return '—';
+            return this.shortMoney(this.summary.month.spend_cents);
+        },
+
+        get todayLine() {
+            if (!this.summary || !this.summary.today.receipts) return 'Nothing captured today yet';
+            const count = this.summary.today.receipts;
+            return `${count} today · TZS ${this.shortMoney(this.summary.today.spend_cents)}`;
+        },
+
+        /*
+         * Three figures, and the third one earns its place.
+         *
+         * Two are always the same - what was captured and the tax on it. The third is
+         * whichever thing most deserves the person's attention right now, in order of
+         * how much it costs them to not know: a receipt that failed outright, then
+         * receipts still sitting unsent on the phone, then work in progress. When none
+         * of those apply it says so plainly, because "nothing needs you" is itself the
+         * most useful thing that slot can say.
+         */
+        get heroStats() {
+            const month = this.summary ? this.summary.month : null;
+            const stats = [
+                { label: 'Receipts', value: month ? String(month.receipts) : '—', tone: '' },
+                { label: 'VAT', value: month ? this.shortMoney(month.vat_cents) : '—', tone: '' },
+            ];
+
+            if (!this.storageOk) {
+                stats.push({ label: 'Storage problem', value: '!', tone: 'is-alert' });
+            } else if (this.summary && this.summary.needs_attention > 0) {
+                stats.push({ label: 'Need you', value: String(this.summary.needs_attention), tone: 'is-alert' });
+            } else if (this.pending === null) {
+                stats.push({ label: 'Unsent', value: '?', tone: 'is-alert' });
+            } else if (this.pending > 0) {
+                stats.push({ label: this.online ? 'Sending' : 'Waiting for signal', value: String(this.pending), tone: 'is-busy' });
+            } else if (this.summary && this.summary.in_flight > 0) {
+                stats.push({ label: 'Checking', value: String(this.summary.in_flight), tone: 'is-busy' });
+            } else {
+                stats.push({ label: 'All sent', value: '✓', tone: '' });
+            }
+            return stats;
+        },
+
+        /* Whole shillings, shortened. A hero number is read at a glance from arm's
+           length, and 'TZS 1,240,500' at that size wraps onto two lines on a small
+           phone - at which point it is no longer a glance. */
+        shortMoney(cents) {
+            const amount = Math.round((cents || 0) / 100);
+            if (amount >= 1000000) return (amount / 1000000).toLocaleString([], { maximumFractionDigits: 2 }) + 'M';
+            if (amount >= 100000) return (amount / 1000).toLocaleString([], { maximumFractionDigits: 0 }) + 'K';
+            return amount.toLocaleString();
+        },
+
         outboxText(item) { return [item.receipturl, item.description].join(' '); },
 
         matches(text) {
@@ -531,7 +657,9 @@ function historyPage() {
             if (!this.online) return this.pending ? `Offline · ${this.pending} waiting` : 'Offline';
             if (this.syncing) return 'Syncing…';
             if (this.pending > 0) return `${this.pending} waiting`;
-            return 'Synced';
+            // 'Live' says something 'Synced' cannot: that this screen is attached to
+            // the server and will change by itself. Nothing here needs tapping.
+            return this.live ? 'Live' : 'Synced';
         },
 
         /* Tapping the pill again, or six seconds of nobody touching it, closes it -

@@ -42,6 +42,7 @@ This project empowers you to build your own internal, automated accounting assis
     -   **Google Sheets**: Automatically logs all submissions and processed data into a monthly-tabbed spreadsheet.
     -   **Webhook**: Sends real-time event notifications (`queued`, `processed`, `failed`, `duplicate`) to any URL you provide.
     -   **Amazon S3**: Backs up all event data as JSON files for auditing and safekeeping.
+-   **A Front Page You Own**: What `/` shows the public is a setting, not a fixture — the full story page that sells Karani in your colours, a plain page carrying only your business's name and logo, or nothing at all. Signing in is always one click away, and the whole page is coloured from one hex you pick.
 -   **Real-time Admin Dashboard**: A clean, passwordless (TOTP-based) web UI for configuration and live monitoring of the submission queue.
 -   **Asynchronous Job Queue**: Uses a robust, database-backed queue to process submissions in the background, perfect for single-app hosting environments like [Deploy.tz](https://deploy.tz/).
 -   **Self-Hostable & Private**: You control your data. Host your own instance and ensure your financial information remains confidential.
@@ -128,6 +129,22 @@ schedule got to and why it stopped, and offers a button that starts a fresh sche
 ## Configuring your own TIN
 
 The single most valuable check — *is this tax invoice even made out to us?* — needs to know who "us" is. Set your registered name, TIN and VRN under **Settings → Business**. Until you do, the check reports itself as unconfigured rather than silently assuming every receipt is yours, and the VAT ledger says so at the top of the page.
+
+## The front page
+
+`/` answers two audiences. Signed in, it is the dashboard, exactly as before. Signed out, it is whatever you decided the public should see — because an instance's address ends up with your bookkeeper, in a WhatsApp group and on a business card, and whether it sells software is your call, not ours.
+
+Three choices, under **Settings → Front page**:
+
+| Mode | What a visitor gets |
+|---|---|
+| **Sell Karani** (default) | The story page, in your colours, with your own button. Your instance is also the software's shop window. |
+| **Just your name** | A plain page: your logo, your name, one line, and a way in. Nothing about receipts. |
+| **Nothing at all** | No public page. `/` goes straight to the sign-in form. |
+
+Whichever you pick, signing in is always one click away, and everything visual comes from a single colour you choose. The shades and — the one that quietly ruins a page when it is wrong — whether text on your colour is black or white are computed from it (`utils/branding.py`), so picking yellow does not get you white text on a yellow button.
+
+The button on the story page points wherever you want to hear from people: a form, a WhatsApp link, a booking page. Left blank, it emails the admin address, so it is never dead. Nothing about an interested visitor is stored — qualifying them is a conversation, and it does not belong in somebody's private receipt database.
 
 ### Running the tests
 
