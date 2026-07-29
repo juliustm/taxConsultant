@@ -1,11 +1,3 @@
-{% extends "scan/base.html" %}
-{% block title %}Diagnostics{% endblock %}
-
-{% block head %}
-<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
-{% endblock %}
-
-{% block body %}
 {#
   Self-service troubleshooting.
 
@@ -15,11 +7,16 @@
   and the repair button covers the single most common cause, a precache that a weak
   connection left half-filled.
 #}
-<div class="sheet min-h-full px-4 py-6" x-data="diagnosticsPage()" x-init="run()">
+{# run() is deliberately not the initialiser any more. It compiles the ZXing WASM,
+   re-fetches the worker source, walks the whole precache and queries permissions -
+   none of which should happen because someone opened the app to scan something. It
+   runs when this view is first opened, and again on every later visit, which is what
+   a diagnostics screen is for. #}
+<div class="sheet min-h-full px-4 py-6" x-data="diagnosticsPage()" x-init="init()" x-show="active" x-cloak>
     <div class="mx-auto max-w-md">
         <div class="flex items-center justify-between">
             <h1 class="text-lg font-semibold text-gray-900">Diagnostics</h1>
-            <a href="{{ url_for('scan_home') }}" class="text-sm font-medium text-indigo-600">Back</a>
+            <a href="{{ url_for('scan_home') }}" @click.prevent="ScanRouter.go('scan')" class="text-sm font-medium text-indigo-600">Back</a>
         </div>
 
         <p class="mt-1 text-xs text-gray-500">
@@ -79,7 +76,21 @@ function diagnosticsPage() {
         checks: [],
         missing: [],
         repairing: false,
+        // Owned by ScanRouter - see init().
+        active: false,
         userAgent: navigator.userAgent,
+        isStandalone: window.navigator.standalone === true
+            || window.matchMedia('(display-mode: standalone)').matches,
+
+        init() {
+            ScanRouter.watch('diagnostics', (active) => {
+                this.active = active;
+                // Every visit re-runs the checks. Someone arriving here a second time
+                // has almost certainly just tried the fix suggested the first time, and
+                // stale results would tell them it did not work.
+                if (active) this.run();
+            });
+        },
 
         async run() {
             const checks = [];
@@ -150,7 +161,9 @@ function diagnosticsPage() {
             const native = await Scanner.getBarcodeDetector();
             let wasmOk = false;
             let wasmError = '';
-            try { await Scanner.getZXing(); wasmOk = true; }
+            // warmDecoder, not getZXing: this has to test the path the scan screen
+            // actually decodes on, which is the worker.
+            try { await Scanner.warmDecoder(); wasmOk = true; }
             catch (e) { wasmError = e.message; }
 
             add('QR code reader', !!(native || wasmOk),
@@ -168,7 +181,9 @@ function diagnosticsPage() {
             add('Local storage working', status.storageOk,
                 status.storageOk
                     ? 'Receipts can be saved on this phone while offline.'
-                    : 'This phone will not open its local database, so scans cannot be held offline. Close other tabs of this app and tap "Repair offline mode". If it persists, restart the phone.');
+                    : 'The local database is not working, so scans cannot be held offline '
+                      + `(${status.storageError}). Tap "Repair offline mode" — it rebuilds the `
+                      + 'database. If it persists, close other tabs of this app and restart the phone.');
 
             // Storage
             let persisted = false;
@@ -178,13 +193,22 @@ function diagnosticsPage() {
             } catch (e) { persisted = false; }
             add('Storage protected', persisted,
                 persisted ? 'Unsent receipts cannot be cleared by the phone automatically.'
-                          : 'The phone may clear unsent receipts under low storage. Keep some free space.',
+                          : 'The browser may clear unsent receipts and sign this device out on its own '
+                            + (this.isStandalone ? 'under low storage.'
+                                                  : 'if it sits unused for a while. Add to Home Screen to prevent that.'),
                 true);
 
             // Queue and session
-            add('Waiting to send', true,
-                status.pending === 0 ? 'Nothing waiting. Everything has been sent.'
-                                     : `${status.pending} receipt(s) still on this phone.`);
+            // Never reported as "everything has been sent" when the count is simply
+            // unknown. That is what this screen used to do whenever storage failed -
+            // pending stayed at its initial 0 - which is the most reassuring sentence
+            // the app can produce, shown at the exact moment it cannot account for a
+            // single receipt.
+            add('Waiting to send', status.pending === 0,
+                status.pending === null ? 'Cannot be checked while the local database is not working.'
+                    : status.pending === 0 ? 'Nothing waiting. Everything has been sent.'
+                    : `${status.pending} receipt(s) still on this phone.`,
+                status.pending !== null && status.pending > 0);
             add('Device activated', !!status.session,
                 status.session ? `Signed in as ${status.session.device.name}.`
                                : (status.signOutReason ? status.signOutReason.message
@@ -234,7 +258,9 @@ function diagnosticsPage() {
 
         async signOut() {
             const status = await PWA.status();
-            const warning = status.pending > 0
+            const warning = status.pending === null
+                ? 'The local database is not working, so unsent receipts on this phone cannot be counted. They stay on it either way. Sign out?'
+                : status.pending > 0
                 ? `${status.pending} receipt(s) have not been sent yet. They stay on this phone and will send once it is activated again. Sign out?`
                 : 'Sign this device out?';
             if (!confirm(warning)) return;
@@ -244,4 +270,3 @@ function diagnosticsPage() {
     };
 }
 </script>
-{% endblock %}

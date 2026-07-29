@@ -19,12 +19,20 @@ html, body {
     background: #000;
     color: #fff;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    overscroll-behavior: none;
     /* Explicit rather than relied-on: a document tall enough to scroll must always be
        able to, and momentum scrolling is what makes it read as smooth on iOS rather
        than as a page that stops dead the instant a finger lifts. */
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+}
+
+/* The camera view only. A pull-down bounce there fights with framing a receipt near
+   the top of the screen, and on Android can trigger the browser's own pull-to-refresh
+   mid-shot. History and Diagnostics are ordinary scrolling pages, and keep the native
+   overscroll/pull-to-refresh gesture on purpose - it is the one manual "refresh" this
+   app has, since an installed PWA has no browser chrome to supply one otherwise. */
+body.scan-camera {
+    overscroll-behavior: none;
 }
 
 /* Native-app feel: no tap flash, no accidental text selection while aiming a camera,
@@ -201,6 +209,51 @@ input, textarea, [contenteditable] {
     border: 1px solid rgba(255, 255, 255, 0.12);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
+    /* It is a <button> so it can expand into the event feed below - Tailwind's
+       preflight already strips the browser's own button chrome. */
+    cursor: pointer;
+}
+
+/* The sync pill's expanded view: what the live stream has said recently. Sits right
+   under the pill rather than growing the pill itself into it - simpler to get right
+   than morphing one shape into another, and it still reads as one control. */
+.sync-events {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 2.5rem);
+    left: 50%;
+    /* Overridden below on .sheet pages (History), whose header is a lot taller than
+       the bare pill-over-viewfinder case this default fits (the scanner screen). */
+    transform: translateX(-50%);
+    z-index: 50;
+    width: max-content;
+    max-width: min(88vw, 22rem);
+    border-radius: 0.875rem;
+    background: rgba(24, 24, 27, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #fff;
+    padding: 0.25rem;
+}
+
+.sync-events li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+}
+
+.sync-events li:not(:last-child) { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.sync-events .sync-event-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-events .sync-event-when { flex: none; color: rgba(255, 255, 255, 0.45); font-size: 0.6875rem; }
+.sync-events .sync-event-empty { padding: 0.5rem 0.6rem; font-size: 0.75rem; color: rgba(255, 255, 255, 0.5); text-align: center; }
+
+/* History's own header (title row + search field) runs to roughly 9.3rem; the
+   scanner screen has no header at all, just the pill floating over the viewfinder. */
+.sheet .sync-events {
+    top: calc(env(safe-area-inset-top, 0px) + 9.5rem);
 }
 
 .sync-dot {

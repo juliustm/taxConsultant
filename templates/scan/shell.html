@@ -1,0 +1,95 @@
+{% extends "scan/base.html" %}
+{#
+  The whole field app, in one document.
+
+  /scan/, /scan/history and /scan/diagnostics are all served by this template; which
+  view is showing is decided client-side from the URL, by static/js/router.js, and
+  changing view never reloads the page. See that file for why - the short version is
+  that a navigation destroys the camera, and on WebKit getting it back costs a
+  permission prompt.
+
+  Because all three routes render byte-identical HTML, the service worker precaches one
+  document rather than three, and any /scan/ navigation it cannot reach falls back to
+  the same one - so a deep link to History works offline without the worker having had
+  to guess in advance that anyone would follow it.
+#}
+{% block title %}Scan Receipts{% endblock %}
+{% block body_class %}scan-camera{% endblock %}
+
+{% block head %}
+<script>
+    /*
+     * Opens the camera before anything else on the page has parsed.
+     *
+     * The permission prompt and the sensor warm-up dominate a cold launch - far more
+     * than script parsing or layout - so they are started here, in <head>, and the
+     * result is collected later by scanner.js. Waiting for Alpine to hydrate first
+     * would add most of a second to every single launch.
+     *
+     * Skipped when the app is opening straight onto History or Diagnostics: a screen
+     * with no viewfinder on it has no business turning a camera on, and on iOS that
+     * would be a permission prompt for a feature the user did not ask for. The scanner
+     * view opens the camera itself when it is first shown.
+     */
+    window.__cameraPromise = null;
+    /*
+     * Resolves to true when the app should wait for a tap before opening the camera.
+     *
+     * A promise rather than a flag. It used to be a plain boolean assigned inside a
+     * .then(), which scannerApp() then read synchronously - so whether the gate
+     * appeared at all depended on a race with an unrelated IndexedDB read finishing
+     * first, and losing that race fired the OS permission dialog at someone the
+     * instant the icon opened, which is the exact thing the gate exists to prevent.
+     *
+     * The gate is only ever used where the Permissions API can tell us in advance that
+     * the camera has never been decided either way. Once a person has answered once,
+     * the state comes back 'granted' (or 'denied') and the camera opens with no gate
+     * and no extra tap, on this and every later launch. Safari has no Permissions entry
+     * for 'camera' at all, so it takes the immediate branch and simply asks.
+     */
+    window.__cameraNeedsGate = new Promise(function (resolve) {
+        var constraints = {
+            audio: false,
+            video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+                frameRate: { ideal: 30 },
+            },
+        };
+        function startNow() {
+            try { window.__cameraPromise = navigator.mediaDevices.getUserMedia(constraints); }
+            catch (e) { /* scanner.js surfaces this once it actually looks */ }
+            resolve(false);
+        }
+        try {
+            if (window.location.pathname !== '/scan/') return resolve(false);
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return resolve(false);
+            if (navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query({ name: 'camera' })
+                    .then(function (status) {
+                        if (status.state === 'prompt') resolve(true);
+                        else startNow();
+                    })
+                    .catch(startNow);
+            } else {
+                startNow();
+            }
+        } catch (e) { startNow(); }
+    });
+</script>
+<script src="{{ url_for('static', filename='js/vendor/zxing-reader.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+{% include "scan/_scanner.html" %}
+{% include "scan/_history.html" %}
+{% include "scan/_diagnostics.html" %}
+
+<script>
+    // Last, after every view has registered its watcher, so each one is told where it
+    // stands exactly once and none of them boots for a screen nobody is looking at.
+    ScanRouter.start();
+</script>
+{% endblock %}

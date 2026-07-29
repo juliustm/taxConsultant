@@ -22,6 +22,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATIC = ROOT / 'static'
+TEMPLATES = ROOT / 'templates'
 SERVICE_WORKER = STATIC / 'js' / 'service-worker.js'
 
 
@@ -55,8 +56,25 @@ def test_every_precached_url_actually_resolves(client):
 def test_the_shell_covers_every_screen_and_engine():
     """A gap here is an app that installs cleanly and then cannot open offline."""
     shell = set(app_shell())
+    source = SERVICE_WORKER.read_text()
 
-    assert {'/scan/', '/scan/history', '/scan/diagnostics'} <= shell
+    # One document, not three. All three /scan/ routes render identical HTML and the
+    # view is chosen in the browser, so caching them separately only created copies
+    # that drift: an app always entered at /scan/ never revalidated the other two, and
+    # a deep link to History could be served a shell from an old deploy.
+    assert '/scan/' in shell
+    assert '/scan/history' not in shell
+    assert '/scan/diagnostics' not in shell
+
+    # ...which only holds together if every navigation resolves to that one document,
+    # and the router that reads the path out of the URL is cached alongside it.
+    assert "await cache.match(SHELL_DOCUMENT)" in source
+    assert {'/scan/', '/scan/history', '/scan/diagnostics'} <= set(
+        re.findall(r"'([^']+)'", re.search(
+            r'const CACHEABLE_NAVIGATIONS = new Set\(\[(.*?)\]\)', source, re.S).group(1))
+    )
+    assert '/static/js/router.js' in shell
+
     assert '/static/js/pwa.js' in shell
     assert '/static/js/scanner.js' in shell
     assert '/static/css/scan.css' in shell
@@ -226,7 +244,7 @@ def test_a_decoder_that_cannot_run_is_never_mistaken_for_an_empty_frame():
     assert "report('onEngineFailure'" in scanner
 
     # And the UI acts on it instead of swallowing it.
-    page = (ROOT / 'templates' / 'scan' / 'scanner.html').read_text()
+    page = (TEMPLATES / 'scan' / '_scanner.html').read_text()
     assert 'onEngineFailure' in page
     assert 'engineError' in page
 
@@ -238,7 +256,7 @@ def test_the_viewfinder_shows_what_will_actually_be_captured():
     framed differently.
     """
     css = (STATIC / 'css' / 'scan.css').read_text()
-    page = (ROOT / 'templates' / 'scan' / 'scanner.html').read_text()
+    page = (TEMPLATES / 'scan' / '_scanner.html').read_text()
 
     assert '.photo-frame' in css
     # The small box is bound to QR mode only.
@@ -299,7 +317,7 @@ def test_the_app_shell_is_not_downloaded_before_activation():
     pwa = (STATIC / 'js' / 'pwa.js').read_text()
 
     # Registration in start() is conditional on already holding a session...
-    assert 'if (sessionToken()) registerServiceWorker()' in pwa
+    assert 'if (sessionToken()) { registerServiceWorker()' in pwa
     # ...and activate() is what installs it, once there is something to install it for.
     activate_body = pwa.split('async function activate(token)')[1].split('\n    }')[0]
     assert 'registerServiceWorker()' in activate_body
@@ -335,8 +353,8 @@ def test_activation_never_throws_so_failures_cannot_be_mislabelled():
     activate_body = pwa.split('async function activate(token)')[1].split('\n    }')[0]
     assert "return { ok: false, reason: e.kind || 'network', error: e.message };" in activate_body
 
-    for template in ('activate.html', 'scanner.html'):
-        source = (ROOT / 'templates' / 'scan' / template).read_text()
+    for template in ('activate.html', '_scanner.html'):
+        source = (TEMPLATES / 'scan' / template).read_text()
         assert 'Could not reach the server. Check your connection' not in source
         assert 'PWA.activate' in source
 
@@ -379,11 +397,77 @@ def test_opening_the_database_can_never_hang_forever():
     activation on "Activating…" indefinitely, with the token already spent.
     """
     pwa = (STATIC / 'js' / 'pwa.js').read_text()
-    body = pwa.split('function getDB()')[1].split('\n    /* Lets the diagnostics')[0]
+    opener = pwa.split('function openWithDeadline(version)')[1].split('\n    /*')[0]
 
-    assert 'DB_OPEN_TIMEOUT_MS' in body          # raced against a deadline
-    assert 'blocked:' in body                    # the other silent-stall path
-    assert 'dbUnavailable = true' in body        # latched, so nothing waits twice
+    assert 'DB_OPEN_TIMEOUT_MS' in opener        # raced against a deadline
+    assert 'blocked:' in opener                  # the other silent-stall path
+
+    # Every open goes through that deadline. A bare idb.openDB() anywhere else in the
+    # file is the hang coming back by another door.
+    assert pwa.count('idb.openDB(') == 1
+
+    # A failure backs off briefly rather than latching for the life of the page: the
+    # stalls this guards against are transient, and the old permanent latch turned one
+    # unlucky open into a phone that could not save a receipt again until it was
+    # reloaded - with the only cure buried on the diagnostics screen.
+    getdb = pwa.split('function getDB()')[1].split('\n    /* Lets the diagnostics')[0]
+    assert 'dbRetryAfter = Date.now() + DB_RETRY_AFTER_MS' in getdb
+
+
+def test_a_database_missing_its_stores_is_rebuilt_rather_than_used():
+    """
+    An open at the current version does not run `upgrade`, so a database that exists at
+    that version with no object stores in it opens perfectly happily and then fails
+    every read and write with NotFoundError - for good, because nothing will ever
+    trigger the upgrade that would fix it.
+
+    Phones reached that state: the service worker used to create this database with no
+    upgrade callback (see openOutboxDB), and whichever of the two got there first after
+    an eviction decided the schema. Bumping the version is the only thing that runs an
+    upgrade, so getDB has to notice and do exactly that.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+    worker = (STATIC / 'js' / 'service-worker.js').read_text()
+
+    repair = pwa.split('async function repairSchema(db)')[1].split('\n    /*')[0]
+    assert 'db.version + 1' in repair
+    assert 'openWithDeadline(version)' in repair
+
+    getdb = pwa.split('function getDB()')[1].split('\n    /* Lets the diagnostics')[0]
+    assert 'missingStores(db).length ? repairSchema(db)' in getdb
+
+    # The worker must never be the thing that decides the schema. No version pinned, so
+    # it can only ever attach to what the page built...
+    assert 'idb.openDB(OUTBOX_DB_NAME, undefined, {' in worker
+    # ...and it creates the real stores in the one case where it does create the
+    # database, rather than an empty shell that strands the app forever.
+    for store in ('outbox', 'submissions', 'meta'):
+        assert f"createObjectStore('{store}'" in worker
+    # A store-less database is handed back for the page to repair, not used.
+    assert "throw new Error('schema-incomplete')" in worker
+
+
+def test_the_scan_screen_never_waits_on_storage_or_the_network_to_show_a_viewfinder():
+    """
+    The camera is the screen. Awaiting a database open (up to DB_OPEN_TIMEOUT_MS) and
+    then an activation POST (up to ACTIVATE_TIMEOUT_MS, 45s) before so much as
+    constructing the scanner meant a launch from a home-screen icon carrying a token
+    could sit on a black screen for most of a minute - while the camera was already
+    open and streaming, started by the head script, with nobody collecting it.
+    """
+    scanner = (TEMPLATES / 'scan' / '_scanner.html').read_text()
+    boot = scanner.split('async boot() {')[1].split('\n        },')[0]
+
+    # Registering with the router is what opens the camera: it calls back immediately
+    # with this view's state, and setActive() starts it. Nothing may be awaited first.
+    started = boot.index("ScanRouter.watch('scan'")
+    assert 'await ' not in boot[:started]
+    # Storage and activation are awaited only after the camera is on its way.
+    assert boot.index('await this.refresh()') > started
+    assert boot.index('await this.claimTokenFromUrl()') > started
+
+    set_active = scanner.split('setActive(active) {')[1].split('\n        },')[0]
+    assert 'this.startCamera()' in set_active
 
 
 def test_activation_does_not_wait_on_local_storage():
@@ -437,7 +521,7 @@ def test_a_storage_failure_does_not_break_the_screens_that_report_it():
     assert 'storageOk' in status_body
     assert 'catch' in status_body
 
-    diagnostics = (ROOT / 'templates' / 'scan' / 'diagnostics.html').read_text()
+    diagnostics = (TEMPLATES / 'scan' / '_diagnostics.html').read_text()
     assert 'status.storageOk' in diagnostics
     assert 'PWA.resetStorage()' in diagnostics
 
@@ -582,3 +666,181 @@ def test_the_scanner_page_opens_the_camera_before_anything_else(client):
     # scanner.js and Alpine in its own comments.
     assert head.index('window.__cameraPromise') < head.index('src="/static/js/scanner.js"')
     assert 'alpine.min.js' not in head
+
+
+def test_decoding_happens_off_the_main_thread():
+    """
+    On a phone with no native BarcodeDetector - every iPhone, and any Android whose
+    Play Services barcode module is absent - ZXing is the only decoder and it runs on
+    every frame, with the most expensive options this app has, ten times a second.
+
+    On the main thread that is not jank, it is the whole thread. The part that broke
+    receipts rather than merely feeling slow: IndexedDB delivers its completion events
+    there too, so writes that finished in microseconds could not report it, and the
+    app's own 5-second deadline on a local save fired - "Saving to this phone is
+    taking too long" - while storage was in fact perfectly healthy.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    worker = (STATIC / 'js' / 'decoder-worker.js').read_text()
+
+    assert '/static/js/decoder-worker.js' in app_shell()
+    assert "importScripts('/static/js/vendor/zxing-reader.js')" in worker
+    assert 'readBarcodesFromImageData' in worker
+
+    decode = scanner.split('async function decodeWithZXing(canvas)')[1].split('\n    /*')[0]
+    assert 'askWorker(' in decode
+    # Transferred, not structured-cloned: a 1920x1080 frame is an eight-megabyte
+    # buffer, and copying one per frame is its own performance problem.
+    assert '[image.data.buffer]' in decode
+    # Slow beats broken: no worker, or a worker that died, still decodes here.
+    assert 'await getZXing()' in decode
+
+
+def test_a_camera_the_platform_took_back_is_reopened():
+    """
+    A call, the lock screen, or another app wanting the camera ends the video track,
+    and nothing tells the page: the viewfinder freezes on its last frame with every
+    control still enabled and no error anywhere. Scanning then silently does nothing.
+
+    That is the state that teaches a field user to reload, which on WebKit means
+    answering the camera permission prompt again - the "lots of clicks" this app is
+    supposed to be free of.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    page = (TEMPLATES / 'scan' / '_scanner.html').read_text()
+
+    # The cached pre-warmed stream is only reused while it is actually live.
+    acquire = scanner.split('async function acquireStream()')[1].split('\n    async function')[0]
+    assert 'streamIsLive(existing)' in acquire
+
+    assert "t.readyState === 'live'" in scanner
+    assert 'async revive()' in scanner
+    assert "document.addEventListener('visibilitychange'" in page
+    assert 'this.reviveCamera()' in page
+
+
+def test_the_diagnostics_screen_can_actually_pass_its_own_qr_check():
+    """
+    diagnostics.html loaded scanner.js but never the ZXing bundle it needs, so
+    Scanner.getZXing() had no global to find and the check reported "Nothing on this
+    phone can read a QR code" on every device without a native detector - while the
+    scan screen next door decoded receipts perfectly well.
+
+    A check that cannot pass is worse than no check: it sends a working phone to an
+    admin as a broken one, and buries the real failure next to it.
+    """
+    page = (TEMPLATES / 'scan' / '_diagnostics.html').read_text()
+    head = (TEMPLATES / 'scan' / 'shell.html').read_text().split('{% block head %}')[1]
+
+    # One document now, so the bundle is loaded once for all three views and the
+    # diagnostics screen cannot be the one that was left without it.
+    assert 'zxing-reader.js' in head
+    assert 'scanner.js' in head
+    # Tests the path the scan screen actually decodes on, which is the worker.
+    assert 'Scanner.warmDecoder()' in page
+
+
+def test_storage_failing_is_never_reported_as_everything_sent():
+    """
+    status() used to leave `pending` at its initial 0 when the outbox could not be
+    read, so every screen rendered a storage failure as "Nothing waiting. Everything
+    has been sent." - the most reassuring sentence the app owns, shown at the one
+    moment it cannot account for a single receipt.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+    body = pwa.split('async function status()')[1].split('\n    }')[0]
+    assert 'var pending = null;' in body
+
+    diagnostics = (TEMPLATES / 'scan' / '_diagnostics.html').read_text()
+    assert 'status.pending === null' in diagnostics
+
+    # And the pill on both live screens says so rather than claiming to be synced.
+    for name in ('_scanner.html', '_history.html'):
+        page = (TEMPLATES / 'scan' / name).read_text()
+        label = page.split('get syncLabel()')[1].split('},')[0]
+        assert "if (!this.storageOk) return 'Storage problem';" in label
+
+
+def test_the_three_scan_urls_serve_one_identical_document(client):
+    """
+    The field app is one page. Scan, History and Diagnostics share a document so that
+    moving between them cannot destroy the camera - on WebKit a getUserMedia grant
+    belongs to the document that asked, so every navigation back to the scanner used to
+    cost a permission prompt, forever, for anyone who checked their history.
+
+    Serving anything route-specific breaks two things at once: the service worker
+    precaches exactly one document and answers every /scan/ navigation with it, and the
+    router picks the view from the URL on the client. A per-route difference would show
+    up as the wrong screen after an offline deep link, which is the hardest possible
+    place to notice it.
+    """
+    bodies = {path: client.get(path).get_data(as_text=True)
+              for path in ('/scan/', '/scan/history', '/scan/diagnostics')}
+
+    for path, body in bodies.items():
+        assert bodies['/scan/'] == body, f'{path} does not render the same shell as /scan/'
+
+    # All three views really are present in that one document.
+    assert 'scannerApp()' in bodies['/scan/']
+    assert 'historyPage()' in bodies['/scan/']
+    assert 'diagnosticsPage()' in bodies['/scan/']
+
+
+def test_moving_between_views_never_reloads_the_page(client):
+    """
+    A cross-view <a> keeps its href - it is a real route, so middle-click, "open in new
+    tab" and a no-JS load all still work - but an in-app tap must be intercepted. One
+    link left unhandled is a full navigation, which throws away the document, the
+    camera, the compiled ZXing module and the permission with it.
+    """
+    body = client.get('/scan/').get_data(as_text=True)
+
+    links = re.findall(r'<a href="(/scan/[^"]*)"([^>]*)>', body)
+    assert links, 'no cross-view links found; this test is no longer testing anything'
+
+    for href, attrs in links:
+        assert '@click.prevent="ScanRouter.go(' in attrs, f'{href} would reload the page'
+
+
+def test_each_view_boots_only_when_it_is_opened():
+    """
+    Three components now live in one document, and two of them are expensive: History
+    walks IndexedDB and installs an IntersectionObserver that immediately starts paging
+    more history, Diagnostics compiles the ZXing WASM, refetches the worker source and
+    walks the whole precache.
+
+    On separate pages, navigating there was the gate. In one document the router is the
+    only gate, and without it every one of those costs is paid on the cold launch of a
+    person who opened the app to scan a receipt.
+    """
+    for name, component in (('_history.html', 'historyPage'), ('_diagnostics.html', 'diagnosticsPage')):
+        page = (TEMPLATES / 'scan' / name).read_text()
+        assert 'x-init="init()"' in page, f'{name} still boots from x-init'
+        assert "ScanRouter.watch(" in page
+
+    history = (TEMPLATES / 'scan' / '_history.html').read_text()
+    set_active = history.split('async setActive(active) {')[1].split('\n        },')[0]
+    assert 'if (!active) return;' in set_active
+    # And the first-run work happens once, not on every visit back.
+    assert 'if (!this.booted)' in set_active
+
+    # Every view is hidden until Alpine has hydrated. Without this the cold launch
+    # lays all three out at once - a light history sheet stacked under the camera.
+    for name in ('_scanner.html', '_history.html', '_diagnostics.html'):
+        root = (TEMPLATES / 'scan' / name).read_text().split('<div', 1)[1].split('>', 1)[0]
+        assert 'x-cloak' in root, f'{name} flashes before Alpine boots'
+        assert 'x-show="active"' in root
+
+
+def test_starting_the_pwa_twice_does_not_double_its_timers():
+    """
+    PWA.start() was called once per page when there were three pages. Two components in
+    the shared document call it now, so without a guard a user who opened History would
+    run two sync intervals and two sets of online/visibilitychange/pagehide listeners -
+    duplicate requests to the server for the rest of the session, from every device.
+    """
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+    body = pwa.split('function start() {')[1].split('\n    }')[0]
+
+    assert 'if (started) return;' in body
+    assert 'started = true;' in body

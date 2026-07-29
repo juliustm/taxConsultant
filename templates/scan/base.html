@@ -33,8 +33,11 @@
     <script src="{{ url_for('static', filename='js/vendor/tailwind.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/vendor/idb.umd.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/pwa.js') }}"></script>
+    {# Before Alpine, which is deferred: the view components call ScanRouter.watch()
+       from x-init, and that is what tells each of them whether to boot at all. #}
+    <script src="{{ url_for('static', filename='js/router.js') }}"></script>
 </head>
-<body class="h-full">
+<body class="h-full {% block body_class %}{% endblock %}">
 {% block body %}{% endblock %}
 
 {# Alpine last and deferred: it scans the DOM on load, so anything it binds to has to

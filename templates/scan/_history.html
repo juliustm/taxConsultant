@@ -1,0 +1,557 @@
+{#
+  What this device has sent, and what became of it.
+
+  It reads entirely from IndexedDB, so it looks the same with or without a network -
+  the pull from the server just replaces what is cached. Two lists are merged into one
+  view: receipts still waiting on the phone, and receipts the server has. Without the
+  first half a field user has no way to tell "not sent yet" from "lost".
+#}
+{# x-show rather than x-if so a list scrolled halfway down, its search query and its
+   expanded row all survive a trip to the scanner and back. The cost of keeping it
+   mounted is a hidden subtree; the cost of not doing is re-reading IndexedDB and
+   losing the user's place every time they check a code against the receipt in hand. #}
+<div class="sheet" x-data="historyPage()" x-init="init()" x-show="active" x-cloak>
+
+    <button type="button" class="sync-pill" x-cloak @click="toggleIsland()">
+        <span class="sync-dot" :class="dotClass"></span>
+        <span x-text="syncLabel"></span>
+    </button>
+    <template x-if="islandExpanded">
+        <div class="sync-events" x-cloak
+             x-transition:enter="transition ease-out duration-150"
+             x-transition:enter-start="opacity-0 -translate-y-1"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition ease-in duration-100"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0">
+            <template x-if="!recentEvents.length">
+                <p class="sync-event-empty">Nothing yet this session.</p>
+            </template>
+            <ul>
+                <template x-for="item in recentEvents" :key="item.at + item.label">
+                    <li>
+                        <span class="sync-event-label" x-text="item.label"></span>
+                        <span class="sync-event-when" x-text="eventWhen(item.at)"></span>
+                    </li>
+                </template>
+            </ul>
+        </div>
+    </template>
+
+    <header class="safe-top sticky top-0 z-10 border-b border-gray-200 bg-white/90 px-4 pb-3 pt-12 backdrop-blur">
+        <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+                <h1 class="text-lg font-semibold text-gray-900">My receipts</h1>
+                <p class="truncate text-xs text-gray-500" x-text="deviceName"></p>
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+                {# An installed PWA has no browser chrome, so no reload button either -
+                   and iOS standalone apps do not support the pull-to-refresh gesture at
+                   all, so it cannot be the only way to ask the server for anything new. #}
+                <button type="button" @click="reload()" :disabled="reloading"
+                        class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-700 disabled:opacity-50"
+                        aria-label="Refresh">
+                    <svg class="h-5 w-5" :class="{ 'animate-spin': reloading }" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/>
+                    </svg>
+                </button>
+                <a href="{{ url_for('scan_home') }}" @click.prevent="ScanRouter.go('scan')"
+                   class="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">
+                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 013.75 9.375v-4.5zM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 01-1.125-1.125v-4.5zM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0113.5 9.375v-4.5z"/>
+                    </svg>
+                    Scan
+                </a>
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <input type="search" x-model="query" placeholder="Search code, vendor, item or note"
+                   class="w-full rounded-lg border-0 bg-gray-100 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-indigo-500">
+        </div>
+    </header>
+
+    <main class="px-4 py-4">
+        <!-- Waiting on this phone -->
+        <template x-if="filteredOutbox.length">
+            <section class="mb-6">
+                <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    On this phone (<span x-text="filteredOutbox.length"></span>)
+                </h2>
+                <ul class="space-y-2">
+                    <template x-for="item in filteredOutbox" :key="item.client_uuid">
+                        <li class="rounded-lg border border-amber-200 bg-amber-50 p-3"
+                            x-transition:leave="transition ease-in duration-200"
+                            x-transition:leave-start="opacity-100 scale-100"
+                            x-transition:leave-end="opacity-0 scale-95">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <p class="font-mono text-sm font-semibold text-gray-900"
+                                       x-text="item.kind === 'photo' ? 'Photo' : (codeOf(item.receipturl) || 'Receipt')"></p>
+                                    <p class="mt-0.5 text-xs text-gray-500" x-text="when(item.captured_at)"></p>
+                                    <template x-if="item.attempts >= maxAttempts">
+                                        <p class="mt-1 text-xs text-red-700">
+                                            Not sending. <span x-text="item.last_error"></span>
+                                        </p>
+                                    </template>
+                                </div>
+                                <div class="flex shrink-0 flex-col items-end gap-1">
+                                    <span class="rounded-full bg-amber-200 px-2 py-0.5 text-xs font-medium text-amber-900">Waiting</span>
+                                    <button type="button" class="text-xs text-gray-500 underline"
+                                            @click="drop(item)">Discard</button>
+                                </div>
+                            </div>
+                        </li>
+                    </template>
+                </ul>
+            </section>
+        </template>
+
+        <!-- Sent, grouped into a WhatsApp-style date timeline: consecutive receipts on
+             the same day sit under one heading instead of repeating a full date on
+             every row - the thing that actually stops scanning through history for an
+             old receipt turning into work once there are hundreds of them. -->
+        <section>
+            <template x-if="!submissions.length && !searching">
+                <p class="rounded-lg border border-dashed border-gray-300 bg-white py-10 text-center text-sm text-gray-500"
+                   x-text="query ? 'Nothing matches that.' : 'Nothing sent yet. Scan a receipt to get started.'"></p>
+            </template>
+
+            <template x-for="group in groupedSubmissions" :key="group.label">
+                <div class="mb-4">
+                    <h2 class="mb-2 inline-block rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-500"
+                        x-text="group.label"></h2>
+                    <ul class="space-y-2">
+                        <template x-for="sub in group.items" :key="sub.id">
+                            <li class="rounded-lg border border-gray-200 bg-white">
+                                <button type="button" class="flex w-full items-start justify-between gap-3 p-3 text-left"
+                                        @click="expanded = expanded === sub.id ? null : sub.id">
+                                    <div class="min-w-0">
+                                        <p class="truncate text-sm font-semibold text-gray-900"
+                                           x-text="(sub.receipt && sub.receipt.vendor_name) || sub.receipt_code || 'Receipt'"></p>
+                                        <p class="mt-0.5 text-xs text-gray-500"
+                                           x-text="when(sub.captured_at || sub.received_at)"></p>
+                                    </div>
+                                    <div class="flex shrink-0 flex-col items-end gap-1">
+                                        <span class="rounded-full px-2 py-0.5 text-xs font-medium"
+                                              :class="badgeClass(sub.status)" x-text="statusLabel(sub.status)"></span>
+                                        <template x-if="sub.receipt && sub.receipt.total_amount">
+                                            <span class="text-xs font-semibold text-gray-700"
+                                                  x-text="money(sub.receipt.total_amount)"></span>
+                                        </template>
+                                    </div>
+                                </button>
+
+                                <div x-show="expanded === sub.id" x-cloak class="border-t border-gray-100 px-3 py-3"
+                                     x-transition:enter="transition ease-out duration-150"
+                                     x-transition:enter-start="opacity-0 -translate-y-1"
+                                     x-transition:enter-end="opacity-100 translate-y-0"
+                                     x-transition:leave="transition ease-in duration-100"
+                                     x-transition:leave-start="opacity-100"
+                                     x-transition:leave-end="opacity-0">
+                                    <dl class="space-y-1 text-xs text-gray-600">
+                                        <template x-if="sub.receipt_code">
+                                            <div><dt class="inline text-gray-400">Code:</dt>
+                                                 <dd class="inline font-mono" x-text="sub.receipt_code"></dd></div>
+                                        </template>
+                                        <template x-if="sub.receipt && sub.receipt.vendor_tin">
+                                            <div><dt class="inline text-gray-400">TIN:</dt>
+                                                 <dd class="inline font-mono" x-text="sub.receipt.vendor_tin"></dd></div>
+                                        </template>
+                                        <template x-if="sub.location">
+                                            <div><dt class="inline text-gray-400">Where:</dt>
+                                                 <dd class="inline" x-text="sub.location"></dd></div>
+                                        </template>
+                                        <template x-if="sub.receipt && sub.receipt.vat_amount">
+                                            <div><dt class="inline text-gray-400">VAT:</dt>
+                                                 <dd class="inline" x-text="money(sub.receipt.vat_amount)"></dd></div>
+                                        </template>
+                                    </dl>
+
+                                    <!-- What was actually bought. The server already extracts this per
+                                         line; showing nothing here left a vendor name and a total as the
+                                         only way to tell two receipts apart. -->
+                                    <template x-if="sub.receipt && sub.receipt.items && sub.receipt.items.length">
+                                        <ul class="mt-2 divide-y divide-gray-100 rounded-md border border-gray-100">
+                                            <template x-for="line in sub.receipt.items" :key="line.line_number">
+                                                <li class="flex items-start justify-between gap-2 px-2 py-1.5 text-xs">
+                                                    <span class="min-w-0 flex-1 truncate text-gray-700"
+                                                          x-text="line.description || 'Item'"></span>
+                                                    <span class="shrink-0 text-gray-400" x-show="line.quantity > 1"
+                                                          x-text="'×' + line.quantity"></span>
+                                                    <span class="shrink-0 font-medium text-gray-900"
+                                                          x-text="line.amount != null ? money(line.amount) : ''"></span>
+                                                </li>
+                                            </template>
+                                        </ul>
+                                    </template>
+
+                                    <!-- A failure is only worth showing if it comes with what to do next,
+                                         which the server already works out; see FAILURE_GUIDANCE. -->
+                                    <template x-if="sub.status === 'failed' && sub.retry">
+                                        <div class="mt-2 rounded-md bg-red-50 p-2">
+                                            <p class="text-xs font-semibold text-red-800" x-text="sub.retry.title"></p>
+                                            <p class="mt-0.5 text-xs text-red-700" x-text="sub.retry.detail"></p>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="sub.status === 'failed' || sub.status === 'queued'">
+                                        <button type="button"
+                                                class="mt-3 rounded-md bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+                                                :disabled="retrying === sub.id || !online"
+                                                @click="retry(sub)"
+                                                x-text="retrying === sub.id ? 'Sending…' : 'Try again'"></button>
+                                    </template>
+                                </div>
+                            </li>
+                        </template>
+                    </ul>
+                </div>
+            </template>
+
+            <!-- Infinite scroll: this sentinel coming into view is what pages further
+                 back into history, cache first and the network once the cache runs out. -->
+            <div x-ref="sentinel" class="py-4 text-center text-xs text-gray-400">
+                <template x-if="loadingMore"><span>Loading…</span></template>
+                <template x-if="!loadingMore && exhausted && submissions.length">
+                    <span x-text="query ? 'No more matches.' : 'You\'ve reached the beginning.'"></span>
+                </template>
+            </div>
+        </section>
+
+        <div class="safe-bottom pb-6 text-center">
+            <a href="{{ url_for('scan_diagnostics') }}" @click.prevent="ScanRouter.go('diagnostics')" class="text-xs text-gray-400 underline">Diagnostics</a>
+        </div>
+    </main>
+</div>
+
+<script>
+function historyPage() {
+    return {
+        outbox: [],
+        submissions: [],
+        query: '',
+        expanded: null,
+        retrying: null,
+        reloading: false,
+        loadingMore: false,
+        searching: false,
+        exhausted: false,
+        // null means storage did not answer, which is not the same as zero - see the
+        // note on status() in pwa.js.
+        pending: null,
+        storageOk: true,
+        // Owned by ScanRouter. `booted` is separate because leaving and returning must
+        // not repeat the first-run work - see setActive().
+        active: false,
+        booted: false,
+        syncing: false,
+        online: navigator.onLine !== false,
+        deviceName: '',
+        maxAttempts: PWA.MAX_ATTEMPTS,
+        pageSize: 30,
+        islandExpanded: false,
+        recentEvents: [],
+        _searchDebounce: null,
+        _observer: null,
+        _islandTimer: null,
+
+        /*
+         * Registers interest in the view and does nothing else.
+         *
+         * Everything this screen does is expensive and none of it is wanted by someone
+         * who has opened the app to scan a receipt: a cursor walk over IndexedDB, a
+         * catch-up pull from the server, and an IntersectionObserver that starts paging
+         * more history the moment it is installed. On three separate pages that cost
+         * was paid by navigating here, which was its own gate. In one document there is
+         * no gate but this one.
+         */
+        init() {
+            ScanRouter.watch('history', (active) => this.setActive(active));
+        },
+
+        async setActive(active) {
+            this.active = active;
+            if (!active) return;
+            if (!this.booted) {
+                this.booted = true;
+                await this.boot();
+                return;
+            }
+            // Already built: just catch up on anything that landed while the user was
+            // elsewhere. The stream and the sync loop patch the cache the whole time.
+            await this.refresh();
+        },
+
+        async boot() {
+            PWA.start();
+            PWA.onChange(() => this.refresh());
+            this.$watch('query', () => this.onQueryChange());
+
+            // Cached first so the list is on screen immediately, then whatever the
+            // network can add. On a dead connection the second half simply never lands.
+            this.submissions = await PWA.cachedHistory({ limit: this.pageSize });
+            await this.refresh();
+            PWA.pullHistory().then(async (rows) => {
+                this.applyRows(rows);
+                await this.refresh();
+            }).catch(() => {});
+
+            this.initInfiniteScroll();
+        },
+
+        async refresh() {
+            const status = await PWA.status();
+            this.pending = status.pending;
+            this.syncing = status.syncing;
+            this.online = status.online;
+            this.deviceName = status.session && status.session.device ? status.session.device.name : '';
+            this.recentEvents = status.recentEvents;
+            this.storageOk = status.storageOk;
+            // Storage failing must not take the rest of this screen down with it. This
+            // runs on every PWA.onChange(), and an unhandled rejection here used to
+            // abandon boot() partway through - the infinite scroll observer was never
+            // installed, so the list could not even be scrolled.
+            this.outbox = await PWA.outboxAll().catch(() => []);
+
+            if (!this.submissions.length) {
+                this.submissions = await PWA.cachedHistory({ limit: this.pageSize });
+                return;
+            }
+            // Re-reads exactly the window already on screen. This is what makes a
+            // status a push event (or a background sync) just patched into the cache
+            // show up immediately - refresh() runs on every PWA.onChange(), which
+            // fires on every such patch - without waiting for a scroll or a reload.
+            const newest = this.submissions[0].id;
+            const window = await PWA.cachedHistory({ beforeId: newest + 1, limit: this.submissions.length });
+            this.applyRows(window);
+        },
+
+        /* The tap-to-refresh next to the title: pulls this device's outbox and syncs
+           with the server, same as a cold boot does, without needing one. Merges
+           rather than replaces, so it never throws away pages already scrolled into
+           view - see applyRows(). */
+        async reload() {
+            if (this.reloading) return;
+            this.reloading = true;
+            try {
+                await PWA.sync({ force: true });
+                const rows = await PWA.pullHistory();
+                this.applyRows(rows);
+                await this.refresh();
+            } catch (e) { /* offline or unreachable; the list just stays as it was */ }
+            finally { this.reloading = false; }
+        },
+
+        /*
+         * Upserts rows into `submissions` by id and keeps it sorted newest-first -
+         * the one place that adds to the visible list, used by the initial cache
+         * read, the catch-up pull, a manual reload and (later) push updates, so none
+         * of them can duplicate a row already on screen or knock the order out.
+         */
+        applyRows(rows) {
+            if (!rows.length) return;
+            const byId = new Map(this.submissions.map((s) => [s.id, s]));
+            for (const row of rows) byId.set(row.id, row);
+            this.submissions = Array.from(byId.values()).sort((a, b) => b.id - a.id);
+        },
+
+        get filteredOutbox() { return this.outbox.filter((i) => this.matches(this.outboxText(i))); },
+
+        /*
+         * Date-grouped for the WhatsApp-style timeline: consecutive rows sharing a
+         * label are folded under one heading. `submissions` is already in id-desc
+         * (= chronological-desc) order, so this is a single pass, not a re-sort.
+         */
+        get groupedSubmissions() {
+            const groups = [];
+            let current = null;
+            for (const sub of this.submissions) {
+                const label = this.dateLabel(sub.captured_at || sub.received_at);
+                if (!current || current.label !== label) {
+                    current = { label, items: [] };
+                    groups.push(current);
+                }
+                current.items.push(sub);
+            }
+            return groups;
+        },
+
+        dateLabel(iso) {
+            if (!iso) return 'Unknown date';
+            const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+            if (isNaN(d)) return 'Unknown date';
+            const startOfDay = (dt) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+            const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+            if (diffDays === 0) return 'Today';
+            if (diffDays === 1) return 'Yesterday';
+            if (diffDays > 1 && diffDays < 7) return d.toLocaleDateString([], { weekday: 'long' });
+            const withYear = d.getFullYear() !== new Date().getFullYear();
+            return d.toLocaleDateString([], { day: 'numeric', month: 'short', year: withYear ? 'numeric' : undefined });
+        },
+
+        /* Debounced so every keystroke does not fire a request; a non-empty query
+           switches to a server-backed search (see runSearch) rather than filtering
+           only what happens to be loaded - once history runs into the thousands,
+           filtering just the visible page would silently miss everything else. */
+        onQueryChange() {
+            clearTimeout(this._searchDebounce);
+            this._searchDebounce = setTimeout(() => this.runSearch(), 300);
+        },
+
+        async runSearch() {
+            const q = this.query.trim();
+            this.expanded = null;
+            if (!q) {
+                this.searching = false;
+                this.exhausted = false;
+                this.submissions = await PWA.cachedHistory({ limit: this.pageSize });
+                return;
+            }
+            this.searching = true;
+            try {
+                const { rows, hasMore } = await PWA.loadOlderHistory({ q, limit: this.pageSize });
+                // A query typed over one still resolving must not be clobbered by the
+                // stale one landing after it.
+                if (this.query.trim() !== q) return;
+                this.submissions = rows;
+                this.exhausted = !hasMore;
+            } finally {
+                this.searching = false;
+            }
+        },
+
+        /* The infinite-scroll sentinel calls this. Cache first, network once the
+           cache runs dry and there is a connection to ask with. */
+        async loadMore() {
+            if (this.loadingMore || this.exhausted || !this.submissions.length) return;
+            this.loadingMore = true;
+            try {
+                const oldest = this.submissions[this.submissions.length - 1].id;
+                const q = this.query.trim();
+
+                if (!q) {
+                    const cached = await PWA.cachedHistory({ beforeId: oldest, limit: this.pageSize });
+                    if (cached.length) { this.applyRows(cached); return; }
+                    if (!this.online) return;
+                }
+
+                const { rows, hasMore } = await PWA.loadOlderHistory({ beforeId: oldest, limit: this.pageSize, q: q || undefined });
+                this.applyRows(rows);
+                this.exhausted = !hasMore;
+            } finally {
+                this.loadingMore = false;
+            }
+        },
+
+        initInfiniteScroll() {
+            const sentinel = this.$refs.sentinel;
+            if (!sentinel || !('IntersectionObserver' in window)) return;
+            this._observer = new IntersectionObserver((entries) => {
+                if (entries[0].isIntersecting) this.loadMore();
+            }, { rootMargin: '600px' });
+            this._observer.observe(sentinel);
+        },
+
+        outboxText(item) { return [item.receipturl, item.description].join(' '); },
+
+        matches(text) {
+            const q = this.query.trim().toLowerCase();
+            if (!q) return true;
+            return (text || '').toLowerCase().includes(q);
+        },
+
+        codeOf(url) {
+            const parsed = url ? Scanner.parseReceipt(url) : null;
+            return parsed ? parsed.code : null;
+        },
+
+        async drop(item) {
+            if (!confirm('Discard this receipt? It has not been sent, so it will be lost.')) return;
+            await PWA.discard(item.client_uuid);
+            await this.refresh();
+        },
+
+        async retry(sub) {
+            this.retrying = sub.id;
+            try {
+                if (await PWA.retrySubmission(sub.id)) {
+                    // Just the one row this touched - not a full unbounded re-read.
+                    const fresh = await PWA.cachedHistory({ beforeId: sub.id + 1, limit: 1 });
+                    this.applyRows(fresh);
+                }
+            } finally {
+                this.retrying = null;
+            }
+        },
+
+        when(iso) {
+            if (!iso) return '';
+            const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+            if (isNaN(d)) return '';
+            return d.toLocaleString([], {
+                day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+            });
+        },
+
+        money(value) {
+            const n = Number(value);
+            return isNaN(n) ? '' : 'TZS ' + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+        },
+
+        statusLabel(status) {
+            return {
+                completed: 'Verified', queued: 'Queued', processing: 'Checking',
+                failed: 'Failed', duplicate: 'Duplicate',
+            }[status] || status;
+        },
+
+        badgeClass(status) {
+            return {
+                completed: 'bg-green-100 text-green-800',
+                queued: 'bg-blue-100 text-blue-800',
+                processing: 'bg-blue-100 text-blue-800',
+                failed: 'bg-red-100 text-red-800',
+                duplicate: 'bg-gray-100 text-gray-600',
+            }[status] || 'bg-gray-100 text-gray-600';
+        },
+
+        // Storage outranks everything below it. "Synced" while the outbox cannot be
+        // read is the app claiming to have delivered receipts it cannot even count.
+        get dotClass() {
+            if (!this.storageOk) return 'is-offline';
+            if (!this.online) return 'is-offline';
+            if (this.syncing) return 'is-syncing';
+            if (this.pending > 0) return 'is-pending';
+            return 'is-synced';
+        },
+
+        get syncLabel() {
+            if (!this.storageOk) return 'Storage problem';
+            if (!this.online) return this.pending ? `Offline · ${this.pending} waiting` : 'Offline';
+            if (this.syncing) return 'Syncing…';
+            if (this.pending > 0) return `${this.pending} waiting`;
+            return 'Synced';
+        },
+
+        /* Tapping the pill again, or six seconds of nobody touching it, closes it -
+           this is a notification feed to glance at, not a screen to leave open. */
+        toggleIsland() {
+            this.islandExpanded = !this.islandExpanded;
+            clearTimeout(this._islandTimer);
+            if (this.islandExpanded) {
+                this._islandTimer = setTimeout(() => { this.islandExpanded = false; }, 6000);
+            }
+        },
+
+        eventWhen(at) {
+            const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+            if (seconds < 5) return 'just now';
+            if (seconds < 60) return `${seconds}s ago`;
+            const minutes = Math.round(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            return `${Math.round(minutes / 60)}h ago`;
+        },
+    };
+}
+</script>

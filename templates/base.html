@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html lang="en" class="h-full bg-gray-50">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Karani</title>
     {# Served from this instance, not a CDN. These are the same files the scanner PWA
-       precaches, and a self-hosted deployment on a link that cannot reach jsdelivr
-       should still render. #}
+    precaches, and a self-hosted deployment on a link that cannot reach jsdelivr
+    should still render. #}
     <script src="{{ url_for('static', filename='js/vendor/tailwind.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='js/vendor/alpine-collapse.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='js/vendor/alpine.min.js') }}"></script>
@@ -14,8 +15,10 @@
     <!-- Primary Meta Tags -->
     <title>Karani | Automate Your EFD Receipts</title>
     <meta name="title" content="Karani | Automate Your EFD Receipts">
-    <meta name="description" content="Tired of manual data entry? Karani is a self-hostable agent that uses AI to automatically process Tanzanian EFD receipts, saving you hours of work and ensuring audit-proof records.">
-    <meta name="keywords" content="Tanzania EFD receipt, tax automation Tanzania, AI accountant, receipt scanner, expense reporting, TRA receipt verification, Julius Moshiro, Atana">
+    <meta name="description"
+        content="Tired of manual data entry? Karani is a self-hostable agent that uses AI to automatically process Tanzanian EFD receipts, saving you hours of work and ensuring audit-proof records.">
+    <meta name="keywords"
+        content="Tanzania EFD receipt, tax automation Tanzania, AI accountant, receipt scanner, expense reporting, TRA receipt verification, Julius Moshiro, Atana">
     <meta name="author" content="Julius Moshiro">
 
     <!-- Favicon -->
@@ -26,24 +29,26 @@
     <meta property="og:type" content="website">
     <meta property="og:url" content="{{ request.url }}">
     <meta property="og:title" content="Karani | Automate Your EFD Receipts">
-    <meta property="og:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
+    <meta property="og:description"
+        content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
     <meta property="og:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
 
     <!-- Twitter -->
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="{{ request.url }}">
     <meta property="twitter:title" content="Karani | Automate Your EFD Receipts">
-    <meta property="twitter:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
+    <meta property="twitter:description"
+        content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
     <meta property="twitter:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
 
     {#
-      Peekable values. Anything carrying data-peek is a real link to a real page that
-      also answers itself on hover - see static/peek.js. The dotted underline is the
-      whole affordance: it is how the reader learns which of the values in front of
-      them are keys into something larger, without a page of instructions.
+    Peekable values. Anything carrying data-peek is a real link to a real page that
+    also answers itself on hover - see static/peek.js. The dotted underline is the
+    whole affordance: it is how the reader learns which of the values in front of
+    them are keys into something larger, without a page of instructions.
 
-      Chips (a score badge, a category pill) are already boxed, so they get a ring on
-      hover instead of an underline that would cut through their own background.
+    Chips (a score badge, a category pill) are already boxed, so they get a ring on
+    hover instead of an underline that would cut through their own background.
     #}
     <style>
         .peek {
@@ -51,100 +56,114 @@
             border-bottom: 1px dotted rgb(156 163 175);
             transition: color 120ms ease, border-color 120ms ease;
         }
-        .peek:hover, .peek:focus-visible {
+
+        .peek:hover,
+        .peek:focus-visible {
             color: rgb(67 56 202);
             border-bottom-color: rgb(99 102 241);
         }
+
         .peek-chip {
             border-bottom: none;
             border-radius: 0.375rem;
             transition: box-shadow 120ms ease;
         }
-        .peek-chip:hover, .peek-chip:focus-visible {
+
+        .peek-chip:hover,
+        .peek-chip:focus-visible {
             color: inherit;
             box-shadow: 0 0 0 2px rgb(199 210 254);
         }
-        .peek:focus-visible, .peek-chip:focus-visible { outline: none; }
+
+        .peek:focus-visible,
+        .peek-chip:focus-visible {
+            outline: none;
+        }
 
         /* Alpine sets x-cloak until it has hydrated; without this rule an element
            guarded only by x-show can flash visible for one frame before Alpine runs. */
-        [x-cloak] { display: none !important; }
+        [x-cloak] {
+            display: none !important;
+        }
     </style>
 </head>
+
 <body class="h-full">
-<div class="min-h-full">
-    {% if session.get('admin_logged_in') %}
-    <!-- Logged-in Navigation -->
-    <nav class="bg-white border-b border-gray-200">
-        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-            <div class="flex h-16 justify-between">
-                <div class="flex">
-                    <div class="flex flex-shrink-0 items-center gap-2 font-bold text-indigo-600">
-                        <span class="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-600 text-sm font-bold text-white">K</span>
-                        <span>Karani</span>
-                    </div>
-                    <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
-                        {# A receipt page is reached from the dashboard, so it keeps that tab lit.
-                           Queue and Devices used to live here too - Queue duplicated the
-                           dashboard's own 'Queued' tab, and Devices is one click inside
-                           Settings, so both were dropped rather than left as redundant. #}
-                        {% set nav_items = [
+    <div class="min-h-full">
+        {% if session.get('admin_logged_in') %}
+        <!-- Logged-in Navigation -->
+        <nav class="bg-white border-b border-gray-200">
+            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+                <div class="flex h-16 justify-between">
+                    <div class="flex">
+                        <div class="flex flex-shrink-0 items-center gap-2 font-bold text-indigo-600">
+                            <span
+                                class="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-600 text-sm font-bold text-white">K</span>
+                            <span>Karani</span>
+                        </div>
+                        <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
+                            {# A receipt page is reached from the dashboard, so it keeps that tab lit.
+                            Queue and Devices used to live here too - Queue duplicated the
+                            dashboard's own 'Queued' tab, and Devices is one click inside
+                            Settings, so both were dropped rather than left as redundant. #}
+                            {% set nav_items = [
                             ('index', 'Dashboard', ['index', 'receipt_detail']),
                             ('insights', 'Insights', ['insights']),
                             ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
                             ('vendors', 'Vendors', ['vendors']),
                             ('configure_instance', 'Settings', ['configure_instance', 'manage_devices']),
-                        ] %}
-                        {% for endpoint, label, active_on in nav_items %}
-                        <a href="{{ url_for(endpoint) }}"
-                           class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
+                            ] %}
+                            {% for endpoint, label, active_on in nav_items %}
+                            <a href="{{ url_for(endpoint) }}" class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
                                   {% if request.endpoint in active_on %}
                                     border-indigo-500 text-gray-900
                                   {% else %}
                                     border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700
                                   {% endif %}">
-                           {{ label }}
-                        </a>
-                        {% endfor %}
+                                {{ label }}
+                            </a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="hidden sm:ml-6 sm:flex sm:items-center">
+                        <a href="{{ url_for('admin_logout') }}"
+                            class="text-sm font-medium text-gray-500 hover:text-gray-700">Logout</a>
                     </div>
                 </div>
-                <div class="hidden sm:ml-6 sm:flex sm:items-center">
-                    <a href="{{ url_for('admin_logout') }}" class="text-sm font-medium text-gray-500 hover:text-gray-700">Logout</a>
-                </div>
             </div>
-        </div>
-    </nav>
-    {% endif %}
+        </nav>
+        {% endif %}
 
-    <div class="py-10">
-        <header>
-            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-                <!-- Flash messages here -->
-                {% with messages = get_flashed_messages(with_categories=true) %}
+        <div class="py-10">
+            <header>
+                <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+                    <!-- Flash messages here -->
+                    {% with messages = get_flashed_messages(with_categories=true) %}
                     {% if messages %}
-                        <div class="mb-4 space-y-2">
+                    <div class="mb-4 space-y-2">
                         {% for category, message in messages %}
-                            <div class="p-4 rounded-md text-sm
+                        <div class="p-4 rounded-md text-sm
                                 {% if category == 'success' %} bg-green-100 text-green-800
                                 {% elif category == 'danger' %} bg-red-100 text-red-800
                                 {% else %} bg-blue-100 text-blue-800 {% endif %}" role="alert">
-                                {{ message }}
-                            </div>
-                        {% endfor %}
+                            {{ message }}
                         </div>
+                        {% endfor %}
+                    </div>
                     {% endif %}
-                {% endwith %}
-            </div>
-        </header>
-        <main>
-            <div class="mx-auto max-w-7xl sm:px-6 lg:px-8">
-                {% block content %}{% endblock %}
-            </div>
-        </main>
+                    {% endwith %}
+                </div>
+            </header>
+            <main>
+                <div class="mx-auto max-w-7xl sm:px-6 lg:px-8">
+                    {% block content %}{% endblock %}
+                </div>
+            </main>
+        </div>
     </div>
-</div>
-{% if session.get('admin_logged_in') %}
-<script src="{{ url_for('static', filename='peek.js') }}" defer></script>
-{% endif %}
+    {% if session.get('admin_logged_in') %}
+    <script src="{{ url_for('static', filename='peek.js') }}" defer></script>
+    {% endif %}
 </body>
+
 </html>

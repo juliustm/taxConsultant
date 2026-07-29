@@ -1,60 +1,14 @@
-{% extends "scan/base.html" %}
-{% block title %}Scan Receipts{% endblock %}
-
-{% block head %}
-<script>
-    /*
-     * Opens the camera before anything else on the page has parsed.
-     *
-     * The permission prompt and the sensor warm-up dominate a cold launch - far more
-     * than script parsing or layout - so they are started here, in <head>, and the
-     * result is collected later by scanner.js. Waiting for Alpine to hydrate first
-     * would add most of a second to every single launch.
-     */
-    window.__cameraPromise = null;
-    // Set when the Permissions API can see this has never been decided either way.
-    // scannerApp() waits for an explicit tap in that case rather than firing an OS
-    // permission dialog at someone the instant the icon opens - see the camera gate
-    // below. Once a person has answered it once, this branch is never taken again:
-    // the state comes back 'granted' (or 'denied') and the app starts exactly as it
-    // always did, with no gate and no extra tap. Safari has no Permissions entry for
-    // 'camera' at all, so it always falls into the immediate branch, unchanged.
-    window.__cameraNeedsGate = false;
-    (function () {
-        var constraints = {
-            audio: false,
-            video: {
-                facingMode: { ideal: 'environment' },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-                frameRate: { ideal: 30 },
-            },
-        };
-        function startNow() {
-            try { window.__cameraPromise = navigator.mediaDevices.getUserMedia(constraints); }
-            catch (e) { /* scanner.js surfaces this once it actually looks */ }
-        }
-        try {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-            if (navigator.permissions && navigator.permissions.query) {
-                navigator.permissions.query({ name: 'camera' })
-                    .then(function (status) {
-                        if (status.state === 'prompt') window.__cameraNeedsGate = true;
-                        else startNow();
-                    })
-                    .catch(startNow);
-            } else {
-                startNow();
-            }
-        } catch (e) { /* fall through: scanner.js asks when it starts */ }
-    })();
-</script>
-<script src="{{ url_for('static', filename='js/vendor/zxing-reader.js') }}"></script>
-<script src="{{ url_for('static', filename='js/scanner.js') }}"></script>
-{% endblock %}
-
-{% block body %}
-<div x-data="scannerApp()" x-init="boot()" class="h-full">
+{# x-show, not x-if: the <video> element and the stream attached to it have to survive
+   a trip to History. Unmounting them is the thing that used to cost a camera warm-up
+   and, on iOS, a permission prompt. Hiding the root hides the fixed-position overlays
+   inside it too, so nothing of the camera screen leaks onto the other views. #}
+{# x-cloak matters more here than it used to. All three views are in this document now,
+   so between the HTML parsing and Alpine hydrating there is a window in which every
+   one of them is laid out at once - a light history sheet stacked under a black camera
+   screen - and that window is a cold launch on a slow phone, which is the longest one
+   there is. Cloaking costs the scanner nothing visually: the body behind it is already
+   black, which is exactly what a viewfinder that has not painted a frame looks like. #}
+<div x-data="scannerApp()" x-init="boot()" x-show="active" x-cloak class="h-full">
 
     <!-- Viewfinder. Always mounted: it is also how a device gets activated. -->
     <video x-ref="video" class="viewfinder" playsinline muted autoplay></video>
@@ -64,9 +18,31 @@
          user has to notice without reading anything, so it gets the whole width and
          the word itself, not just a dot that changed color. -->
     <template x-if="!!session && online">
-        <div class="sync-pill" x-cloak x-transition.opacity.duration.200ms>
+        <button type="button" class="sync-pill" x-cloak x-transition.opacity.duration.200ms
+                @click="toggleIsland()">
             <span class="sync-dot" :class="dotClass"></span>
             <span x-text="syncLabel"></span>
+        </button>
+    </template>
+    <template x-if="!!session && online && islandExpanded">
+        <div class="sync-events" x-cloak
+             x-transition:enter="transition ease-out duration-150"
+             x-transition:enter-start="opacity-0 -translate-y-1"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition ease-in duration-100"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0">
+            <template x-if="!recentEvents.length">
+                <p class="sync-event-empty">Nothing yet this session.</p>
+            </template>
+            <ul>
+                <template x-for="item in recentEvents" :key="item.at + item.label">
+                    <li>
+                        <span class="sync-event-label" x-text="item.label"></span>
+                        <span class="sync-event-when" x-text="eventWhen(item.at)"></span>
+                    </li>
+                </template>
+            </ul>
         </div>
     </template>
     <template x-if="!!session && !online">
@@ -145,6 +121,19 @@
                    x-text="activationError"></p>
             </template>
 
+            {# Browsers reclaim storage - and with it, the session - from sites that only
+               ever run in an ordinary tab. Installed to the Home Screen, this app is
+               exempt: iOS and Android both treat it as a first-class app rather than a
+               page that can be swept. Shown every time this screen is reached, not just
+               on first activation, since a lost session lands back here with no other
+               explanation for why it happened. #}
+            <template x-if="!activating && !isStandalone">
+                <p class="mt-3 rounded-lg bg-white/5 px-3 py-2 text-xs text-white/60">
+                    Tip: add this app to your Home Screen (Share → Add to Home Screen).
+                    Installed that way, the browser won't sign it out on its own.
+                </p>
+            </template>
+
             <div class="mt-4" x-show="showManual" x-cloak>
                 <label for="manual-token" class="text-xs font-medium text-white/60">Or paste the activation link</label>
                 <div class="mt-1 flex gap-2">
@@ -171,8 +160,12 @@
             <div class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-black/90 p-8 text-center">
                 <p class="text-base font-semibold">The camera could not start</p>
                 <p class="max-w-xs text-sm text-white/60" x-text="cameraError"></p>
-                <button type="button" class="control control-primary" @click="boot()">Try again</button>
-                <a href="{{ url_for('scan_diagnostics') }}" class="text-sm text-white/50 underline">Run diagnostics</a>
+                {# enableCamera, not boot: re-running boot would build a second scanner
+                   and register a second router watcher over the top of the first. What
+                   "try again" means here is only "forget the cached stream or refusal
+                   and ask the platform again", which is exactly what enableCamera is. #}
+                <button type="button" class="control control-primary" @click="enableCamera()">Try again</button>
+                <a href="{{ url_for('scan_diagnostics') }}" @click.prevent="ScanRouter.go('diagnostics')" class="text-sm text-white/50 underline">Run diagnostics</a>
             </div>
         </template>
 
@@ -230,7 +223,7 @@
 
         <!-- Controls -->
         <div class="safe-bottom flex items-center justify-between px-8 pb-5">
-            <a href="{{ url_for('scan_history') }}" class="control control-round" aria-label="History">
+            <a href="{{ url_for('scan_history') }}" @click.prevent="ScanRouter.go('history')" class="control control-round" aria-label="History">
                 <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
@@ -261,37 +254,45 @@
            since asking after the fact means asking never happens. #}
         <div x-show="!!confirming" x-cloak class="fixed inset-0 z-30 flex flex-col justify-end"
              x-transition.opacity.duration.200ms>
-            <button type="button" class="flex-1 bg-black/50" @click="continueScanning()"
-                    aria-label="Continue scanning"></button>
+            <button type="button" class="flex-1 bg-black/70" @click="continueScanning()"
+                    aria-label="Continue scanning" :disabled="submitting"></button>
 
-            <div class="confirm-sheet safe-bottom rounded-t-3xl bg-zinc-900/98 px-5 pt-4 pb-6 backdrop-blur"
+            <div class="confirm-sheet safe-bottom rounded-t-3xl bg-zinc-950 px-6 pt-5 pb-8 shadow-2xl"
                  x-transition:enter="transition ease-out duration-200"
                  x-transition:enter-start="translate-y-full"
                  x-transition:enter-end="translate-y-0"
                  x-transition:leave="transition ease-in duration-150"
                  x-transition:leave-start="translate-y-0"
                  x-transition:leave-end="translate-y-full">
-                <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20"></div>
+                <div class="mx-auto mb-4 h-1.5 w-12 rounded-full bg-white/25"></div>
 
                 <template x-if="confirming && confirming.previewUrl">
-                    <img :src="confirming.previewUrl" alt="" class="mb-3 max-h-40 w-full rounded-xl object-cover">
+                    <img :src="confirming.previewUrl" alt="" class="mb-4 max-h-64 w-full rounded-xl object-cover">
                 </template>
 
                 <div class="flex items-center gap-3">
-                    <span class="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-green-500/20 text-base text-green-400">✓</span>
+                    <span class="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-green-500/20 text-lg text-green-400">✓</span>
                     <div class="min-w-0">
-                        <p class="text-sm font-semibold text-white">Receipt saved on this phone</p>
-                        <p class="truncate font-mono text-xs text-white/50" x-text="confirming && confirming.label"></p>
+                        <p class="text-base font-semibold text-white">Receipt saved on this phone</p>
+                        <p class="truncate font-mono text-sm text-white/60" x-text="confirming && confirming.label"></p>
                     </div>
                 </div>
 
-                <label for="confirm-note" class="mt-4 block text-xs font-medium text-white/50">Note (optional)</label>
-                <textarea id="confirm-note" x-model="noteText" rows="2" maxlength="200"
+                <label for="confirm-note" class="mt-5 block text-sm font-medium text-white/60">Note (optional)</label>
+                <textarea id="confirm-note" x-model="noteText" rows="3" maxlength="200"
                           placeholder="e.g. fuel, client lunch, office supplies"
-                          class="mt-1 w-full resize-none rounded-xl border-0 bg-white/10 px-3 py-2.5 text-sm text-white placeholder:text-white/30 focus:ring-2 focus:ring-indigo-500"></textarea>
+                          class="mt-1.5 w-full resize-none rounded-xl border-0 bg-white/10 px-3.5 py-3 text-base text-white placeholder:text-white/30 focus:ring-2 focus:ring-indigo-500"></textarea>
 
-                <button type="button" class="control control-primary mt-4 w-full" @click="continueScanning()">
-                    Scan next receipt
+                <template x-if="confirmError">
+                    <p class="mt-3 rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-200">
+                        <span x-text="confirmError"></span>
+                        <a href="{{ url_for('scan_diagnostics') }}" @click.prevent="ScanRouter.go('diagnostics')" class="ml-1 whitespace-nowrap underline">Diagnostics</a>
+                    </p>
+                </template>
+
+                <button type="button" class="control control-primary mt-4 w-full disabled:opacity-60"
+                        @click="continueScanning()" :disabled="submitting">
+                    <span x-text="submitting ? 'Saving…' : 'Submit receipt'"></span>
                 </button>
                 <button type="button" class="mt-2 w-full py-1 text-center text-xs text-white/40 underline"
                         @click="discardConfirming()">
@@ -321,9 +322,14 @@ function scannerApp() {
         capturing: false,
         flash: false,
         confirming: null,
+        submitting: false,
+        confirmError: null,
         noteText: '',
         foreignCode: false,
-        pending: 0,
+        // null means storage did not answer, which is not the same as zero - see the
+        // note on status() in pwa.js.
+        pending: null,
+        storageOk: true,
         syncing: false,
         online: navigator.onLine !== false,
         signOutMessage: null,
@@ -331,13 +337,39 @@ function scannerApp() {
         activating: false,
         showManual: false,
         manualToken: '',
+        islandExpanded: false,
+        recentEvents: [],
+        _islandTimer: null,
+        // Whether this view is the one on screen. Owned by ScanRouter - see setActive().
+        active: false,
+        // The promise for the one and only camera open this view performs.
+        _camera: null,
+        _releaseTimer: null,
+        // How long the scan view can sit unwatched before the camera is handed back to
+        // the OS. Long enough to cover glancing at history and returning, short enough
+        // that leaving the app parked on another view does not hold the camera - and
+        // its indicator light - open indefinitely.
+        cameraIdleReleaseMs: 45000,
+        isStandalone: window.navigator.standalone === true
+            || window.matchMedia('(display-mode: standalone)').matches,
 
+        /*
+         * Nothing on this screen is allowed to queue in front of the camera.
+         *
+         * This used to read `await this.refresh(); await this.claimTokenFromUrl();`
+         * before it so much as constructed the scanner - so the viewfinder stayed black
+         * behind an IndexedDB round trip and, when the launcher icon carried an
+         * activation token, behind a network POST with a 45-second budget. On a cold
+         * launch on a bad connection that is most of a minute of black screen while the
+         * camera was, in fact, already open and streaming: the head script had it ready
+         * the whole time and nothing had picked it up.
+         *
+         * The camera is what someone is looking at, so it goes first and the rest -
+         * storage, session, activation - catches up around it. None of them are things
+         * the viewfinder needs, and handleResult already copes with a scan arriving
+         * before the session has loaded by ignoring it.
+         */
         async boot() {
-            PWA.start();
-            PWA.onChange(() => this.refresh());
-            await this.refresh();
-            await this.claimTokenFromUrl();
-
             this.cameraError = null;
             this.scanner = Scanner.create(this.$refs.video, {
                 onResult: (text) => this.handleResult(text),
@@ -349,7 +381,78 @@ function scannerApp() {
                 },
             });
 
-            if (window.__cameraNeedsGate) {
+            // Coming back from a call, a lock screen or another app frequently means
+            // coming back to a camera the OS has taken - see Scanner.revive().
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible' && this.active) this.reviveCamera();
+            });
+
+            ScanRouter.watch('scan', (active) => this.setActive(active));
+
+            PWA.start();
+            PWA.onChange(() => this.refresh());
+            await this.refresh();
+            await this.claimTokenFromUrl();
+            await this._camera;
+        },
+
+        /*
+         * Entering and leaving the scan view, without ever losing the camera.
+         *
+         * The stream is not torn down on the way out - that is the whole reason these
+         * three screens share a document - but the decode loop is stopped dead, since
+         * ZXing on every frame is the app's largest ongoing cost and nothing is looking
+         * at the viewfinder.
+         *
+         * Holding an open camera indefinitely while someone reads their history is its
+         * own problem though: it is a lit privacy indicator and a real battery draw for
+         * a screen that is not using it. So a long absence releases it, and coming back
+         * reopens it through the same path a backgrounded phone already uses. Within
+         * one document that reopen is silent - the permission was granted to this
+         * document and it still holds it - which is exactly what a full navigation
+         * could not promise.
+         */
+        setActive(active) {
+            this.active = active;
+            clearTimeout(this._releaseTimer);
+
+            if (!active) {
+                if (this.scanner) this.scanner.pause();
+                this._releaseTimer = setTimeout(() => {
+                    if (!this.active && this.scanner) this.scanner.release();
+                }, this.cameraIdleReleaseMs);
+                return;
+            }
+
+            // First entry: the camera has not been opened yet. Later entries: it has,
+            // and only needs waking.
+            if (!this._camera) this._camera = this.startCamera();
+            else this.resumeCamera();
+        },
+
+        async resumeCamera() {
+            await this.reviveCamera();
+            // Not while the confirmation sheet is up: it paused the scanner on purpose,
+            // so that the receipt still sitting in frame is not read a second time.
+            if (this.scanner && !this.confirming) this.scanner.resume();
+        },
+
+        async reviveCamera() {
+            if (!this.scanner || this.cameraGate) return;
+            try {
+                if (await this.scanner.revive()) {
+                    this.cameraError = null;
+                    this.torchAvailable = this.scanner.torchAvailable;
+                    this.torchOn = false;   // The new track starts with its light off.
+                }
+            } catch (e) {
+                this.cameraError = (e && e.message) || 'The camera stopped. Reopen the app.';
+            }
+        },
+
+        async startCamera() {
+            // Resolved, not read: see the note on __cameraNeedsGate in <head>.
+            if (await window.__cameraNeedsGate) {
                 // Permission has never been decided and the platform told us so in
                 // advance. Wait for the tap in the gate pane instead of surprising
                 // whoever just opened the icon - see enableCamera().
@@ -361,6 +464,9 @@ function scannerApp() {
 
         async openCamera() {
             this.cameraGate = false;
+            // A fresh attempt clears the last failure; leaving it up behind a working
+            // viewfinder is how "Try again" looked like it had done nothing.
+            this.cameraError = null;
             try {
                 await this.scanner.start();
                 this.torchAvailable = this.scanner.torchAvailable;
@@ -378,10 +484,15 @@ function scannerApp() {
             }
         },
 
-        /* The tap that is allowed to open the OS permission dialog. */
+        /*
+         * The tap that is allowed to open the OS permission dialog, and equally the
+         * "Try again" on a camera that failed. Both mean the same thing: forget
+         * whatever stream or refusal is cached and ask the platform again from scratch.
+         */
         async enableCamera() {
             window.__cameraPromise = null;
-            await this.openCamera();
+            this._camera = this.openCamera();
+            await this._camera;
         },
 
         /*
@@ -414,8 +525,12 @@ function scannerApp() {
             }
 
             // Cleaned either way, so a reload does not retry a token that is spent and
-            // the address bar does not carry a credential around.
-            history.replaceState({}, '', '{{ url_for("scan_home") }}');
+            // the address bar does not carry a credential around. Through the router
+            // rather than history.replaceState directly: a bare replaceState blanks the
+            // {view} the router stamped on this entry, and replacing rather than pushing
+            // is the point - a back button that returns to a spent credential is not a
+            // history entry anyone wants.
+            ScanRouter.go('scan', { replace: true, keepScroll: true });
         },
 
         async refresh() {
@@ -424,7 +539,9 @@ function scannerApp() {
             this.pending = status.pending;
             this.syncing = status.syncing;
             this.online = status.online;
+            this.storageOk = status.storageOk;
             this.signOutMessage = status.signOutReason ? status.signOutReason.message : null;
+            this.recentEvents = status.recentEvents;
         },
 
         /*
@@ -471,25 +588,50 @@ function scannerApp() {
             if (this.scanner) this.scanner.pause();
             this.noteText = '';
             this.confirming = item;
+            this.confirmError = null;
             this.struggling = false;
             if (navigator.vibrate) navigator.vibrate(60);
             this.flash = true;
             setTimeout(() => { this.flash = false; }, 500);
         },
 
+        /*
+         * Guarded against two failure modes that used to leave the sheet stuck open
+         * forever with a button that looked dead: a rejection from PWA.queueScan (rare,
+         * but real - see getDB's WebKit note in pwa.js) previously propagated out of
+         * this handler uncaught, so dismissConfirm() never ran and the scanner stayed
+         * paused. `submitting` additionally stops a slow save from being fired twice by
+         * an impatient second tap, which used to be able to queue the same receipt
+         * again under a second uuid.
+         */
         async continueScanning() {
             const item = this.confirming;
-            if (!item) return;
+            if (!item || this.submitting) return;
+            this.submitting = true;
+            this.confirmError = null;
             const note = this.noteText.trim();
 
-            if (item.kind === 'photo') {
-                await PWA.queueScan({ photo: item.blob, description: note || null, location: PWA.currentLocation() });
-            } else {
-                await PWA.queueScan({ receipturl: item.receipt.raw, description: note || null, location: PWA.currentLocation() });
-            }
+            try {
+                if (item.kind === 'photo') {
+                    await PWA.queueScan({ photo: item.blob, description: note || null, location: PWA.currentLocation() });
+                } else {
+                    await PWA.queueScan({ receipturl: item.receipt.raw, description: note || null, location: PWA.currentLocation() });
+                }
 
-            this.dismissConfirm();
-            await this.refresh();
+                this.dismissConfirm();
+                await this.refresh();
+            } catch (e) {
+                // Clears the short back-off getDB() applies after a failure, so that
+                // tapping the button again is a real retry - which now includes
+                // rebuilding a database whose stores went missing - rather than a
+                // second helping of the same cached rejection.
+                PWA.resetStorage();
+                this.confirmError = 'Could not save this receipt on the phone. '
+                    + ((e && e.message) || 'Unknown error.') + ' Tap Submit again to retry.';
+                await this.refresh();
+            } finally {
+                this.submitting = false;
+            }
         },
 
         /* A mis-scan - the wrong receipt, someone else's - without a way back out of
@@ -502,6 +644,7 @@ function scannerApp() {
             if (this.confirming && this.confirming.previewUrl) URL.revokeObjectURL(this.confirming.previewUrl);
             this.confirming = null;
             this.noteText = '';
+            this.confirmError = null;
             if (this.scanner) this.scanner.resume();
         },
 
@@ -569,7 +712,10 @@ function scannerApp() {
             if (token) this.activate(token);
         },
 
+        // Storage outranks everything below it. "Synced" while the outbox cannot be
+        // read is the app claiming to have delivered receipts it cannot even count.
         get dotClass() {
+            if (!this.storageOk) return 'is-offline';
             if (!this.online) return 'is-offline';
             if (this.syncing) return 'is-syncing';
             if (this.pending > 0) return 'is-pending';
@@ -577,12 +723,31 @@ function scannerApp() {
         },
 
         get syncLabel() {
+            if (!this.storageOk) return 'Storage problem';
             if (!this.online) return this.pending ? `Offline · ${this.pending} waiting` : 'Offline';
             if (this.syncing) return 'Syncing…';
             if (this.pending > 0) return `${this.pending} waiting`;
             return 'Synced';
         },
+
+        /* Tapping the pill again, or six seconds of nobody touching it, closes it -
+           this is a notification feed to glance at, not a screen to leave open. */
+        toggleIsland() {
+            this.islandExpanded = !this.islandExpanded;
+            clearTimeout(this._islandTimer);
+            if (this.islandExpanded) {
+                this._islandTimer = setTimeout(() => { this.islandExpanded = false; }, 6000);
+            }
+        },
+
+        eventWhen(at) {
+            const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+            if (seconds < 5) return 'just now';
+            if (seconds < 60) return `${seconds}s ago`;
+            const minutes = Math.round(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            return `${Math.round(minutes / 60)}h ago`;
+        },
     };
 }
 </script>
-{% endblock %}

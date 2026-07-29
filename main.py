@@ -93,6 +93,9 @@ PENDING_COLUMNS = {
 PENDING_INDEXES = (
     ('ix_submission_next_attempt_at', 'submission', 'next_attempt_at'),
     ('ix_submission_receipt_code', 'submission', 'receipt_code'),
+    # Covers the scanner's own history lookup: WHERE device_id = ? ORDER BY id DESC.
+    # Without it that query is a full table scan of every device's submissions.
+    ('ix_submission_device_id_id', 'submission', 'device_id, id'),
     ('ix_receipt_receipt_date', 'receipt', 'receipt_date'),
     ('ix_receipt_vendor_id', 'receipt', 'vendor_id'),
     ('ix_receipt_vendor_tin', 'receipt', 'vendor_tin'),
@@ -746,7 +749,10 @@ def schedule_retry_or_fail(submission, error):
         print(f"[FetchFailed] Submission {submission.id} failed: {submission.error_message}")
         db.session.commit()
 
-        payload = {"submission_id": submission.id, "status": "failed", "error_message": submission.error_message}
+        payload = {
+            "submission_id": submission.id, "status": "failed",
+            "error_message": submission.error_message, "device_id": submission.device_id,
+        }
         dispatch_event('submission.failed', payload, get_instance_config())
         return
 
@@ -764,6 +770,7 @@ def schedule_retry_or_fail(submission, error):
         "submission_id": submission.id, "status": submission.status,
         "error_message": submission.error_message,
         "next_attempt_at": submission.next_attempt_at.isoformat(),
+        "device_id": submission.device_id,
     }
     dispatch_event('submission.retry_scheduled', payload, get_instance_config())
 
@@ -1059,7 +1066,10 @@ def _register_duplicate(submission, verification_code, config):
     submission.error_message = f"Duplicate of submission ID {existing.submission_id}"
     db.session.commit()
 
-    payload = {"submission_id": submission.id, "status": "duplicate", "error_message": submission.error_message}
+    payload = {
+        "submission_id": submission.id, "status": "duplicate",
+        "error_message": submission.error_message, "device_id": submission.device_id,
+    }
     dispatch_event('submission.duplicate', payload, config)
     return True
 
@@ -1078,6 +1088,7 @@ def _complete_submission(submission, receipt, config):
         "processed_at": receipt.processed_at.isoformat(),
         "data": receipt_to_dict(receipt),
         "stats": calculate_dashboard_stats(),
+        "device_id": submission.device_id,
     }
     dispatch_event('submission.processed', payload, config)
     print(f"[TaskSuccess] Submission {submission.id} completed.")
@@ -1157,7 +1168,10 @@ def _fail_submission(submission_id, message, reason=None):
     submission.claimed_at = None
     db.session.commit()
 
-    payload = {"submission_id": submission_id, "status": "failed", "error_message": message}
+    payload = {
+        "submission_id": submission_id, "status": "failed",
+        "error_message": message, "device_id": submission.device_id,
+    }
     dispatch_event('submission.failed', payload, get_instance_config())
 
 # --- WEB ROUTES & AUTH ---
@@ -1781,7 +1795,7 @@ def requeue_submission(submission_id):
         'id': submission.id, 'submission_id': submission.id, 'status': submission.status,
         'received_at': submission.received_at.isoformat(), 'input_type': submission.input_type,
         'input_data': submission.input_data, 'description': submission.description,
-        'location': submission.location,
+        'location': submission.location, 'device_id': submission.device_id,
         'device_name': submission.device.name if submission.device else 'Unknown Device',
     }, get_instance_config())
 
@@ -2197,20 +2211,33 @@ def delete_device(device_id):
 SCAN_HISTORY_PAGE_SIZE = 50
 
 
+# All three scan routes render the same document.
+#
+# The field app is one page: which of Scan, History and Diagnostics is showing is
+# decided in the browser from the URL, by static/js/router.js, and moving between them
+# never reloads. The routes stay because the URLs are real - a deep link, a bookmark, a
+# refresh and the back button all still work exactly as they did when these were three
+# templates - but serving a different document per route would defeat the point.
+#
+# What that buys is in router.js; the headline is that a navigation destroys the camera,
+# and on WebKit getting it back costs the user a permission prompt every single time.
+SCAN_SHELL = 'scan/shell.html'
+
+
 @app.route('/scan/')
 def scan_home():
     """The scanner. This is the PWA's start_url and the whole point of the app."""
-    return render_template('scan/scanner.html')
+    return render_template(SCAN_SHELL)
 
 
 @app.route('/scan/history')
 def scan_history():
-    return render_template('scan/history.html')
+    return render_template(SCAN_SHELL)
 
 
 @app.route('/scan/diagnostics')
 def scan_diagnostics():
-    return render_template('scan/diagnostics.html')
+    return render_template(SCAN_SHELL)
 
 
 @app.route('/scan/a/<token>')
@@ -2418,18 +2445,60 @@ def scan_api_sync_photo():
 @app.route('/scan/api/submissions')
 @device_required
 def scan_api_submissions():
-    """This device's own history, for the phone to cache and read back offline."""
+    """
+    This device's own history, for the phone to cache and read back offline.
+
+    Two cursors, two purposes: `since` catches up on anything new (what the regular
+    poll/boot sync asks for), `before_id` pages backwards into older history (what the
+    history screen's infinite scroll asks for). Ordered by id rather than received_at -
+    equivalent for this single-writer-per-row app, but an integer PK range is what
+    the covering index and the before_id cursor are both built on.
+
+    `q`, given, searches vendor, receipt code and line items - still scoped to this
+    device, still paginated, so a match past the requested page simply is not returned
+    yet, same as any other row.
+    """
     query = Submission.query.options(
-        joinedload(Submission.receipt), joinedload(Submission.device)
+        # All three chains load through the same Submission.receipt hop, so it must use
+        # one consistent strategy - mixing joinedload and selectinload on the same path
+        # is a SQLAlchemy error, not just wasteful.
+        selectinload(Submission.receipt).selectinload(Receipt.items),
+        selectinload(Submission.receipt).selectinload(Receipt.tax_lines),
+        selectinload(Submission.receipt).joinedload(Receipt.vendor),
+        joinedload(Submission.device),
     ).filter(Submission.device_id == g.device.id)
 
     since = _parse_captured_at(request.args.get('since'))
     if since is not None:
         query = query.filter(Submission.received_at >= since)
 
-    submissions = query.order_by(Submission.received_at.desc()).limit(SCAN_HISTORY_PAGE_SIZE).all()
+    before_id = request.args.get('before_id', type=int)
+    if before_id is not None:
+        query = query.filter(Submission.id < before_id)
+
+    q = (request.args.get('q') or '').strip()
+    if q:
+        like = f'%{q}%'
+        query = query.outerjoin(Submission.receipt).outerjoin(Receipt.items).filter(
+            db.or_(
+                Submission.receipt_code.ilike(like),
+                Submission.description.ilike(like),
+                Receipt.vendor_name.ilike(like),
+                Receipt.vendor_tin.ilike(like),
+                ReceiptItem.description.ilike(like),
+            )
+        ).distinct()
+
+    limit = request.args.get('limit', type=int) or SCAN_HISTORY_PAGE_SIZE
+    limit = max(1, min(limit, SCAN_HISTORY_PAGE_SIZE))
+
+    rows = query.order_by(Submission.id.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
     return jsonify({
-        'submissions': prepare_submissions_for_frontend(submissions, detailed=False),
+        'submissions': prepare_submissions_for_frontend(rows, detailed=False),
+        'has_more': has_more,
         'server_time': datetime.utcnow().isoformat(),
     })
 
@@ -2442,6 +2511,59 @@ def scan_api_retry(submission_id):
     if submission is None or submission.device_id != g.device.id:
         return jsonify({'error': 'No such submission.'}), 404
     return requeue_submission(submission_id)
+
+
+def _sse_line_for_device(raw, device_id):
+    """
+    Whether one raw line off the announcer belongs on this device's stream.
+
+    A pure function on purpose, kept apart from the generator below: it is the one
+    thing scan_api_stream must never get wrong (another device's events leaking
+    across), and it needs to be testable without also standing up the announcer's
+    actual blocking queue.
+
+    Returns the line to forward, or None to drop it. Keep-alive comment lines forward
+    unconditionally - they carry no device, and dropping them would starve every
+    device's connection of the thing that keeps it from timing out.
+    """
+    if raw.startswith(': '):
+        return raw
+    try:
+        body = json.loads(raw[len('data: '):])
+    except (ValueError, IndexError):
+        return None
+    if (body.get('data') or {}).get('device_id') != device_id:
+        return None
+    return raw
+
+
+@app.route('/scan/api/stream')
+@device_required
+def scan_api_stream():
+    """
+    Pushes this device's own submission events as they happen - queued, processing,
+    processed, failed, duplicate, retry_scheduled - so the app can update a receipt's
+    status without waiting for the next poll.
+
+    Reuses the same announcer the admin dashboard's /stream runs on, which broadcasts
+    to every listener with no filtering of its own; _sse_line_for_device is what keeps
+    a device to its own events. Not built on EventSource, deliberately: device_required
+    reads the session from an Authorization header (see its own docstring on why -
+    never a cookie), and EventSource cannot set one. The client instead reads this
+    with fetch() + a stream reader, sending the same header every other /scan/api/*
+    call already does.
+    """
+    device_id = g.device.id   # Captured before the generator - request context is not
+                               # guaranteed to still be meaningful once the response is
+                               # being streamed out, so nothing below touches g again.
+
+    def event_stream():
+        for raw in announcer.listen():
+            line = _sse_line_for_device(raw, device_id)
+            if line is not None:
+                yield line
+
+    return app.response_class(event_stream(), mimetype='text/event-stream')
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
@@ -2510,7 +2632,8 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         "received_at": new_submission.received_at.isoformat(),
         "input_type": new_submission.input_type,
         "input_data": frontend_input_data, # Send the public URL to the frontend
-        "description": new_submission.description, "location": new_submission.location
+        "description": new_submission.description, "location": new_submission.location,
+        "device_id": device.id,
     }
     dispatch_event('submission.queued', payload, get_instance_config())
     return new_submission, True
@@ -2587,6 +2710,9 @@ def run_tasks():
 
     processed_jobs = []
     tra_fetches = 0
+    # Read once and reused for every job claimed this tick, rather than a query per
+    # claim - it does not change mid-run.
+    config = get_instance_config()
     # Process due jobs, up to this tick's budget. The loop is bounded by attempts, not
     # by completions, so contention with another runner can never spin it forever.
     for _ in range(MAX_JOBS_PER_RUN * 2):
@@ -2617,6 +2743,12 @@ def run_tasks():
             continue
 
         db.session.refresh(job)
+
+        # The one place a submission visibly starts being worked on - without this,
+        # a receipt sits on "Checking..." with no event ever having said so.
+        dispatch_event('submission.processing', {
+            'submission_id': job.id, 'status': 'processing', 'device_id': job.device_id,
+        }, config)
 
         # Space out portal requests; TRA throttles bursts from a single IP.
         if job.input_type == 'url':

@@ -29,6 +29,7 @@
     'use strict';
 
     var ZXING_WASM_URL = '/static/js/vendor/zxing_reader.wasm';
+    var DECODER_WORKER_URL = '/static/js/decoder-worker.js';
 
     // Mirrors _RECEIPT_URL_RE in utils/tra.py. The two must agree: this is what stops
     // an unusable scan from being queued now and failing silently hours later.
@@ -127,13 +128,117 @@
         maxNumberOfSymbols: 1,
     };
 
+    /*
+     * ZXing in a worker, where it belongs.
+     *
+     * See decoder-worker.js for why: on a phone with no native detector this decode is
+     * the whole per-frame cost, and on the main thread it starves the UI and - less
+     * obviously but far worse - IndexedDB's completion callbacks, which is what turned
+     * a working scanner into one that could not save what it had just read.
+     *
+     * The worker is optional in the strict sense: if it cannot be constructed, or its
+     * own load of the wasm fails, everything falls back to decoding in this thread,
+     * exactly as before. Slow beats broken.
+     */
+    var worker = null;
+    var workerBroken = false;
+    var workerSeq = 0;
+    var workerPending = {};
+
+    function getWorker() {
+        if (worker || workerBroken) return worker;
+        try {
+            worker = new global.Worker(DECODER_WORKER_URL);
+        } catch (e) {
+            workerBroken = true;
+            return null;
+        }
+        worker.onmessage = function (event) {
+            var message = event.data || {};
+            var waiting = workerPending[message.id];
+            if (!waiting) return;
+            delete workerPending[message.id];
+            if (message.error) waiting.reject(new Error(message.error));
+            else waiting.resolve(message.ready ? true : message.text);
+        };
+        // A worker that dies takes every request in flight with it. Reject them rather
+        // than leaving their callers awaiting a reply that is never coming, and stop
+        // using it - the fallback path below is what keeps the scanner alive.
+        worker.onerror = function () {
+            workerBroken = true;
+            var dead = worker;
+            worker = null;
+            try { dead.terminate(); } catch (e) { /* already gone */ }
+            Object.keys(workerPending).forEach(function (id) {
+                workerPending[id].reject(new Error('The QR reader stopped unexpectedly.'));
+                delete workerPending[id];
+            });
+        };
+        return worker;
+    }
+
+    function askWorker(message, transfer) {
+        var active = getWorker();
+        if (!active) return null;
+        message.id = ++workerSeq;
+        return new Promise(function (resolve, reject) {
+            workerPending[message.id] = { resolve: resolve, reject: reject };
+            try {
+                active.postMessage(message, transfer || []);
+            } catch (e) {
+                delete workerPending[message.id];
+                reject(e);
+            }
+        });
+    }
+
     async function decodeWithZXing(canvas) {
-        var zxing = await getZXing();
         var ctx = canvas.getContext('2d', { willReadFrequently: true });
         var image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        // Transferred, not copied: at 1920x1080 the pixel buffer is eight megabytes, and
+        // structured-cloning that ten times a second is its own performance problem.
+        // getImageData hands us a fresh buffer each call, so giving it away is safe.
+        var viaWorker = askWorker(
+            { buffer: image.data.buffer, width: image.width, height: image.height, options: ZXING_OPTIONS },
+            [image.data.buffer]
+        );
+
+        if (viaWorker) {
+            try {
+                return await viaWorker;
+            } catch (e) {
+                // A worker that decoded and failed is a real answer; only a worker that
+                // died is worth retrying here. Falling back on every decode error would
+                // quietly run the expensive path twice per frame on the main thread -
+                // the exact thing this indirection exists to avoid.
+                if (!workerBroken) throw e;
+                // Its pixels went with it: the buffer above was transferred, so it is
+                // detached now and has to be read off the canvas again.
+                image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        var zxing = await getZXing();
         var results = await zxing.readBarcodesFromImageData(image, ZXING_OPTIONS);
         if (results && results.length && results[0].text) return results[0].text;
         return null;
+    }
+
+    /*
+     * Compiles the wasm before the first receipt needs it, wherever it is going to run.
+     * Resolves once something can decode; rejects with why nothing can.
+     */
+    function warmDecoder() {
+        var viaWorker = askWorker({ type: 'warm' });
+        if (viaWorker) {
+            // The worker is preferred but not required. If it cannot load the wasm,
+            // this thread might still manage it.
+            return viaWorker.catch(function (error) {
+                return getZXing().then(function () { return true; }, function () { throw error; });
+            });
+        }
+        return getZXing().then(function () { return true; });
     }
 
     async function decodeWithNative(canvas) {
@@ -232,14 +337,44 @@
     }
 
     /*
+     * Is this stream still something a camera is feeding?
+     *
+     * A MediaStream whose tracks have ended looks completely normal - it is still an
+     * object, it is still attached to the <video>, and no event you were listening for
+     * necessarily fired. It just never produces another frame.
+     */
+    function streamIsLive(stream) {
+        if (!stream) return false;
+        return stream.getVideoTracks().some(function (t) { return t.readyState === 'live'; });
+    }
+
+    /*
      * Picks up the stream the shell started before this script parsed.
      *
      * The permission prompt and the camera warm-up are the slowest part of a cold
      * launch, so the page fires them in an inline script in <head> and we collect the
      * result here. Falls back to starting one if that did not happen.
+     *
+     * The cached promise is only reused while the stream behind it is actually live.
+     * It used to be returned unconditionally, which meant that once the platform had
+     * taken the camera back - see revive() - every subsequent start() cheerfully
+     * attached the same dead stream and showed a black viewfinder with no error at all.
      */
-    function acquireStream() {
-        if (global.__cameraPromise) return global.__cameraPromise;
+    async function acquireStream() {
+        var cached = global.__cameraPromise;
+        if (cached) {
+            var existing;
+            try {
+                existing = await cached;
+            } catch (e) {
+                // Cleared so a later attempt is a real one; a rejection cached here
+                // forever outlives the reason for it, and permission granted from the
+                // gate a second later could never take effect.
+                global.__cameraPromise = null;
+                throw e;
+            }
+            if (streamIsLive(existing)) return existing;
+        }
         global.__cameraPromise = requestCamera();
         return global.__cameraPromise;
     }
@@ -389,7 +524,7 @@
                 // Warmed here rather than on first use: compiling the module on the
                 // frame that needs it shows up as a visible stall. A failure surfaces
                 // now, at start, instead of hiding inside frames that look empty.
-                getZXing().then(function () { engineOk = true; }, function (e) {
+                warmDecoder().then(function () { engineOk = true; }, function (e) {
                     if (!hasNative && !engineFailure) {
                         engineFailure = e;
                         report('onEngineFailure', e);
@@ -412,6 +547,29 @@
 
             pause() { running = false; },
 
+            /*
+             * Hands the camera back to the OS without forgetting there was one.
+             *
+             * stop() is for a scanner that is finished with; this is for one nobody is
+             * looking at. Now that Scan, History and Diagnostics share a document, the
+             * scan view is not destroyed when the user walks away from it - which is
+             * the entire point, because destroying it is what cost a permission prompt
+             * on the way back - but an open camera behind a history list is a lit
+             * indicator light and a real battery draw for a sensor feeding nothing.
+             *
+             * The tracks stop; `stream` is deliberately kept, dead, so revive() can
+             * tell "released, reopen it" from "never started". Reopening inside the
+             * same document does not re-prompt: the grant belongs to the document and
+             * the document is still here.
+             */
+            release() {
+                running = false;
+                if (!stream) return;
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                // The shared promise is holding a stream that is now dead.
+                global.__cameraPromise = null;
+            },
+
             resume() {
                 if (running || !stream) return;
                 running = true;
@@ -419,6 +577,35 @@
                 attempts = 0;
                 struggling = false;
                 pump();
+            },
+
+            /*
+             * Reopens the camera when the platform has quietly taken it away.
+             *
+             * A phone call, the lock screen, another app wanting the camera, or simply
+             * enough time in the background all end the video track - and nothing tells
+             * the page. What the user comes back to is a viewfinder frozen on its last
+             * frame, or black, with every control still enabled and no error anywhere.
+             * Scanning silently does nothing from then on.
+             *
+             * That is the state that teaches a field user to reload the page, which on
+             * WebKit means answering the camera permission prompt over again. Reopening
+             * it here is what keeps that from ever being the fix.
+             */
+            async revive() {
+                if (!stream || streamIsLive(stream)) return false;
+
+                global.__cameraPromise = null;   // Do not hand back the dead one.
+                stream = await acquireStream();
+                video.srcObject = stream;
+                try {
+                    await video.play();
+                } catch (e) { /* a tap resumes it; the stream itself is fine */ }
+
+                track = stream.getVideoTracks()[0] || null;
+                if (track) await applyFocusHints(track);
+                report('onStarted', { torch: track ? hasTorch(track) : false, native: hasNative });
+                return true;
             },
 
             get torchAvailable() { return track ? hasTorch(track) : false; },
@@ -540,6 +727,7 @@
         acquireStream: acquireStream,
         getBarcodeDetector: getBarcodeDetector,
         getZXing: getZXing,
+        warmDecoder: warmDecoder,
         toJpeg: toJpeg,
         RECEIPT_URL_RE: RECEIPT_URL_RE,
         CAMERA_CONSTRAINTS: CAMERA_CONSTRAINTS,

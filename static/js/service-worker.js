@@ -9,21 +9,37 @@
  * Bump CACHE_VERSION on any change to APP_SHELL or to the files it names. Old caches
  * are deleted on activate, so the bump is the whole upgrade mechanism.
  */
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v4';
 const PRECACHE = `scan-precache-${CACHE_VERSION}`;
 const RUNTIME = `scan-runtime-${CACHE_VERSION}`;
 
 // Everything needed to open the app with the network switched off. If a URL here is
 // wrong the install still succeeds - see precacheShell - but the app is degraded, so
 // tests/test_pwa_assets.py checks every entry resolves.
+// The one document the whole field app is served from. /scan/, /scan/history and
+// /scan/diagnostics all render it byte for byte - the view is chosen in the browser
+// from the URL - so precaching it three times under three keys would only create three
+// copies that can drift apart. They did drift: an app always entered at /scan/ never
+// revalidated the other two, so a deep link to History could serve a shell from a
+// deploy months old.
+const SHELL_DOCUMENT = '/scan/';
+
+// Entries stay string literals, deliberately - no constants, no template strings, no
+// computed values. The diagnostics screen reads this array out of this file's own
+// source with a regex over quoted strings so that it can never disagree with the
+// worker about what should be on the phone. An entry written as an identifier is not
+// missing from the app, it is missing from the check that would have told anyone.
 const APP_SHELL = [
     '/scan/',
-    '/scan/history',
-    '/scan/diagnostics',
     '/scan/manifest.json',
     '/static/css/scan.css',
     '/static/js/pwa.js',
+    '/static/js/router.js',
     '/static/js/scanner.js',
+    // Fetched by the page as a Worker rather than a <script>, but it is on the critical
+    // path for scanning on any phone without a native barcode reader, so it has to be
+    // here or the first offline scan on such a phone falls back to the main thread.
+    '/static/js/decoder-worker.js',
     '/static/js/vendor/tailwind.min.js',
     '/static/js/vendor/alpine.min.js',
     '/static/js/vendor/idb.umd.min.js',
@@ -34,8 +50,9 @@ const APP_SHELL = [
     '/static/icons/icon-maskable-512.png',
 ];
 
-// Navigations we will serve from cache. Anything else under /scan/ - an activation
-// link, say - goes to the network and falls back to the scanner shell.
+// Navigations we will serve from the cached shell. Anything else under /scan/ - an
+// activation link, say - goes to the network, because it carries a credential the
+// server has to see, and falls back to the shell only if that fails.
 const CACHEABLE_NAVIGATIONS = new Set([
     '/scan/',
     '/scan/history',
@@ -97,26 +114,24 @@ self.addEventListener('message', (event) => {
     }
 });
 
-function shellFallback(pathname) {
-    // History and diagnostics degrade to the scanner rather than to an error page -
-    // scanning is what the app is for, and it is the one screen that works with
-    // nothing cached but itself.
-    if (pathname.startsWith('/scan/history')) return '/scan/history';
-    if (pathname.startsWith('/scan/diagnostics')) return '/scan/diagnostics';
-    return '/scan/';
-}
-
 /*
  * Navigations: cached shell first, fresh copy in the background.
  *
  * The user gets a screen immediately and the next launch gets the update. The network
  * leg is bounded because a captive portal will otherwise hold the request open long
  * past the point the person has given up.
+ *
+ * Every /scan/ navigation resolves to the same cached document, whatever path was
+ * asked for, because the router inside it reads the path and opens the right view. So
+ * a deep link to History works with the network switched off without this worker ever
+ * having had to anticipate that someone would follow one.
  */
 async function handleNavigation(request) {
     const url = new URL(request.url);
     const cache = await caches.open(PRECACHE);
-    const cached = await cache.match(url.pathname);
+    const cached = CACHEABLE_NAVIGATIONS.has(url.pathname)
+        ? await cache.match(SHELL_DOCUMENT)
+        : null;
 
     const network = (async () => {
         const controller = new AbortController();
@@ -125,7 +140,7 @@ async function handleNavigation(request) {
             const response = await fetch(request, { signal: controller.signal });
             if (response && response.ok && !response.redirected
                 && CACHEABLE_NAVIGATIONS.has(url.pathname)) {
-                await cache.put(url.pathname, response.clone());
+                await cache.put(SHELL_DOCUMENT, response.clone());
             }
             return response;
         } finally {
@@ -142,7 +157,11 @@ async function handleNavigation(request) {
     try {
         return await network;
     } catch (e) {
-        const fallback = await cache.match(shellFallback(url.pathname));
+        // Anything under /scan/ that could not be reached - including an activation
+        // link on a dead connection - degrades to the app itself rather than an error
+        // page. Scanning is what this is for, and it is the one screen that works with
+        // nothing but the shell.
+        const fallback = await cache.match(SHELL_DOCUMENT);
         if (fallback) return fallback;
         return new Response(
             '<!doctype html><meta charset="utf-8"><title>Offline</title>'
@@ -213,16 +232,68 @@ self.addEventListener('fetch', (event) => {
  * matching note by DB_NAME in pwa.js. It must stay byte-identical to that constant.
  */
 const OUTBOX_DB_NAME = 'taxconsult-pwa-db';
-const OUTBOX_DB_VERSION = 1;
+const OUTBOX_STORES = ['outbox', 'submissions', 'meta'];
 const OUTBOX_MAX_ATTEMPTS = 8;
 const OUTBOX_BATCH_SIZE = 50;
 const OUTBOX_SYNC_TAG = 'outbox-sync';
 
+/*
+ * Opens the outbox database without ever being the thing that defines its shape.
+ *
+ * This used to be `idb.openDB(name, 1)` - no upgrade callback - and that one omission
+ * was enough to brick the app on a phone. An open with a version and no upgrade still
+ * *creates* the database when it does not exist, at that version, with no object
+ * stores in it. The page then opens the same name at the same version, so its own
+ * upgrade never runs, so the stores it needs never appear; every scan afterwards fails
+ * with NotFoundError and no amount of reloading, repairing or reactivating fixes it,
+ * because nothing left will ever trigger an upgrade.
+ *
+ * That race is real: a sync event can fire with no page open at all - that is the
+ * entire point of Background Sync - and storage that the browser has evicted (this
+ * origin is usually not persisted) leaves the database genuinely absent.
+ *
+ * Two changes stop it. The version is omitted, so this attaches to whatever the page
+ * has already created and can never force an upgrade of its own; and the upgrade
+ * callback creates the full schema, so that in the one case where this *does* create
+ * the database - it is genuinely not there - what it creates is correct and usable
+ * rather than an empty shell. Kept in step with createStores in pwa.js by hand.
+ */
+async function openOutboxDB() {
+    importScripts('/static/js/vendor/idb.umd.min.js');
+    const db = await idb.openDB(OUTBOX_DB_NAME, undefined, {
+        upgrade(database) {
+            if (!database.objectStoreNames.contains('outbox')) {
+                const outbox = database.createObjectStore('outbox', { keyPath: 'client_uuid' });
+                outbox.createIndex('by-captured', 'captured_at');
+            }
+            if (!database.objectStoreNames.contains('submissions')) {
+                const subs = database.createObjectStore('submissions', { keyPath: 'id' });
+                subs.createIndex('by-received', 'received_at');
+                subs.createIndex('by-client-uuid', 'client_uuid');
+            }
+            if (!database.objectStoreNames.contains('meta')) {
+                database.createObjectStore('meta', { keyPath: 'key' });
+            }
+        },
+        // The page is upgrading - repairing a schema, most likely. Get out of its way;
+        // holding this connection open is what turns that upgrade into a hang.
+        blocking() { try { db.close(); } catch (e) { /* already gone */ } },
+    });
+
+    // A database left store-less by the old bug above opens fine and fails everything
+    // after. Repairing it needs a version bump, which is the page's job, not this
+    // worker's - so hand it back rather than half-fix it from here.
+    if (OUTBOX_STORES.some((name) => !db.objectStoreNames.contains(name))) {
+        db.close();
+        throw new Error('schema-incomplete');
+    }
+    return db;
+}
+
 async function syncOutboxInBackground() {
     let db;
     try {
-        importScripts('/static/js/vendor/idb.umd.min.js');
-        db = await idb.openDB(OUTBOX_DB_NAME, OUTBOX_DB_VERSION);
+        db = await openOutboxDB();
     } catch (e) {
         // The page's own sync paths will catch this up once one is open again.
         return;

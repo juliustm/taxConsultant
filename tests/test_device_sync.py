@@ -17,7 +17,7 @@ import io
 
 import pytest
 
-from models.user import db, Device, Submission
+from models.user import db, Device, Receipt, ReceiptItem, Submission
 from utils.device_auth import consume_enrolment_token, issue_enrolment_token
 
 
@@ -210,6 +210,60 @@ def test_history_reports_the_uuid_the_phone_minted(phone):
     body = phone.get('/scan/api/submissions').get_json()
 
     assert body['submissions'][0]['client_uuid'] == 'known-uuid'
+
+
+# --- Pagination and search ----------------------------------------------------
+
+def test_before_id_pages_into_older_history_with_no_overlap(phone):
+    for letter in ('a', 'b', 'c'):
+        phone.post('/scan/api/sync', json={'items': [scan(letter, letter.upper() * 3)]})
+
+    first_page = phone.get('/scan/api/submissions?limit=2').get_json()
+    assert [s['client_uuid'] for s in first_page['submissions']] == ['c', 'b']
+    assert first_page['has_more'] is True
+
+    oldest_id_so_far = first_page['submissions'][-1]['id']
+    second_page = phone.get(f'/scan/api/submissions?limit=2&before_id={oldest_id_so_far}').get_json()
+    assert [s['client_uuid'] for s in second_page['submissions']] == ['a']
+    assert second_page['has_more'] is False
+
+
+def test_search_matches_vendor_name_and_item_description(phone):
+    phone.post('/scan/api/sync', json={'items': [scan('coffee', 'COFFEE1')]})
+    phone.post('/scan/api/sync', json={'items': [scan('hardware', 'HARDWR1')]})
+
+    coffee_sub = Submission.query.filter_by(client_uuid='coffee').one()
+    receipt = Receipt(device_id=phone.device.id, submission_id=coffee_sub.id, vendor_name='Java House')
+    receipt.items.append(ReceiptItem(line_number=1, description='Printer Paper'))
+    db.session.add(receipt)
+    db.session.commit()
+
+    by_vendor = phone.get('/scan/api/submissions?q=java').get_json()
+    assert [s['client_uuid'] for s in by_vendor['submissions']] == ['coffee']
+
+    by_item = phone.get('/scan/api/submissions?q=printer').get_json()
+    assert [s['client_uuid'] for s in by_item['submissions']] == ['coffee']
+
+    no_match = phone.get('/scan/api/submissions?q=nonexistent').get_json()
+    assert no_match['submissions'] == []
+
+
+def test_search_stays_scoped_to_this_device(phone):
+    other = Device(name='Someone else')
+    db.session.add(other)
+    db.session.flush()
+    other_sub = Submission(
+        device_id=other.id, input_type='url',
+        input_data='https://verify.tra.go.tz/OTHER_010101', status='completed',
+    )
+    db.session.add(other_sub)
+    db.session.flush()
+    db.session.add(Receipt(device_id=other.id, submission_id=other_sub.id, vendor_name='Java House'))
+    db.session.commit()
+
+    body = phone.get('/scan/api/submissions?q=java').get_json()
+
+    assert body['submissions'] == []
 
 
 def test_a_device_can_retry_its_own_failed_submission(phone):

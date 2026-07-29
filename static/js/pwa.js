@@ -52,17 +52,61 @@
     // Generous for a local database, but it is a deadline rather than an expectation:
     // the case it exists for is an open that never answers at all.
     var DB_OPEN_TIMEOUT_MS = 4000;
+    // Same idea, for a single read/write once the database is already open. getDB()
+    // guards the open; this guards the transaction after it - WebKit's hang is not
+    // only reported on open, and a scan that cannot be confirmed or denied within a
+    // few seconds is one the person holding the phone needs to hear about, not one
+    // that leaves "Saving…" on screen forever.
+    var DB_OP_TIMEOUT_MS = 5000;
+    // How long a failed open suppresses further attempts. Deliberately short: the
+    // failures this guards against are transient (a bfcache restore, a moment of
+    // contention), so the old behaviour - latching storage off for the entire life of
+    // the page and demanding a visit to the diagnostics screen - turned a hiccup into
+    // an app that could not save a receipt again until it was reloaded. Long enough
+    // that a tight loop cannot spend its life waiting on 4-second opens; short enough
+    // that the next thing the user does retries for real.
+    var DB_RETRY_AFTER_MS = 2000;
 
     var dbPromise = null;
-    var dbUnavailable = false;
+    var dbRetryAfter = 0;
+    var dbLastError = null;
     var serverDownUntil = 0;
     var syncing = false;
     var listeners = [];
 
     // ---------------------------------------------------------------- storage
 
+    // Every store this app needs. Named once so both the creator below and the
+    // integrity check in getDB() work from the same list; a store that is missing from
+    // an *existing* database is not a theoretical condition - see repairSchema.
+    var DB_STORES = ['outbox', 'submissions', 'meta'];
+
+    function createStores(db) {
+        if (!db.objectStoreNames.contains('outbox')) {
+            // Keyed on the uuid the phone minted, which is also the server's
+            // idempotency key - so a scan has one identity from the moment it
+            // exists, before it has ever been near a network.
+            var outbox = db.createObjectStore('outbox', { keyPath: 'client_uuid' });
+            outbox.createIndex('by-captured', 'captured_at');
+        }
+        if (!db.objectStoreNames.contains('submissions')) {
+            var subs = db.createObjectStore('submissions', { keyPath: 'id' });
+            subs.createIndex('by-received', 'received_at');
+            subs.createIndex('by-client-uuid', 'client_uuid');
+        }
+        if (!db.objectStoreNames.contains('meta')) {
+            db.createObjectStore('meta', { keyPath: 'key' });
+        }
+    }
+
+    function missingStores(db) {
+        return DB_STORES.filter(function (name) {
+            return !db.objectStoreNames.contains(name);
+        });
+    }
+
     /*
-     * Opens the database, or gives up.
+     * One open attempt, raced against a deadline.
      *
      * indexedDB.open() is not reliably a promise that settles. WebKit has a long
      * standing bug where it fires no event at all - not success, not error, not
@@ -73,22 +117,17 @@
      * That is not a theoretical failure. It stranded activation on "Activating…" with
      * the session already saved and the token already spent.
      *
-     * So the open is raced against a deadline and the result is latched. Callers get a
-     * rejection they can handle instead of a promise that never comes back.
+     * So the open is raced against a deadline; callers get a rejection they can handle
+     * instead of a promise that never comes back.
      */
-    function getDB() {
-        if (dbUnavailable) return Promise.reject(new Error('storage-unavailable'));
-        if (dbPromise) return dbPromise;
-
-        dbPromise = new Promise(function (resolve, reject) {
+    function openWithDeadline(version) {
+        return new Promise(function (resolve, reject) {
             var settled = false;
 
             function fail(error) {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);
-                dbUnavailable = true;
-                dbPromise = null;
                 reject(error);
             }
 
@@ -98,24 +137,8 @@
 
             var opening;
             try {
-                opening = idb.openDB(DB_NAME, DB_VERSION, {
-                    upgrade: function (db) {
-                        if (!db.objectStoreNames.contains('outbox')) {
-                            // Keyed on the uuid the phone minted, which is also the server's
-                            // idempotency key - so a scan has one identity from the moment it
-                            // exists, before it has ever been near a network.
-                            var outbox = db.createObjectStore('outbox', { keyPath: 'client_uuid' });
-                            outbox.createIndex('by-captured', 'captured_at');
-                        }
-                        if (!db.objectStoreNames.contains('submissions')) {
-                            var subs = db.createObjectStore('submissions', { keyPath: 'id' });
-                            subs.createIndex('by-received', 'received_at');
-                            subs.createIndex('by-client-uuid', 'client_uuid');
-                        }
-                        if (!db.objectStoreNames.contains('meta')) {
-                            db.createObjectStore('meta', { keyPath: 'key' });
-                        }
-                    },
+                opening = idb.openDB(DB_NAME, version, {
+                    upgrade: createStores,
                     // Another tab is holding the old version open. Left unhandled this is
                     // the other way an open silently never completes.
                     blocked: function () { fail(new Error('storage-blocked')); },
@@ -141,25 +164,116 @@
                 resolve(db);
             }, fail);
         });
-
-        return dbPromise;
     }
 
-    /* Lets the diagnostics page's repair button try storage again after a failure. */
+    /*
+     * Recreates stores that are missing from a database that already exists.
+     *
+     * An open at DB_VERSION only runs `upgrade` when the stored version is older, so a
+     * database that is already at DB_VERSION but has no object stores in it opens
+     * perfectly happily and then fails every single read and write with NotFoundError -
+     * permanently, because nothing will ever trigger the upgrade that would fix it.
+     *
+     * That state was reachable, and phones are in it now: the service worker used to
+     * open this database with no upgrade callback at all (see its own note), and
+     * whichever of the two got there first on a device whose storage had just been
+     * evicted decided the schema. If the worker won, it created version 1 with nothing
+     * in it and the app could not save a receipt again, on that phone, ever.
+     *
+     * Bumping the version is the only thing that runs an upgrade, so that is what this
+     * does. Existing stores are left alone by createStores, so a database that is
+     * merely missing one of them keeps everything already queued in the others.
+     */
+    async function repairSchema(db) {
+        var version = db.version + 1;
+        try { db.close(); } catch (e) { /* already gone */ }
+        var repaired = await openWithDeadline(version);
+        if (missingStores(repaired).length) {
+            try { repaired.close(); } catch (e) { /* already gone */ }
+            throw new Error('storage-unavailable');
+        }
+        return repaired;
+    }
+
+    /*
+     * The open database, opening it and repairing its schema if need be.
+     *
+     * Failures are remembered only briefly (DB_RETRY_AFTER_MS) rather than latched for
+     * the life of the page, so that the next thing the user does is a real retry.
+     */
+    function getDB() {
+        if (dbPromise) return dbPromise;
+        if (Date.now() < dbRetryAfter) {
+            return Promise.reject(dbLastError || new Error('storage-unavailable'));
+        }
+
+        var attempt = (async function () {
+            var db = await openWithDeadline(DB_VERSION);
+            return missingStores(db).length ? repairSchema(db) : db;
+        })();
+
+        dbPromise = attempt;
+        attempt.then(function () {
+            dbLastError = null;
+        }, function (error) {
+            // Cleared so the next call opens again rather than re-awaiting a rejection.
+            if (dbPromise === attempt) dbPromise = null;
+            dbLastError = error;
+            dbRetryAfter = Date.now() + DB_RETRY_AFTER_MS;
+        });
+
+        return attempt;
+    }
+
+    /* Lets the diagnostics page's repair button try storage again immediately. */
     function resetStorage() {
-        dbUnavailable = false;
         dbPromise = null;
+        dbRetryAfter = 0;
+        dbLastError = null;
+    }
+
+    /*
+     * Races any promise against a deadline, rejecting rather than leaving a caller
+     * awaiting something that may never settle.
+     *
+     * getDB() already does this for the open itself; this covers what comes after -
+     * an individual get/put/getAll can wedge the same way on the same platforms, and
+     * a caller `await`-ing one directly has no way to notice until the browser tab
+     * is killed. Not used to abort the underlying IDB request (IndexedDB has no such
+     * thing); a request left running behind a timed-out caller is harmless since
+     * nothing reads its result.
+     */
+    function withDeadline(promise, ms, message) {
+        return new Promise(function (resolve, reject) {
+            var settled = false;
+            var timer = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                reject(new Error(message));
+            }, ms);
+            promise.then(function (value) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(value);
+            }, function (error) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
     }
 
     async function metaGet(key, fallback) {
         var db = await getDB();
-        var row = await db.get('meta', key);
+        var row = await withDeadline(db.get('meta', key), DB_OP_TIMEOUT_MS, 'Reading local storage timed out.');
         return row ? row.value : fallback;
     }
 
     async function metaSet(key, value) {
         var db = await getDB();
-        await db.put('meta', { key: key, value: value });
+        await withDeadline(db.put('meta', { key: key, value: value }), DB_OP_TIMEOUT_MS, 'Writing to local storage timed out.');
         return value;
     }
 
@@ -310,7 +424,8 @@
         };
 
         var db = await getDB();
-        await db.put('outbox', entry);
+        await withDeadline(db.put('outbox', entry), DB_OP_TIMEOUT_MS,
+            'Saving to this phone is taking too long.');
         emit();
 
         // Fire and forget: a failure here is not this call's problem, the sync loop
@@ -324,17 +439,17 @@
 
     async function outboxAll() {
         var db = await getDB();
-        return db.getAll('outbox');
+        return withDeadline(db.getAll('outbox'), DB_OP_TIMEOUT_MS, 'Reading the outbox timed out.');
     }
 
     async function outboxCount() {
         var db = await getDB();
-        return db.count('outbox');
+        return withDeadline(db.count('outbox'), DB_OP_TIMEOUT_MS, 'Reading the outbox timed out.');
     }
 
     async function discard(clientUuid) {
         var db = await getDB();
-        await db.delete('outbox', clientUuid);
+        await withDeadline(db.delete('outbox', clientUuid), DB_OP_TIMEOUT_MS, 'Discarding this receipt timed out.');
         emit();
     }
 
@@ -503,8 +618,15 @@
     // ---------------------------------------------------------------- history
 
     /*
-     * Pulls this device's submissions and caches them so the history screen reads the
-     * same whether or not there is a network.
+     * Pulls this device's most recent submissions and caches them so the history
+     * screen reads the same whether or not there is a network.
+     *
+     * Upserted rather than wholesale-replaced: this only ever asks for the latest
+     * page, and clearing the store first used to mean the local cache could never
+     * hold more than one page's worth of history - everything paged into it by
+     * loadOlderHistory() was thrown away on the very next ordinary sync. A row that
+     * genuinely no longer exists server-side (there is no such path today) simply
+     * stops being refreshed; it does not need to be actively deleted here.
      */
     async function pullHistory() {
         if (!sessionToken()) return [];
@@ -525,25 +647,78 @@
         var rows = body.submissions || [];
 
         var db = await getDB();
-        // Replaced wholesale rather than merged: the server's list is the truth, and a
-        // row that has disappeared from it should disappear here too.
         var tx = db.transaction('submissions', 'readwrite');
-        await tx.store.clear();
         for (var i = 0; i < rows.length; i++) tx.store.put(rows[i]);
-        await tx.done;
+        await withDeadline(tx.done, DB_OP_TIMEOUT_MS, 'Saving history locally timed out.');
 
         await metaSet('historySyncedAt', Date.now());
         emit();
         return rows;
     }
 
-    async function cachedHistory() {
+    /*
+     * Pages further back into history than what's cached, for the history screen's
+     * infinite scroll. Requests older than `beforeId`, or matching `q` (searches
+     * vendor, receipt code and line items - see /scan/api/submissions), and caches
+     * whatever comes back the same way pullHistory does, so paging through history
+     * once means it is available offline from then on.
+     */
+    async function loadOlderHistory(options) {
+        options = options || {};
+        if (!sessionToken()) return { rows: [], hasMore: false };
+
+        var params = new URLSearchParams();
+        if (options.beforeId != null) params.set('before_id', options.beforeId);
+        if (options.limit != null) params.set('limit', options.limit);
+        if (options.q) params.set('q', options.q);
+
+        var response;
+        try {
+            response = await apiFetch('/scan/api/submissions?' + params.toString());
+        } catch (e) {
+            return { rows: [], hasMore: false };
+        }
+        if (response.status === 401) {
+            await handleAuthFailure(response);
+            return { rows: [], hasMore: false };
+        }
+        if (!response.ok) return { rows: [], hasMore: false };
+
+        var body = await response.json();
+        var rows = body.submissions || [];
+
+        var db = await getDB();
+        var tx = db.transaction('submissions', 'readwrite');
+        for (var i = 0; i < rows.length; i++) tx.store.put(rows[i]);
+        await withDeadline(tx.done, DB_OP_TIMEOUT_MS, 'Saving history locally timed out.');
+
+        emit();
+        return { rows: rows, hasMore: !!body.has_more };
+    }
+
+    /*
+     * Reads back what's cached, newest first, optionally bounded - so a history
+     * screen with thousands of rows cached over time never has to pull all of them
+     * into memory just to show the first page. The `submissions` store's keyPath is
+     * the server's own `id`, which already orders chronologically here (one writer,
+     * one increasing id) and is exactly what the server's own before_id cursor is
+     * built on - so a plain cursor over the primary key is enough, no extra index.
+     */
+    async function cachedHistory(options) {
+        options = options || {};
         try {
             var db = await getDB();
-            var rows = await db.getAll('submissions');
-            return rows.sort(function (a, b) {
-                return (b.received_at || '').localeCompare(a.received_at || '');
-            });
+            var range = options.beforeId != null ? IDBKeyRange.upperBound(options.beforeId, true) : null;
+            var rows = [];
+            var cursor = await withDeadline(
+                db.transaction('submissions').store.openCursor(range, 'prev'),
+                DB_OP_TIMEOUT_MS, 'Reading cached history timed out.'
+            );
+            while (cursor && (!options.limit || rows.length < options.limit)) {
+                rows.push(cursor.value);
+                cursor = await withDeadline(cursor.continue(), DB_OP_TIMEOUT_MS, 'Reading cached history timed out.');
+            }
+            return rows;
         } catch (e) {
             return [];
         }
@@ -614,6 +789,7 @@
             // Anything queued before activation - or left over from the previous session
             // - belongs to this device too, so send it now.
             sync({ force: true }).catch(function () {});
+            startEventStream();
         } catch (e) { /* activated regardless; the app will catch up on next load */ }
 
         return { ok: true, device: body.device };
@@ -781,15 +957,22 @@
      * degrade the numbers rather than break the page that reports them.
      */
     async function status() {
-        var pending = 0;
+        // null, not 0. A storage failure used to leave this at its initial 0, which
+        // every screen then rendered as "nothing waiting, everything has been sent" -
+        // the single most reassuring thing the app can say, displayed at precisely the
+        // moment it cannot account for a receipt at all. Unknown has to look different
+        // from empty.
+        var pending = null;
         var signOutReason = null;
         var storageOk = true;
+        var storageError = null;
 
         try {
             pending = await outboxCount();
             signOutReason = await metaGet('signOutReason', null);
         } catch (e) {
             storageOk = false;
+            storageError = (e && e.message) || 'storage-unavailable';
         }
 
         return {
@@ -800,12 +983,188 @@
             session: loadSession(),
             signOutReason: signOutReason,
             storageOk: storageOk,
+            storageError: storageError,
+            // A copy: the sync pill's expanded view must not be able to mutate the
+            // internal feed by holding a reference to it.
+            recentEvents: recentEvents.slice(),
         };
+    }
+
+    // ---------------------------------------------------------------- live updates
+    //
+    // A push channel layered on top of the poll loop above, never a replacement for
+    // it. Every failure mode here - the fetch rejects, the server never answers, the
+    // browser kills a background connection - degrades to exactly what the app
+    // already did without any of this: the interval timer and the visibility/online
+    // sync() calls above never stop running. This only ever makes an update arrive
+    // sooner than the next one of those would have.
+    //
+    // Not EventSource: /scan/api/stream is guarded by device_required, which reads
+    // the session from an Authorization header on purpose (see its docstring), and
+    // EventSource cannot set one. fetch() with a streamed body reads the same
+    // `data: {...}\n\n` framing by hand instead.
+
+    var STREAM_RECONNECT_MS = 4000;       // First retry after a stream drops.
+    var STREAM_RECONNECT_MAX_MS = 30000;  // Ceiling - a nicety reconnecting, not the outbox.
+    var streamGeneration = 0;
+    var streamController = null;
+    var streamReconnectTimer = null;
+
+    /*
+     * Applies one pushed event to the local cache.
+     *
+     * Read-modify-write, never a bare put(): the payload off the wire is a partial
+     * status update, not a full submissions row, and put()-ing it as-is would blank
+     * out every field an earlier poll had already filled in. A submission not yet
+     * cached is left alone - there is nothing to patch, and the next ordinary sync
+     * or pull fetches it in full anyway.
+     */
+    // A short, capped feed of what the stream has said recently, for the sync pill's
+    // expanded view - a notification list, not a record of truth, so in-memory only
+    // is fine; it starts empty on every fresh page load, which is the correct state
+    // for "what happened since this screen opened."
+    var MAX_RECENT_EVENTS = 5;
+    var recentEvents = [];
+
+    var EVENT_VERBS = {
+        completed: 'verified', processing: 'checking…', failed: 'failed',
+        duplicate: 'duplicate', queued: 'queued',
+    };
+
+    function describeStreamEvent(data, existing) {
+        var name = (data.data && data.data.vendor_name)
+            || (existing && existing.receipt && existing.receipt.vendor_name)
+            || (existing && existing.receipt_code)
+            || 'A receipt';
+        return name + ' — ' + (EVENT_VERBS[data.status] || data.status || 'updated');
+    }
+
+    async function applyStreamEvent(eventType, data) {
+        if (!data || data.submission_id == null) return;
+        var db = await getDB();
+        var existing = await withDeadline(
+            db.get('submissions', data.submission_id), DB_OP_TIMEOUT_MS, 'Reading cached history timed out.'
+        );
+
+        recentEvents.unshift({ label: describeStreamEvent(data, existing), at: Date.now() });
+        recentEvents.length = Math.min(recentEvents.length, MAX_RECENT_EVENTS);
+
+        if (existing) {
+            var patched = Object.assign({}, existing);
+            if (data.status !== undefined) patched.status = data.status;
+            if (data.error_message !== undefined) patched.error_message = data.error_message;
+            // Only 'submission.processed' carries the receipt itself (receipt_to_dict's
+            // shape, which happens to already match what a submissions row's `receipt`
+            // field holds - vendor_name, total_amount, items, and so on).
+            if (eventType === 'submission.processed' && data.data) patched.receipt = data.data;
+
+            await withDeadline(
+                db.put('submissions', patched), DB_OP_TIMEOUT_MS, 'Saving history locally timed out.'
+            );
+        }
+
+        emit();
+    }
+
+    /*
+     * Turns raw chunks off a fetch body into `data: {...}` frames.
+     *
+     * Frames are not guaranteed to land in one chunk or even one read() - TCP does
+     * not know or care where a frame boundary is - so this buffers across reads and
+     * only ever acts on text up to the last complete `\n\n` it has seen.
+     */
+    async function readEventStream(response, onEvent) {
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+        while (true) {
+            var chunk = await reader.read();
+            if (chunk.done) return;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            var frames = buffer.split('\n\n');
+            buffer = frames.pop(); // Last entry: whatever came after the final \n\n, possibly incomplete.
+            for (var i = 0; i < frames.length; i++) {
+                var frame = frames[i];
+                if (frame.indexOf('data: ') !== 0) continue; // Keep-alive comment line, or blank.
+                try {
+                    onEvent(JSON.parse(frame.slice(6)));
+                } catch (e) { /* one malformed frame is not worth dropping the connection */ }
+            }
+        }
+    }
+
+    function stopEventStream() {
+        // Bumped first: a connect attempt already past its fetch() and into
+        // readEventStream() checks this after abort() settles it, and must not
+        // schedule a reconnect on a stream that was stopped on purpose.
+        streamGeneration++;
+        if (streamController) { try { streamController.abort(); } catch (e) { /* already gone */ } }
+        streamController = null;
+        clearTimeout(streamReconnectTimer);
+    }
+
+    function startEventStream() {
+        if (!sessionToken()) return;
+        stopEventStream();
+        connectStream(streamGeneration, STREAM_RECONNECT_MS);
+    }
+
+    async function connectStream(generation, delay) {
+        if (generation !== streamGeneration) return;
+        // Nothing is watching a background tab's status pill; holding a connection
+        // open for one just spends battery and a socket the platform may kill anyway.
+        if (global.document.visibilityState !== 'visible') return;
+        var token = sessionToken();
+        if (!token) return;
+
+        streamController = new AbortController();
+        var reconnect = true;
+        try {
+            var response = await fetch('/scan/api/stream', {
+                headers: { Authorization: 'Bearer ' + token },
+                credentials: 'same-origin',
+                signal: streamController.signal,
+            });
+            if (response.status === 401) {
+                await handleAuthFailure(response);
+                reconnect = false; // Dead token; retrying just repeats the same 401.
+            } else if (!response.ok || !response.body) {
+                throw new Error('stream unavailable');
+            } else {
+                await readEventStream(response, function (envelope) {
+                    var data = envelope && envelope.data;
+                    applyStreamEvent(envelope && envelope.event_type, data).catch(function () {});
+                });
+            }
+        } catch (e) {
+            // Aborted on purpose by stopEventStream(), or a network hiccup - either
+            // way the reconnect logic below is what decides what happens next.
+        }
+
+        if (!reconnect || generation !== streamGeneration) return;
+        if (global.document.visibilityState !== 'visible') return;
+        var nextDelay = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
+        streamReconnectTimer = setTimeout(function () { connectStream(generation, nextDelay); }, delay);
     }
 
     // ---------------------------------------------------------------- boot
 
+    /*
+     * Safe to call more than once, because it now is.
+     *
+     * When Scan, History and Diagnostics were three documents, each one called this
+     * exactly once and the question never came up. They share a document now, and two
+     * of the components on it call it during their own boot - so without this guard a
+     * user who opened History would be running two sync intervals, two sets of
+     * online/offline/visibilitychange listeners and two flushOnHide handlers, firing
+     * duplicate requests at the server for the rest of the session.
+     */
+    var started = false;
+
     function start() {
+        if (started) return;
+        started = true;
+
         requestPersistence();
         // Deliberately not before there is a session.
         //
@@ -815,7 +1174,7 @@
         // POST - which then queues behind all of it and times out. The app is no use
         // offline until it is activated anyway, so there is nothing to lose by waiting;
         // activate() installs the worker the moment a session exists.
-        if (sessionToken()) registerServiceWorker().then(topUpShellCache);
+        if (sessionToken()) { registerServiceWorker().then(topUpShellCache); startEventStream(); }
         // Not started here. Geolocation is its own permission prompt, and history and
         // diagnostics - which also call start() - have no use for a location fix at
         // all. The scan screen, the one place that attaches one to a receipt, asks for
@@ -824,7 +1183,7 @@
 
         global.addEventListener('online', function () {
             markServerUp();
-            if (sessionToken()) topUpShellCache();
+            if (sessionToken()) { topUpShellCache(); startEventStream(); }
             sync({ force: true }).catch(function () {});
             emit();
         });
@@ -832,12 +1191,13 @@
 
         global.document.addEventListener('visibilitychange', function () {
             if (global.document.visibilityState === 'visible') {
-                if (sessionToken()) topUpShellCache();
+                if (sessionToken()) { topUpShellCache(); startEventStream(); }
                 sync().catch(function () {});
             } else {
                 // Whoever is holding the phone may not open this tab again for hours -
                 // driving, a queue, a shop floor. This is the last reliable moment to
                 // get anything queued onto the wire before it does.
+                stopEventStream();
                 flushOnHide();
             }
         });
@@ -859,8 +1219,10 @@
         // queue
         queueScan: queueScan, outboxAll: outboxAll, outboxCount: outboxCount, discard: discard,
         // sync
-        sync: sync, pullHistory: pullHistory, cachedHistory: cachedHistory,
-        retrySubmission: retrySubmission, apiFetch: apiFetch,
+        sync: sync, pullHistory: pullHistory, loadOlderHistory: loadOlderHistory,
+        cachedHistory: cachedHistory, retrySubmission: retrySubmission, apiFetch: apiFetch,
+        // live updates
+        startEventStream: startEventStream, stopEventStream: stopEventStream,
         // misc
         currentLocation: currentLocation, watchLocation: watchLocation,
         status: status, onChange: onChange, emit: emit,

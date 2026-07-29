@@ -117,6 +117,11 @@
                     <div x-transition:enter="transition ease-out duration-150"
                          x-transition:enter-start="opacity-0 -translate-y-1"
                          x-transition:enter-end="opacity-100 translate-y-0">
+                        <p class="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            Safari can sign a tab out on its own after enough time between visits.
+                            If that happens here, scanning stops working until your admin issues a
+                            fresh link. Add to Home Screen instead to avoid that entirely.
+                        </p>
                         <template x-if="error">
                             <p class="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800" x-text="error"></p>
                         </template>
