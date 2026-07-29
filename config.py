@@ -27,6 +27,10 @@ class Config:
     # the app can be imported outside the container - the test suite points it at a
     # temporary directory, since '/app' is not writable on a developer machine.
     DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
+    # Kept as 'taxconsult.db' even after the app's rename to Karani: this is the real
+    # SQLite filename already sitting in every deployed instance's data volume.
+    # Renaming it would point a fresh deploy at an empty database instead of the
+    # existing one, with no migration in between.
     DB_FILE = 'taxconsult.db'
     DB_PATH = os.path.join(DATA_DIR, DB_FILE)
     

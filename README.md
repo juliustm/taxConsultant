@@ -1,11 +1,11 @@
-# TaxConsult AI Agent ✨🇹🇿
+# Karani ✨🇹🇿
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Commercial License](https://img.shields.io/badge/License-Commercial-green.svg)](LICENSE-COMMERCIAL.md)
 
 An open-source, self-hostable AI agent designed to help Tanzanian businesses automate and simplify expense reporting by intelligently processing EFD (Electronic Fiscal Device) receipts.
 
-![TaxConsult AI Agent Dashboard](static/dashboard.png)
+![Karani Dashboard](static/dashboard.png)
 
 ## The Problem
 
@@ -14,7 +14,7 @@ For many businesses in Tanzania, managing and recording expenses is a tedious, m
 ## The Solution
 
 
-**TaxConsult AI Agent** transforms this process. By deploying your own private instance of this agent, you create a central hub that can:
+**Karani** transforms this process. By deploying your own private instance of this agent, you create a central hub that can:
 1.  **Receive** receipts from various sources (WhatsApp, Telegram, Web App, etc.) via a secure API.
 2.  **Verify and Parse** a receipt URL from a QR code against the TRA portal, reading every field straight off the verified page. Photographed receipts, which have no machine-readable source, are read by a vision model instead.
 3.  **Extract Key Data** such as Vendor Name, TIN, VRN, EFD serial, Date, line items, per-rate tax and totals.
@@ -62,7 +62,7 @@ To ensure compatibility with simple, single-app hosting platforms (like Deploy.t
 
 The people who hold the receipts are not the person who runs the dashboard. They are standing in a shop, often with one bar of signal or none, and the whole interaction has to be: open app, point at receipt, done.
 
-**Setup is one link, used once.** An admin adds a device under **Devices** and gets an activation QR code and a copyable link. The field user installs the app and scans that code, and the device is signed in for good. There is no password and nothing to type.
+**Setup is one link, used once.** An admin adds a device under **Settings → Devices** and gets an activation QR code and a copyable link. The field user installs the app and scans that code, and the device is signed in for good. There is no password and nothing to type.
 
 **One device is one phone.** The session lives in a single column on the device row, so activating a device somewhere new necessarily signs out wherever it was before — the old phone is told exactly that, rather than being left guessing at a generic error. To move a device to a replacement handset, the admin issues a new link; the receipt history stays attached to the device.
 
@@ -127,7 +127,7 @@ schedule got to and why it stopped, and offers a button that starts a fresh sche
 
 ## Configuring your own TIN
 
-The single most valuable check — *is this tax invoice even made out to us?* — needs to know who "us" is. Set your registered name, TIN and VRN under **Configuration → General Settings**. Until you do, the check reports itself as unconfigured rather than silently assuming every receipt is yours, and the VAT ledger says so at the top of the page.
+The single most valuable check — *is this tax invoice even made out to us?* — needs to know who "us" is. Set your registered name, TIN and VRN under **Settings → Business**. Until you do, the check reports itself as unconfigured rather than silently assuming every receipt is yours, and the VAT ledger says so at the top of the page.
 
 ### Running the tests
 
@@ -151,8 +151,8 @@ First, let's get the agent running on your local machine.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/taxconsult-ai-agent.git
-cd taxconsult-ai-agent
+git clone https://github.com/your-username/karani.git
+cd karani
 
 # 2. Create your local environment file
 # Create a new file named .env. For now, you don't need to change anything in it.
@@ -180,11 +180,11 @@ The first time you visit the application, you'll be guided through a secure setu
 
 ## Configuration Guide
 
-After logging in, navigate to the **Configuration** page to set up the LLM provider and your desired data export destinations (Google Sheets, Webhook, S3). Detailed instructions are provided on the page itself.
+After logging in, navigate to the **Settings** page to set up the LLM provider and your desired data export destinations (Google Sheets, Webhook, S3). Detailed instructions are provided on the page itself.
 
 ### Getting a phone scanning
 
-1.  Go to **Devices** and add one, named for whoever will carry it.
+1.  Go to **Settings → Devices** and add one, named for whoever will carry it.
 2.  On the phone, open `https://your-instance/scan/` and add it to the home screen.
 3.  Open it from the home screen and point it at the activation QR code on the Devices page. (On Android you can just open the activation link instead.)
 

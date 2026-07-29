@@ -1,4 +1,4 @@
-# Contributing to TaxConsult AI Agent
+# Contributing to Karani
 
 First off, thank you for considering contributing! Your help is what makes the open-source community thrive. We welcome any and all contributions, from bug reports and feature requests to code changes and documentation improvements.
 
@@ -32,4 +32,4 @@ If you'd like to contribute code, please follow these steps:
 
 Please note that all contributions you make to this project will be licensed under the **AGPLv3**. By submitting a pull request, you agree to license your work under these terms.
 
-Thank you again for your interest in making the TaxConsult AI Agent better!
+Thank you again for your interest in making Karani better!

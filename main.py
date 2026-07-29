@@ -1197,6 +1197,10 @@ def index():
         # One table, defined on the server, so the dashboard and /submissions/<id>
         # cannot disagree about what a failure means.
         failure_guidance=FAILURE_GUIDANCE,
+        # Powers the 'Process now' button on the Queued tab - the standalone Queue page
+        # this used to live on was folded into this dashboard, since it only ever
+        # duplicated this tab's own list of pending submissions.
+        runner_url=url_for('run_tasks', secret=current_app.config['TASK_RUNNER_SECRET_KEY']),
     )
 
 @app.route('/api/submissions')
@@ -1253,6 +1257,10 @@ def receipt_detail(receipt_id):
         )
 
     judgment = json.loads(receipt.raw_llm_response or '{}')
+    # Same offline projection Insights draws its whole-book scatter with (utils/geo,
+    # no tile server, no API key) - just the one point this receipt was collected at,
+    # so a single receipt gets the same visual its aggregate view already has.
+    position = geo.parse_location(receipt.submission.location) if receipt.submission else None
     return render_template(
         'receipt_detail.html',
         receipt=receipt,
@@ -1260,7 +1268,9 @@ def receipt_detail(receipt_id):
         assessment=assess_receipt(receipt, config),
         llm_analysis=judgment.get('llm_tax_analysis'),
         duplicates=find_possible_duplicates(receipt),
-        region=geo.region_for(geo.parse_location(receipt.submission.location)) if receipt.submission else None,
+        region=geo.region_for(position),
+        map_point=geo.to_svg_xy(position) if position else None,
+        map_reference=_map_reference_points(),
         siblings=siblings,
         business=config,
         photo_url=(
@@ -1301,7 +1311,8 @@ def insights():
         )
         .options(
             selectinload(Receipt.items), selectinload(Receipt.tax_lines),
-            joinedload(Receipt.submission),
+            joinedload(Receipt.submission), joinedload(Receipt.vendor),
+            joinedload(Receipt.device),
         )
         .order_by(Receipt.receipt_date.asc())
         .all()
@@ -1323,6 +1334,10 @@ def insights():
         attention=_attention(receipts, config, today),
         categories=analytics.category_breakdown(receipts),
         regions=analytics.region_breakdown(receipts),
+        vendors=analytics.vendor_breakdown(receipts),
+        devices=analytics.device_breakdown(receipts),
+        weekday=analytics.weekday_pattern(receipts),
+        compliance_scoreboard=_compliance_scoreboard(receipts, config),
         months=analytics.monthly_totals(receipts, months=min(12, max(2, days // 30)), today=today),
         price_movements=analytics.unit_price_movements(receipts),
         cheaper=analytics.cheaper_elsewhere(receipts),
@@ -1386,6 +1401,49 @@ def _attention(receipts, config, today):
         'restricted': restricted[:8],
         'restricted_total': len(restricted),
     }
+
+def _tally_checks(tally, assessment):
+    """
+    Folds one receipt's assessment into a running pass/warn/fail count, keyed by check
+    id. Shared by vendor_detail (one supplier's record) and _compliance_scoreboard
+    (every receipt in a window), so what "this check failed" means cannot drift
+    between the two.
+    """
+    for check in assessment.checks:
+        record = tally.setdefault(check.id, {
+            'id': check.id, 'label': check.label, 'pass': 0, 'warn': 0, 'fail': 0,
+            'detail': check.detail,
+        })
+        if check.status in ('pass', 'warn', 'fail'):
+            record[check.status] += 1
+        # The wording kept is the most recent failure's, because that is the one that
+        # says what went wrong rather than what went right.
+        if check.status == 'fail':
+            record['detail'] = check.detail
+
+def _compliance_scoreboard(receipts, config):
+    """
+    Pass/warn/fail per compliance check, across every receipt in the window.
+
+    vendor_detail keeps this same tally for one supplier; run over everything, it
+    answers "how compliant are we, overall" instead of that being visible only one
+    vendor at a time. Sorted worst first - the check with the most failures is the one
+    worth a look.
+    """
+    tally = {}
+    for receipt in receipts:
+        _tally_checks(tally, assess_receipt(receipt, config))
+
+    scoreboard = []
+    for record in tally.values():
+        total = record['pass'] + record['warn'] + record['fail']
+        scoreboard.append({
+            **record,
+            'total': total,
+            'pass_pct': round(record['pass'] * 100 / total, 1) if total else 0.0,
+        })
+    scoreboard.sort(key=lambda record: (record['fail'], record['warn']), reverse=True)
+    return scoreboard
 
 def _map_points(receipts, limit=400):
     """
@@ -1541,17 +1599,7 @@ def vendor_detail(key):
         if assessment.input_vat_cents > 0 and assessment.recoverable_vat_cents == 0:
             totals['blocked'] += assessment.input_vat_cents
 
-        for check in assessment.checks:
-            record = tally.setdefault(check.id, {
-                'id': check.id, 'label': check.label, 'pass': 0, 'warn': 0, 'fail': 0,
-                'detail': check.detail,
-            })
-            if check.status in ('pass', 'warn', 'fail'):
-                record[check.status] += 1
-            # The wording kept is the most recent failure's, because that is the one
-            # that says what went wrong rather than what went right.
-            if check.status == 'fail':
-                record['detail'] = check.detail
+        _tally_checks(tally, assessment)
 
     failing = sorted(
         (record for record in tally.values() if record['fail']),
@@ -1895,7 +1943,7 @@ def configure_instance():
     
     if request.method == 'POST':
         # Get the active tab from a hidden input in the form
-        active_tab = request.form.get('active_tab', 'general-settings')
+        active_tab = request.form.get('active_tab', 'business')
         
         # Save all the form data. The business identity is blanked to NULL rather than
         # stored as '', because the compliance checks read "no TIN set" from it.
@@ -1916,13 +1964,13 @@ def configure_instance():
         config.s3_region = request.form.get('s3_region')
         
         db.session.commit()
-        flash('Configuration saved successfully!', 'success')
-        
+        flash('Settings saved successfully!', 'success')
+
         # Redirect back to the configuration page, passing the active tab as a URL parameter
         return redirect(url_for('configure_instance', tab=active_tab))
 
-    # For GET requests, get the active tab from the URL, defaulting to 'general-settings'
-    active_tab = request.args.get('tab', 'general-settings')
+    # For GET requests, get the active tab from the URL, defaulting to 'business'
+    active_tab = request.args.get('tab', 'business')
     devices = Device.query.all()
     
     # Pass the active_tab variable to the template
@@ -2205,7 +2253,7 @@ def scan_manifest():
     installed app, however the start_url differs.
     """
     config = get_instance_config()
-    name = (config.business_name if config and config.business_name else 'TaxConsult')
+    name = (config.business_name if config and config.business_name else 'Karani')
 
     token = (request.args.get('t') or '').strip()
     start_url = url_for('scan_home', t=token) if token else '/scan/'
@@ -2397,15 +2445,6 @@ def scan_api_retry(submission_id):
 
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
-
-@app.route('/admin/queue')
-@login_required
-def queue_status():
-    """Displays pending jobs and provides a manual trigger."""
-    pending_jobs = Submission.query.filter_by(status='queued').order_by(Submission.received_at.asc()).all()
-    # Pass the secret key to the template so the button URL can be built securely
-    runner_secret = current_app.config['TASK_RUNNER_SECRET_KEY']
-    return render_template('admin/queue.html', jobs=pending_jobs, runner_secret=runner_secret)
 
 def ingest_submission(device, photo=None, url=None, description=None, location=None,
                       client_uuid=None, captured_at=None):

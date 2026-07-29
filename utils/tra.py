@@ -26,7 +26,7 @@ import requests
 
 TRA_HOST = 'verify.tra.go.tz'
 TRA_BASE_URL = f'https://{TRA_HOST}'
-USER_AGENT = 'Mozilla/5.0 TaxConsultAI/1.0'
+USER_AGENT = 'Mozilla/5.0 KaraniAI/1.0'
 # (connect + TLS handshake, read). The connect half is deliberately short: a bad
 # backend usually shows up as a stalled handshake, and we would rather drop it and
 # dial again than sit on it.

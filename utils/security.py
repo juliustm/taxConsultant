@@ -4,7 +4,7 @@ import qrcode
 import base64
 from io import BytesIO
 
-def generate_totp_provisioning_uri(secret, email, issuer_name="TaxConsult AI"):
+def generate_totp_provisioning_uri(secret, email, issuer_name="Karani"):
     """Generates the provisioning URI for TOTP apps."""
     return pyotp.totp.TOTP(secret).provisioning_uri(
         name=email,

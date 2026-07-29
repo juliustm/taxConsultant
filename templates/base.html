@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TaxConsult AI Agent</title>
+    <title>Karani</title>
     {# Served from this instance, not a CDN. These are the same files the scanner PWA
        precaches, and a self-hosted deployment on a link that cannot reach jsdelivr
        should still render. #}
@@ -12,9 +12,9 @@
     <script defer src="{{ url_for('static', filename='js/vendor/alpine.min.js') }}"></script>
 
     <!-- Primary Meta Tags -->
-    <title>TaxConsult AI Agent | Automate Your EFD Receipts</title>
-    <meta name="title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
-    <meta name="description" content="Tired of manual data entry? TaxConsult AI is a self-hostable agent that uses AI to automatically process Tanzanian EFD receipts, saving you hours of work and ensuring audit-proof records.">
+    <title>Karani | Automate Your EFD Receipts</title>
+    <meta name="title" content="Karani | Automate Your EFD Receipts">
+    <meta name="description" content="Tired of manual data entry? Karani is a self-hostable agent that uses AI to automatically process Tanzanian EFD receipts, saving you hours of work and ensuring audit-proof records.">
     <meta name="keywords" content="Tanzania EFD receipt, tax automation Tanzania, AI accountant, receipt scanner, expense reporting, TRA receipt verification, Julius Moshiro, Atana">
     <meta name="author" content="Julius Moshiro">
 
@@ -25,14 +25,14 @@
     <!-- Open Graph / Facebook / LinkedIn / WhatsApp -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="{{ request.url }}">
-    <meta property="og:title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
+    <meta property="og:title" content="Karani | Automate Your EFD Receipts">
     <meta property="og:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
     <meta property="og:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
 
     <!-- Twitter -->
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="{{ request.url }}">
-    <meta property="twitter:title" content="TaxConsult AI Agent | Automate Your EFD Receipts">
+    <meta property="twitter:title" content="Karani | Automate Your EFD Receipts">
     <meta property="twitter:description" content="Stop typing receipts. Start saving time. This self-hostable AI agent automates your expense reporting.">
     <meta property="twitter:image" content="{{ url_for('static', filename='social-card.png', _external=True) }}">
 
@@ -65,6 +65,10 @@
             box-shadow: 0 0 0 2px rgb(199 210 254);
         }
         .peek:focus-visible, .peek-chip:focus-visible { outline: none; }
+
+        /* Alpine sets x-cloak until it has hydrated; without this rule an element
+           guarded only by x-show can flash visible for one frame before Alpine runs. */
+        [x-cloak] { display: none !important; }
     </style>
 </head>
 <body class="h-full">
@@ -75,19 +79,21 @@
         <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <div class="flex h-16 justify-between">
                 <div class="flex">
-                    <div class="flex flex-shrink-0 items-center font-bold text-indigo-600">
-                        TaxConsult
+                    <div class="flex flex-shrink-0 items-center gap-2 font-bold text-indigo-600">
+                        <span class="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-600 text-sm font-bold text-white">K</span>
+                        <span>Karani</span>
                     </div>
                     <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
-                        {# A receipt page is reached from the dashboard, so it keeps that tab lit. #}
+                        {# A receipt page is reached from the dashboard, so it keeps that tab lit.
+                           Queue and Devices used to live here too - Queue duplicated the
+                           dashboard's own 'Queued' tab, and Devices is one click inside
+                           Settings, so both were dropped rather than left as redundant. #}
                         {% set nav_items = [
                             ('index', 'Dashboard', ['index', 'receipt_detail']),
                             ('insights', 'Insights', ['insights']),
                             ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
                             ('vendors', 'Vendors', ['vendors']),
-                            ('queue_status', 'Queue', ['queue_status']),
-                            ('manage_devices', 'Devices', ['manage_devices']),
-                            ('configure_instance', 'Configuration', ['configure_instance']),
+                            ('configure_instance', 'Settings', ['configure_instance', 'manage_devices']),
                         ] %}
                         {% for endpoint, label, active_on in nav_items %}
                         <a href="{{ url_for(endpoint) }}"

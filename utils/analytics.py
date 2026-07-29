@@ -463,6 +463,93 @@ def region_breakdown(receipts):
     return breakdown
 
 
+def vendor_breakdown(receipts, limit=10):
+    """
+    Spend per supplier, largest first - who the money actually goes to.
+
+    Grouped the same way every other per-vendor view here groups them: by the vendor
+    row where a receipt has one, by TIN otherwise, and by a normalised name as the
+    last resort - so a supplier spelled three ways across three receipts is still one
+    line. `key`, where available, is the same lookup key /vendors/<key> and the hover
+    cards use, so a row can link straight to the vendor's own page.
+    """
+    totals = defaultdict(lambda: {'cents': 0, 'count': 0, 'name': None, 'tin': None, 'key': None})
+    for receipt in _spending(receipts):
+        vendor = _vendor_key(receipt)
+        if vendor is None:
+            continue
+        entry = totals[vendor]
+        entry['cents'] += receipt.total_incl_tax_cents or 0
+        entry['count'] += 1
+        entry['name'] = _vendor_name(receipt)
+        entry['tin'] = entry['tin'] or receipt.vendor_tin
+        if entry['key'] is None and receipt.vendor is not None:
+            entry['key'] = receipt.vendor.lookup_key
+
+    overall = sum(entry['cents'] for entry in totals.values())
+    breakdown = [
+        {
+            'name': entry['name'], 'tin': entry['tin'], 'key': entry['key'],
+            'cents': entry['cents'], 'count': entry['count'],
+            'share_pct': round(entry['cents'] * 100 / overall, 1) if overall else 0.0,
+        }
+        for entry in totals.values()
+    ]
+    breakdown.sort(key=lambda entry: entry['cents'], reverse=True)
+    return breakdown[:limit]
+
+
+def device_breakdown(receipts):
+    """
+    Spend and count per submitting device - which phone, or which bot, the money came
+    in through. Answers "who is actually doing the buying" where a business has more
+    than one person out collecting receipts.
+    """
+    totals = defaultdict(lambda: {'cents': 0, 'count': 0, 'name': None})
+    for receipt in _spending(receipts):
+        device = receipt.device
+        entry = totals[device.id if device else None]
+        entry['cents'] += receipt.total_incl_tax_cents or 0
+        entry['count'] += 1
+        entry['name'] = device.name if device else 'Unknown device'
+
+    overall = sum(entry['cents'] for entry in totals.values())
+    breakdown = [
+        {
+            'name': entry['name'], 'cents': entry['cents'], 'count': entry['count'],
+            'share_pct': round(entry['cents'] * 100 / overall, 1) if overall else 0.0,
+        }
+        for entry in totals.values()
+    ]
+    breakdown.sort(key=lambda entry: entry['cents'], reverse=True)
+    return breakdown
+
+
+WEEKDAY_LABELS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+
+
+def weekday_pattern(receipts):
+    """
+    Spend and count by the day of the week the receipt is dated, Monday first.
+
+    Not a trend and not a finding - just when spending actually happens, which a
+    monthly total cannot show. A business that only buys on market day looks
+    identical to one that spends evenly across the month until this is broken out.
+    """
+    totals = [{'cents': 0, 'count': 0} for _ in range(7)]
+    for receipt in _spending(receipts):
+        if receipt.receipt_date is None:
+            continue
+        bucket = totals[receipt.receipt_date.weekday()]
+        bucket['cents'] += receipt.total_incl_tax_cents or 0
+        bucket['count'] += 1
+
+    return [
+        {'label': label, 'cents': entry['cents'], 'count': entry['count']}
+        for label, entry in zip(WEEKDAY_LABELS, totals)
+    ]
+
+
 def monthly_totals(receipts, months=6, today=None):
     """The last `months` calendar months of spending, oldest first."""
     today = today or date.today()

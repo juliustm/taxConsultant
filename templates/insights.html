@@ -84,7 +84,7 @@
     <p class="text-sm text-yellow-900">
         Your own TIN is not set, so no receipt has been checked against it and the recoverable
         figure above assumes every receipt was issued to you.
-        <a href="{{ url_for('configure_instance') }}" class="font-semibold underline">Set it under Configuration</a>.
+        <a href="{{ url_for('configure_instance') }}" class="font-semibold underline">Set it under Settings</a>.
     </p>
 </div>
 {% endif %}
@@ -153,7 +153,41 @@
 </div>
 {% endif %}
 
-<!-- 3. Where the money goes -->
+<!-- 3. Compliance scoreboard -->
+{% if compliance_scoreboard %}
+<div class="mt-10">
+    {{ section('Compliance scoreboard', 'Every check this app runs, tallied across every receipt in this period. Worst first - the check with the most failures is the one worth a look.') }}
+    <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th scope="col" class="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Check</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Pass</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Warn</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Fail</th>
+                    <th scope="col" class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Pass rate</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for check in compliance_scoreboard %}
+                <tr>
+                    <td class="px-5 py-3 text-sm text-gray-900">
+                        {{ check.label }}
+                        <p class="mt-0.5 text-xs text-gray-500">{{ check.detail }}</p>
+                    </td>
+                    <td class="px-5 py-3 text-right text-sm text-green-700">{{ check['pass'] }}</td>
+                    <td class="px-5 py-3 text-right text-sm {{ 'text-amber-600' if check.warn else 'text-gray-400' }}">{{ check.warn }}</td>
+                    <td class="px-5 py-3 text-right text-sm {{ 'text-red-700' if check.fail else 'text-gray-400' }}">{{ check.fail }}</td>
+                    <td class="px-5 py-3 text-right text-sm font-semibold text-gray-900">{{ check.pass_pct }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<!-- 4. Where the money goes -->
 <div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
     <div>
         {{ section('Where the money goes', 'By expense category, largest first.') }}
@@ -242,7 +276,75 @@
     </div>
 </div>
 
-<!-- 4. What things cost -->
+<!-- 5. Who you buy from, and how often -->
+<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-3">
+    <div>
+        {{ section('Top suppliers', 'Spend per supplier, largest first.') }}
+        <div class="mt-4 space-y-3 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            {% for entry in vendors %}
+            <div>
+                <div class="flex items-baseline justify-between gap-x-4">
+                    <p class="truncate text-sm text-gray-900">
+                        {% if entry.key %}
+                        <a class="peek" href="{{ url_for('vendor_detail', key=entry.key) }}"
+                           data-peek="vendor:{{ entry.key }}" data-peek-eager>{{ entry.name }}</a>
+                        {% else %}
+                        {{ entry.name }}
+                        {% endif %}
+                    </p>
+                    <p class="whitespace-nowrap text-sm text-gray-500">
+                        <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
+                        <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>
+                    </p>
+                </div>
+                <div class="mt-1">{{ bar(entry.share_pct) }}</div>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500">No suppliers yet.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div>
+        {{ section('By device', 'Which phone - or bot - the money came in through.') }}
+        <div class="mt-4 space-y-3 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            {% for entry in devices %}
+            <div>
+                <div class="flex items-baseline justify-between gap-x-4">
+                    <p class="truncate text-sm text-gray-900">{{ entry.name }}</p>
+                    <p class="whitespace-nowrap text-sm text-gray-500">
+                        <span class="font-mono text-gray-900">{{ money(entry.cents) }}</span>
+                        <span class="ml-1 text-xs">{{ entry.share_pct }}%</span>
+                    </p>
+                </div>
+                <div class="mt-1">{{ bar(entry.share_pct, 'bg-teal-500') }}</div>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500">No devices yet.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div>
+        {{ section('Spending frequency', 'Receipts by day of the week.') }}
+        <div class="mt-4 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
+            {% set peak_day = weekday|map(attribute='cents')|max %}
+            <div class="flex items-end gap-x-2" style="height: 7rem;">
+                {% for entry in weekday %}
+                <div class="flex flex-1 flex-col items-center justify-end gap-y-1" style="height: 100%;">
+                    <span class="text-[10px] text-gray-500">{{ entry.count }}</span>
+                    {# A day with no spending still gets a visible sliver, so the gap reads as zero rather than as missing. #}
+                    <div class="w-full rounded-t bg-indigo-500" style="height: {{ (entry.cents * 100 / peak_day) if peak_day else 0 }}%; min-height: 2px;"></div>
+                    <span class="text-[10px] text-gray-400">{{ entry.label }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            <p class="mt-3 text-xs text-gray-400">Bar height is spend; the number above each bar is the receipt count.</p>
+        </div>
+    </div>
+</div>
+
+<!-- 6. What things cost -->
 {% if price_movements or cheaper %}
 <div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
     {% if price_movements %}
@@ -295,7 +397,7 @@
 </div>
 {% endif %}
 
-<!-- 5. What looks unusual -->
+<!-- 7. What looks unusual -->
 {% if anomalies or outliers or attention.restricted %}
 <div class="mt-10">
     {{ section('Worth a second look', 'Patterns, not findings. Each of these has an innocent explanation as often as not - the point is that somebody should know about it.') }}
@@ -354,7 +456,7 @@
 </div>
 {% endif %}
 
-<!-- 6. Which suppliers' receipts give TRA trouble -->
+<!-- 8. Which suppliers' receipts give TRA trouble -->
 {% if reliability.vendors or reliability.unattributed %}
 <div class="mt-10">
     {{ section('Receipts that gave TRA trouble',
@@ -420,7 +522,7 @@
 </div>
 {% endif %}
 
-<!-- 7. Suppliers who make you wait -->
+<!-- 9. Suppliers who make you wait -->
 {% if uploaders %}
 <div class="mt-10 mb-6">
     {{ section('Suppliers who upload late', 'A retry proves the receipt was not on the TRA portal when we first looked. The wait shown is from that first check to the one that succeeded, so it is a lower bound - the receipt may have appeared at any point in between.') }}

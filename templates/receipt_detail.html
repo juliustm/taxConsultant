@@ -309,6 +309,27 @@
                         <span class="text-gray-900">{{ region }} <span class="text-xs text-gray-400">(approximate)</span></span>
                     </div>
                     {% endif %}
+                    {% if map_point %}
+                    <div class="flex items-start gap-x-4">
+                        <span class="text-gray-500">Map</span>
+                        <div>
+                            {# Same offline projection Insights draws its whole-book scatter
+                               with - no tile server, no API key, nobody outside told where
+                               this receipt was collected. Just this one point, this time. #}
+                            <svg viewBox="-4 -4 108 108" class="h-28 w-28 rounded-md border border-gray-200 bg-gray-50" role="img"
+                                 aria-label="Where this receipt was collected, against Tanzania's 31 regional centres">
+                                <rect x="0" y="0" width="100" height="100" rx="2" class="fill-gray-50 stroke-gray-200" stroke-width="0.5"></rect>
+                                {% for reference in map_reference %}
+                                <circle cx="{{ reference.x }}" cy="{{ reference.y }}" r="0.7" class="fill-gray-300">
+                                    <title>{{ reference.name }}</title>
+                                </circle>
+                                {% endfor %}
+                                <circle cx="{{ map_point[0] }}" cy="{{ map_point[1] }}" r="2.6" class="fill-indigo-500/70 stroke-indigo-600" stroke-width="0.5"></circle>
+                            </svg>
+                            <p class="mt-1 text-xs text-gray-400">Drawn offline, no tiles fetched.</p>
+                        </div>
+                    </div>
+                    {% endif %}
                     {% endif %}
                     {% if submission.input_type == 'url' %}
                     <div class="flex justify-between gap-x-4">

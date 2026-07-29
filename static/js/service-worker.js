@@ -208,6 +208,9 @@ self.addEventListener('fetch', (event) => {
  * DB_NAME/DB_VERSION/the store shapes/MAX_ATTEMPTS mirror pwa.js exactly. This worker
  * cannot `import` that file - it is written against `window`, which does not exist
  * here - so the two must be kept in step by hand.
+ *
+ * OUTBOX_DB_NAME keeps its pre-rename 'taxconsult-...' value deliberately - see the
+ * matching note by DB_NAME in pwa.js. It must stay byte-identical to that constant.
  */
 const OUTBOX_DB_NAME = 'taxconsult-pwa-db';
 const OUTBOX_DB_VERSION = 1;

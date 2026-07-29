@@ -191,8 +191,8 @@ function landingPage() {
             if (diffX < -50) { this.prevSlide(); this.touchStartX = null; }
         },
         getMailtoLink() {
-            const subject = encodeURIComponent(`TaxConsult AI - Setup Offer Inquiry (${this.role})`);
-            const body = encodeURIComponent(`Hello Julius,\n\nI'm interested in the "Focus on Your Business" offer for the TaxConsult AI Agent.\n\nMy role is: ${this.role}\n\nPlease let me know the next steps.\n\nMy phone number is: [Please enter your phone number here]\n\nThank you,`);
+            const subject = encodeURIComponent(`Karani - Setup Offer Inquiry (${this.role})`);
+            const body = encodeURIComponent(`Hello Julius,\n\nI'm interested in the "Focus on Your Business" offer for Karani.\n\nMy role is: ${this.role}\n\nPlease let me know the next steps.\n\nMy phone number is: [Please enter your phone number here]\n\nThank you,`);
             return `mailto:julius@atana.co.tz?subject=${subject}&body=${body}`;
         }
     }

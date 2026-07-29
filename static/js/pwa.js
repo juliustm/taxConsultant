@@ -25,6 +25,10 @@
 (function (global) {
     'use strict';
 
+    // Kept as 'taxconsult-...' on purpose, even after the app's rename to Karani:
+    // this is the actual IndexedDB name and localStorage key already sitting on
+    // phones. Changing either orphans a real, already-activated device - a fresh
+    // empty DB in the DB_NAME case, a silent sign-out in the SESSION_KEY case.
     var DB_NAME = 'taxconsult-pwa-db';
     var DB_VERSION = 1;
 
