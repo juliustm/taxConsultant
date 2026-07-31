@@ -105,7 +105,9 @@ VISION_TOOLS = [
                     "vendor_name": {"type": "string"},
                     "vendor_tin": {"type": "string"},
                     "vendor_phone": {"type": "string"},
-                    "vrn": {"type": "string", "description": "The vendor's VAT Registration Number (VRN)."},
+                    "vrn": {"type": "string", "description": "The vendor's VAT Registration Number (VRN). "
+                                                            "Omit it if the receipt prints 'NOT REGISTERED' or "
+                                                            "any other placeholder in place of a number."},
                     "receipt_date": {"type": "string", "description": "YYYY-MM-DD format."},
                     "receipt_time": {"type": "string", "description": "HH:MM:SS, 24 hour, if printed."},
                     "receipt_number": {"type": "string"},

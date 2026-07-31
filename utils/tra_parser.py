@@ -39,6 +39,15 @@ _TAX_RATE_RE = re.compile(r'TAX RATE\s+([A-Z]{1,2})\s*\(\s*([\d.]+)\s*%\s*\)')
 _MONEY_RE = re.compile(r'^-?[\d,]*\.?\d+$')
 _NULL_VALUES = {'', 'n/a', 'na', '-', 'null', 'none'}
 
+# What TRA prints in the VRN field for a supplier that is not registered for VAT. It
+# is a sentence, not a number, so it has to be recognised as an absent VRN - stored
+# as-is it is a truthy string and every "is this supplier VAT registered?" check in
+# the codebase (badges, input-VAT recoverability, compliance scoring) answers yes.
+_VRN_NULL_VALUES = _NULL_VALUES | {
+    'not registered', 'notregistered', 'not-registered',
+    'not registered for vat', 'unregistered', 'not applicable', 'nil',
+}
+
 
 class TraParseError(Exception):
     """
@@ -216,7 +225,7 @@ def parse_receipt_html(html: str) -> ParsedReceipt:
     parsed = ParsedReceipt(
         vendor_name=_vendor_name(section),
         vendor_tin=labels.get('TIN'),
-        vrn=labels.get('VRN'),
+        vrn=normalise_vrn(labels.get('VRN')),
         vendor_phone=labels.get('MOBILE'),
         vendor_po_box=labels.get('P.O BOX') or labels.get('P.O. BOX'),
         efd_serial=labels.get('SERIAL NO'),
@@ -431,6 +440,18 @@ def _clean(text):
     """Squashes whitespace and maps the portal's placeholders ('n/a') to None."""
     value = _squash(text)
     return None if value.lower() in _NULL_VALUES else value
+
+
+def normalise_vrn(text):
+    """
+    A VRN, or None when the value stands for 'this supplier has no VRN'.
+
+    Public because the VRN does not only arrive through this parser - the photo path
+    gets it from the LLM, which transcribes the same placeholder off the paper - and
+    both routes have to agree on what counts as registered.
+    """
+    value = _squash(text)
+    return None if value.lower().strip('.') in _VRN_NULL_VALUES else value
 
 
 def _parse_money(text):
