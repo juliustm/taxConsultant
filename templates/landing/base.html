@@ -17,7 +17,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ brand.name }}{% endblock %}</title>
-    <meta name="description" content="{% block description %}Scan a receipt. Karani checks it, counts it and keeps your books ready to file.{% endblock %}">
+    <meta name="description" content="{% block description %}Scan a receipt. Karani verifies it with TRA and keeps your books ready to file.{% endblock %}">
     <meta name="theme-color" content="{{ brand.accent }}">
 
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
@@ -45,6 +45,18 @@
             --ink: #121211;
             --ink-soft: #605d57;
             --line: #e4e0d8;
+
+            /* A second palette the admin does not own.
+               The accent is theirs and can be any hex they type into Settings. These
+               four are not decoration: they are what the page is saying - money that
+               cannot be claimed, a window closing, a price that moved, tax held back -
+               and a meaning that changes colour when somebody changes their logo has
+               stopped being a meaning. They only ever appear on paper, never on the
+               accent, so no colour an admin can pick lands them next to it. */
+            --lost: #b3261e;
+            --soon: #9c5a05;
+            --moved: #3a4fc4;
+            --held: #7b3fa0;
 
             --gutter: clamp(1.25rem, 5vw, 4rem);
             --measure: 68rem;
@@ -272,8 +284,26 @@
             transition: opacity 700ms cubic-bezier(.2, .7, .3, 1), transform 700ms cubic-bezier(.2, .7, .3, 1);
         }
 
+        /* Anything that draws itself waits inside its section until the section is
+           reached. Two reasons, and the second is the real one: an animation that has
+           already finished by the time you scroll to it was never seen, and a page
+           keeping a dozen loops running on a cheap phone spends battery on pictures
+           nobody is looking at. Paused holds the first keyframe, which is exactly the
+           empty state each of these should be sitting in beforehand.
+
+           The gate is only ever closed by the same script that hides .reveal, so a
+           visitor with no JavaScript gets every animation running from the start
+           rather than a page of things frozen half-drawn. */
+        .js .reveal .cue { animation-play-state: paused; }
+        .js .reveal.is-in .cue { animation-play-state: running; }
+
         @media (prefers-reduced-motion: reduce) {
             .js .reveal { opacity: 1; transform: none; }
+            /* Collapsing a loop to nothing leaves it stopped on its last keyframe, and
+               the last keyframe of a thing that fades out and starts again is nothing
+               at all. Dropped rather than shortened, so every .cue is styled by the
+               plain rules it was written to end on. */
+            .cue { animation: none !important; }
             *, *::before, *::after {
                 animation-duration: 0.001ms !important;
                 animation-iteration-count: 1 !important;
