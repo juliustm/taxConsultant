@@ -3,8 +3,9 @@
 Test setup.
 
 DATA_DIR is redirected before anything imports config, because importing the app
-creates the directory and opens the SQLite file inside it, and the container default
-('/app/data') is not writable on a developer machine.
+creates the directory and opens the SQLite file inside it. Left alone, a test run
+would build its database inside the working copy's own persistence directory and
+sit on top of whatever is already developed there.
 """
 import os
 import pathlib

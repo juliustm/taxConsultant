@@ -115,6 +115,10 @@ ehthumbs.db
 ehthumbs_vista.db
 *.stackdump
 
-# Our project specific data folder
+# The persistence surface. Everything listed here is what has to live on the
+# volume - the SQLite database and the uploaded receipt photos - and nothing here
+# is ever committed. /data/ is the pre-/karani location, kept ignored so an older
+# working copy does not start committing its database.
+/karani/
 /data/
 /taxconsult.db

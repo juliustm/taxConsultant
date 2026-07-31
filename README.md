@@ -195,6 +195,27 @@ Your application should now be running! You can access it at `http://localhost:8
 
 The first time you visit the application, you'll be guided through a secure setup process using any standard authenticator app (Google Authenticator, Authy, etc.).
 
+### 3. Deploying, and where the data lives
+
+Everything that has to outlive a deploy sits in one directory, named by the `DATA_DIR` environment variable:
+
+```
+$DATA_DIR
+├── taxconsult.db     # receipts, devices, the job queue, and your saved credentials
+└── uploads/          # the receipt photos your scanners submitted
+```
+
+That is the complete persistence surface — there is nothing else on disk to back up, and nothing else to mount.
+
+`DATA_DIR` deliberately defaults to `./karani` rather than anything under `/app`. `/app` is the code directory, and a deployment platform replaces it wholesale on every deploy; a database living inside it disappears the first time you ship a fix. So on **Deploy.tz**:
+
+1. Enter `/karani` as the persistent folder.
+2. Set `DATA_DIR=/karani` in the Environment Variables dashboard.
+
+The two must be the identical absolute path — that pairing is the entire mechanism. If they disagree, the app does not error; it quietly starts against an empty database, so it is worth checking twice. Locally, `docker compose` already wires this up through the `karani_persistence` volume.
+
+The database file is worth treating as a secret, not just as data: alongside your receipts it holds the TOTP secret and whatever LLM, Google Sheets and S3 credentials you configured on the Settings page.
+
 ## Configuration Guide
 
 After logging in, navigate to the **Settings** page to set up the LLM provider and your desired data export destinations (Google Sheets, Webhook, S3). Detailed instructions are provided on the page itself.
