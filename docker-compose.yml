@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   app:
     build:
@@ -8,10 +7,17 @@ services:
       - "80:80"
     env_file:
       - .env
+    environment:
+      # Must be byte-identical to the volume's mount target below - that pairing is
+      # the whole persistence mechanism. Set here rather than only in .env so the
+      # stack still stores data in the right place when .env is minimal.
+      - DATA_DIR=/karani
     volumes:
+      # Code, bind-mounted for hot reload. This is NOT the persistence mechanism.
       - .:/app
-      - db_data:/app/data
+      # The persistence volume: database and receipt photos. Deliberately outside
+      # /app, so replacing the code never touches the data.
+      - karani_persistence:/karani
     command: gunicorn wsgi:app -b 0.0.0.0:80 --reload --worker-class gevent --timeout 300
 volumes:
-  # Define the named volume for the database
-  db_data:
+  karani_persistence:

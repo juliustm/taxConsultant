@@ -31,9 +31,8 @@ app.config.from_object(Config)
 
 app.jinja_env.filters['currency'] = format_currency
 
-# Configure the upload folder
-app.config['UPLOAD_FOLDER'] = os.path.join(Config.DATA_DIR, 'uploads')
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# UPLOAD_FOLDER comes from Config along with everything else on the persistence
+# volume - see config.py. Nothing here may name a data path of its own.
 
 db.init_app(app)
 
@@ -127,9 +126,9 @@ def apply_pending_migrations():
     """
     Brings an existing database up to the current schema.
 
-    Adds the columns and indexes listed above, then backfills the two things that
-    cannot be expressed as a default: money that used to be stored as a float, and
-    the vendor rows that receipts now group by.
+    Adds the columns and indexes listed above, then runs the backfills - the changes
+    that cannot be expressed as a column default, like money that used to be stored
+    as a float or the vendor rows that receipts now group by.
     """
     columns_by_table = {}
     for table, columns in PENDING_COLUMNS.items():
@@ -152,6 +151,7 @@ def apply_pending_migrations():
     _backfill_money(columns_by_table.get('receipt', set()))
     _backfill_vendors()
     _backfill_device_tokens()
+    _backfill_photo_paths()
 
 def _backfill_money(receipt_columns):
     """
@@ -212,6 +212,27 @@ def _backfill_device_tokens():
 
     db.session.commit()
     print(f"[Migration] Issued activation tokens to {len(stale)} pre-existing device(s).")
+
+def _backfill_photo_paths():
+    """
+    Reduces stored photo paths to bare filenames.
+
+    Photo submissions used to record the absolute path they were saved at, which tied
+    every row to wherever the persistence volume was mounted at the time. Moving the
+    volume - which is the whole point of keeping data outside the code directory -
+    would leave those rows pointing at a directory that no longer exists.
+    """
+    absolute = Submission.query.filter(
+        Submission.input_type == 'photo', Submission.input_data.like('%/%'),
+    ).all()
+    if not absolute:
+        return
+
+    for submission in absolute:
+        submission.input_data = os.path.basename(submission.input_data)
+
+    db.session.commit()
+    print(f"[Migration] Reduced {len(absolute)} photo path(s) to filenames.")
 
 # Create database tables and seed with dummy data for demo
 with app.app_context():
@@ -631,6 +652,25 @@ def _tab_counts(filters):
     ).count()
     return counts
 
+def submission_photo_path(submission):
+    """
+    Where a photo submission's file actually is, right now.
+
+    input_data holds a bare filename, but rows written before the persistence volume
+    moved hold an absolute path into a directory that no longer exists. Resolving by
+    basename against the current UPLOAD_FOLDER reads both, and keeps the database
+    free of any dependency on where the volume happens to be mounted.
+    """
+    return os.path.join(
+        current_app.config['UPLOAD_FOLDER'], os.path.basename(submission.input_data)
+    )
+
+def submission_photo_url(submission):
+    """The public URL for a photo submission's image, or None if it isn't a photo."""
+    if not submission or submission.input_type != 'photo':
+        return None
+    return url_for('uploaded_file', filename=os.path.basename(submission.input_data))
+
 def prepare_submissions_for_frontend(submissions, detailed=True):
     """Converts Submission objects into a JSON-serialisable list of dictionaries."""
     # Read once and passed down: every receipt is assessed against the same instance
@@ -641,13 +681,9 @@ def prepare_submissions_for_frontend(submissions, detailed=True):
     for sub in submissions:
         receipt_data = receipt_to_dict(sub.receipt, config, detailed=detailed)
 
-        # Transform photo path for frontend consumption
-        frontend_input_data = sub.input_data
-        if sub.input_type == 'photo':
-            # sub.input_data is the full path: /app/data/uploads/file.jpg
-            # We create a public URL: /uploads/file.jpg
-            filename = os.path.basename(sub.input_data)
-            frontend_input_data = url_for('uploaded_file', filename=filename)
+        # A photo's stored filename becomes a public /uploads/... URL; a URL
+        # submission is already the thing the frontend should show.
+        frontend_input_data = submission_photo_url(sub) or sub.input_data
 
         data = {
             "id": sub.id, "status": sub.status, "received_at": sub.received_at.isoformat(),
@@ -962,7 +998,7 @@ def _receipt_from_photo(submission, config):
     if not config.is_configured():
         raise ValueError("Instance is not configured with LLM provider and API key.")
 
-    data = extract_receipt_details(submission.input_data, True, config)
+    data = extract_receipt_details(submission_photo_path(submission), True, config)
 
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
     if _register_duplicate(submission, verification_code, config):
@@ -1351,10 +1387,7 @@ def receipt_detail(receipt_id):
         map_reference=_map_reference_points(),
         siblings=siblings,
         business=config,
-        photo_url=(
-            url_for('uploaded_file', filename=os.path.basename(receipt.submission.input_data))
-            if receipt.submission and receipt.submission.input_type == 'photo' else None
-        ),
+        photo_url=submission_photo_url(receipt.submission),
     )
 
 # Windows the insights page can be run over. Bounded on purpose: every analysis there
@@ -1823,10 +1856,7 @@ def submission_detail(submission_id):
         receipt_time=receipt_time_from_url(submission.input_data) if submission.input_type == 'url' else None,
         region=geo.region_for(geo.parse_location(submission.location)),
         twin=twin,
-        photo_url=(
-            url_for('uploaded_file', filename=os.path.basename(submission.input_data))
-            if submission.input_type == 'photo' else None
-        ),
+        photo_url=submission_photo_url(submission),
     )
 
 def requeue_submission(submission_id):
@@ -1858,7 +1888,9 @@ def requeue_submission(submission_id):
     dispatch_event('submission.queued', {
         'id': submission.id, 'submission_id': submission.id, 'status': submission.status,
         'received_at': submission.received_at.isoformat(), 'input_type': submission.input_type,
-        'input_data': submission.input_data, 'description': submission.description,
+        # The same public URL every other event carries - never the server-side path.
+        'input_data': submission_photo_url(submission) or submission.input_data,
+        'description': submission.description,
         'location': submission.location, 'device_id': submission.device_id,
         'device_name': submission.device.name if submission.device else 'Unknown Device',
     }, get_instance_config())
@@ -2737,7 +2769,8 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
             return existing, False
 
     input_type = ''
-    # This will be the path saved to the database.
+    # What gets saved to the database: a bare filename for photos, the URL itself
+    # for URL submissions.
     db_input_data = ''
     # This will be the path sent to the frontend via SSE.
     frontend_input_data = ''
@@ -2746,12 +2779,12 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         input_type = 'photo'
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
 
-        # The full, absolute path for backend processing.
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        photo.save(filepath)
+        photo.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
 
-        # Set the two different paths for their specific purposes.
-        db_input_data = filepath
+        # Only the filename is stored. Writing the absolute path here would tie every
+        # row to wherever the persistence volume happened to be mounted that day, and
+        # moving the volume would orphan every photo already in the database.
+        db_input_data = filename
         frontend_input_data = url_for('uploaded_file', filename=filename)
 
     elif url:

@@ -5,6 +5,7 @@ The boot-time migration, run against a database built to the previous schema.
 This is the code path every existing deployment takes on its next restart, so it is
 exercised against real legacy DDL rather than trusted to review.
 """
+import os
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -220,6 +221,36 @@ def test_migration_converts_float_amounts_to_cents(legacy_database):
     assert first.total_amount == Decimal('1234.56')
     # 10.10 is not representable in binary floating point; rounding must not lose it.
     assert db.session.get(Receipt, 2).total_incl_tax_cents == 1010
+
+
+def test_migration_reduces_absolute_photo_paths_to_filenames(legacy_database):
+    """
+    A photo submitted before the persistence volume moved must still resolve.
+
+    Its stored path pointed into whatever directory the data lived in at the time,
+    so leaving it alone would orphan the image the moment that directory changed -
+    which is exactly what moving the volume off the code directory does.
+    """
+    import main
+    from models.user import Submission
+
+    db.session.execute(sa_text(
+        "INSERT INTO submission (id, received_at, status, input_type, input_data, device_id)"
+        " VALUES (3, :now, 'completed', 'photo', '/app/data/uploads/1699.0_receipt.jpg', 1)"
+    ), {'now': datetime.utcnow()})
+    db.session.commit()
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    photo = db.session.get(Submission, 3)
+    assert photo.input_data == '1699.0_receipt.jpg'
+    # Only photos name a file on disk; a URL submission keeps its whole URL.
+    assert db.session.get(Submission, 1).input_data == 'https://verify.tra.go.tz/X_000000'
+
+    # And the filename resolves against wherever uploads live now.
+    resolved = main.submission_photo_path(photo)
+    assert resolved == os.path.join(main.app.config['UPLOAD_FOLDER'], '1699.0_receipt.jpg')
 
 
 def test_migration_backfills_vendors_from_existing_receipts(legacy_database):

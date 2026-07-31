@@ -3,4 +3,6 @@ script: |
   # Step 1: Install all dependencies from requirements.txt, including Flask-Babel
   pip install -r requirements.txt
 
-run: gunicorn wsgi:app -b 0.0.0.0:80 --reload --worker-class gevent --timeout 300
+# No --reload in production: a filesystem watcher restarting workers underneath the
+# job runner would drop the SQLite leases it holds on in-flight submissions.
+run: gunicorn wsgi:app -b 0.0.0.0:80 --worker-class gevent --timeout 300

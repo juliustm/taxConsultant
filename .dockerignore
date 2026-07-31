@@ -1,0 +1,28 @@
+# Nothing stateful belongs in the image. The persistence volume supplies the
+# database and the uploads at runtime; if a copy of either were baked in here, a
+# deploy with a missing or misnamed volume mount would quietly serve stale data
+# from the image instead of failing loudly.
+data/
+karani/
+*.db
+
+# Secrets. In production these come from the platform's environment variables.
+.env
+
+# Local development noise
+.git
+.gitignore
+.github
+.venv
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Not needed to run the app
+tests/
+issues.json
+CONTRIBUTING.md
+LICENSE
+LICENSE-COMMERCIAL.md
