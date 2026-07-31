@@ -43,7 +43,7 @@
                     </div>
                     <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span class="font-mono text-xs text-gray-500">{{ 'TIN ' ~ vendor.tin if vendor.tin else 'no TIN' }}</span>
-                        {% if vendor.vrn %}
+                        {% if vendor.is_vat_registered %}
                             <span class="inline-flex items-center rounded-md bg-green-50 px-1.5 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">VAT registered</span>
                         {% else %}
                             <span class="inline-flex items-center rounded-md bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">no VRN</span>

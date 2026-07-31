@@ -210,3 +210,18 @@ def test_llm_facts_are_a_fraction_of_the_page(receipt_html):
     assert facts['total_incl_tax'] == '24273000.00'
     assert 'uin' not in facts
     assert 'customer_id' not in facts
+
+
+def test_not_registered_in_the_vrn_field_is_an_absent_vrn(receipt_html):
+    """
+    TRA prints 'VRN: NOT REGISTERED' for a supplier below the registration threshold.
+
+    Kept as text it is a truthy VRN, which is how unregistered suppliers came to be
+    labelled 'VAT registered' in the vendor list and scored as though the tax on
+    their receipts were recoverable input VAT.
+    """
+    unregistered = receipt_html.replace('10007206H', 'NOT REGISTERED', 1)
+    receipt = parse_receipt_html(unregistered)
+
+    assert receipt.vrn is None
+    assert receipt.as_llm_facts()['vendor_is_vat_registered'] is False

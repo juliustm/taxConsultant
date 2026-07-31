@@ -289,3 +289,43 @@ def test_migrated_receipts_appear_in_the_dashboard_stats(legacy_database):
 
     total = db.session.query(db.func.sum(Receipt.total_incl_tax_cents)).scalar()
     assert total == 124466
+
+
+def test_migration_clears_vrns_stored_as_the_not_registered_placeholder(legacy_database):
+    """
+    Receipts stored before the parser recognised TRA's placeholder hold the literal
+    text 'NOT REGISTERED' in the VRN column, which reads as a VRN everywhere the
+    field is tested for presence - the vendor list badged those suppliers 'VAT
+    registered' and compliance scored their tax as recoverable.
+
+    The vendor row has to be cleaned too: Vendor.upsert only ever overwrites a VRN
+    with a non-empty one, so a placeholder left there would never be displaced.
+    """
+    import main
+
+    db.session.execute(sa_text("UPDATE receipt SET vrn = 'NOT REGISTERED' WHERE id = 1"))
+    db.session.execute(sa_text("UPDATE receipt SET vrn = '10007206H' WHERE id = 2"))
+    db.session.commit()
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    assert db.session.get(Receipt, 1).vrn is None
+    # A real VRN on the same vendor is untouched, and is what the vendor keeps.
+    assert db.session.get(Receipt, 2).vrn == '10007206H'
+    assert Vendor.query.one().is_vat_registered is True
+
+
+def test_migration_leaves_a_placeholder_only_vendor_unregistered(legacy_database):
+    """The badge case from the bug report: no receipt of this vendor carries a VRN."""
+    import main
+
+    db.session.execute(sa_text("UPDATE receipt SET vrn = 'NOT REGISTERED'"))
+    db.session.commit()
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    vendor = Vendor.query.one()
+    assert vendor.vrn is None
+    assert vendor.is_vat_registered is False

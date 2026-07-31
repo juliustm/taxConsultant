@@ -644,3 +644,30 @@ def test_receipt_page_names_the_approximate_region(client, device):
     assert 'Dar es Salaam' in body
     # Never presented as something the receipt itself states.
     assert '(approximate)' in body
+
+
+def test_a_vendor_without_a_vrn_is_not_badged_vat_registered(client, device):
+    """
+    The badge answers 'may I recover input VAT from this supplier?', so it may only
+    appear against a real VRN. It was previously driven by the VRN field being
+    non-empty, and TRA fills that field with the text 'NOT REGISTERED' - which put
+    the green badge on every unregistered supplier in the list.
+    """
+    from models.user import Vendor
+
+    registered = Vendor.upsert(tin='100127423', name='BONITE BOTTLERS LTD', vrn='10007206H')
+    unregistered = Vendor.upsert(tin='114685836', name='MOHAMED JUMA MUSSA')
+    db.session.flush()
+    store(device, vendor='BONITE BOTTLERS LTD', tin='100127423', vendor_id=registered.id)
+    store(device, vendor='MOHAMED JUMA MUSSA', tin='114685836', vendor_id=unregistered.id,
+          vrn=None)
+    db.session.commit()
+
+    body = client.get('/vendors').get_data(as_text=True)
+
+    assert body.count('VAT registered') == 1
+    assert 'no VRN' in body
+
+    detail = client.get(f'/vendors/{unregistered.lookup_key}').get_data(as_text=True)
+    assert 'VAT registered' not in detail
+    assert 'no VRN on file' in detail

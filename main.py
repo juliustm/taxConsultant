@@ -22,7 +22,7 @@ from utils.tra import (
     fetch_receipt_html, parse_receipt_url, TraError, TraReceiptNotUploaded, TraThrottled,
     TraTransportError, TraUnexpectedResponse,
 )
-from utils.tra_parser import parse_receipt_html, TAX_CODES, TraParseError
+from utils.tra_parser import normalise_vrn, parse_receipt_html, TAX_CODES, TraParseError
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -149,6 +149,7 @@ def apply_pending_migrations():
     db.session.commit()
 
     _backfill_money(columns_by_table.get('receipt', set()))
+    _backfill_vrn_placeholders()
     _backfill_vendors()
     _backfill_device_tokens()
     _backfill_photo_paths()
@@ -171,6 +172,28 @@ def _backfill_money(receipt_columns):
         if result.rowcount:
             print(f"[Migration] Converted {result.rowcount} receipt.{legacy} values to cents.")
     db.session.commit()
+
+def _backfill_vrn_placeholders():
+    """
+    Clears VRNs that were stored as TRA's 'NOT REGISTERED' placeholder.
+
+    Those rows read as VAT registered everywhere the VRN is tested for presence, so
+    un-registered suppliers were shown with the green badge and scored as if input
+    VAT on their receipts were recoverable. Runs before _backfill_vendors so the
+    placeholder cannot be copied from a receipt onto a freshly created vendor.
+    """
+    cleared = 0
+    for model in (Receipt, Vendor):
+        for row in model.query.filter(model.vrn.isnot(None)).all():
+            if normalise_vrn(row.vrn) is None:
+                row.vrn = None
+                cleared += 1
+
+    if not cleared:
+        return
+
+    db.session.commit()
+    print(f"[Migration] Cleared {cleared} placeholder VRN(s).")
 
 def _backfill_vendors():
     """Attaches existing receipts to a Vendor, keyed on TIN where they carry one."""
@@ -1011,13 +1034,17 @@ def _receipt_from_photo(submission, config):
         'llm_tax_analysis': data.get('llm_tax_analysis'),
     }
 
+    # The paper says "VRN: NOT REGISTERED" when the supplier is not VAT registered,
+    # and the LLM transcribes that faithfully. Stored as-is it reads as a VRN.
+    vrn = normalise_vrn(data.get('vrn'))
+
     receipt = Receipt(
         vendor=Vendor.upsert(
             tin=data.get('vendor_tin'), name=data.get('vendor_name'),
-            vrn=data.get('vrn'), phone=data.get('vendor_phone'),
+            vrn=vrn, phone=data.get('vendor_phone'),
         ),
         vendor_name=data.get('vendor_name'), vendor_tin=data.get('vendor_tin'),
-        vendor_phone=data.get('vendor_phone'), vrn=data.get('vrn'),
+        vendor_phone=data.get('vendor_phone'), vrn=vrn,
         receipt_verification_code=verification_code,
         receipt_number=data.get('receipt_number'), z_number=data.get('z_number'),
         efd_serial=data.get('efd_serial'), uin=data.get('uin'),
