@@ -40,7 +40,7 @@ def test_a_visitor_gets_the_story_page_by_default(visitor):
     """Out of the box, an instance sells the software that runs it."""
     body = visitor.get('/').get_data(as_text=True)
 
-    assert 'Scan it.' in body
+    assert 'Stop losing' in body
     assert 'Receipts Dashboard' not in body
 
 
@@ -61,7 +61,7 @@ def test_the_plain_page_carries_the_business_and_not_the_pitch(visitor, config):
 
     assert 'Atana Ventures' in body
     assert 'Quietly building things.' in body
-    assert 'Scan it.' not in body
+    assert 'Stop losing' not in body
     assert 'Somewhere tonight' not in body
 
 
@@ -174,7 +174,7 @@ def test_the_admin_can_look_at_either_page_without_switching_to_it(admin, config
     story = admin.get('/admin/front-page/preview?mode=story')
     plain = admin.get('/admin/front-page/preview?mode=simple')
 
-    assert 'Scan it.' in story.get_data(as_text=True)
+    assert 'Stop losing' in story.get_data(as_text=True)
     assert 'Atana Ventures' in plain.get_data(as_text=True)
 
 
