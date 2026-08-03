@@ -99,8 +99,16 @@ font-size: 0.9375rem;
 color: var(--ink-soft);
 }
 
-/* Three words, said the same way every time they appear. */
-.hero__rhythm {
+/* --- The three beats, said one at a time --------------------------- */
+
+/* The whole product is three moves, so the hero says them the way they
+happen: one at a time, in order, and then again. A rail of three marks
+underneath, the lit one filling while its line is up, so you can see at a
+glance that there are only ever three of them. */
+.rota {
+display: grid;
+justify-items: start;
+gap: 0.8125rem;
 margin-top: 1.75rem;
 font-family: var(--mono);
 font-size: 0.8125rem;
@@ -108,7 +116,67 @@ letter-spacing: 0.16em;
 text-transform: uppercase;
 }
 
-.hero__rhythm span { color: var(--ink-soft); }
+/* One line's worth of room, held open: the lines are stacked on top of each
+other, so without this the hero jumps every time one leaves. */
+.rota__slot {
+position: relative;
+display: block;
+height: 1.6em;
+align-self: start;
+}
+
+.rota__line {
+position: absolute;
+inset: 0;
+white-space: nowrap;
+animation: rota-line 10.5s cubic-bezier(.2, .7, .3, 1) calc(var(--i) * 3.5s) infinite both;
+}
+
+.rota__line b { font-weight: inherit; color: var(--accent-dark); }
+
+.rota__rail { display: flex; gap: 0.375rem; }
+
+.rota__seg {
+position: relative;
+overflow: hidden;
+width: 1.625rem;
+height: 3px;
+border-radius: 999px;
+background: var(--line);
+}
+
+.rota__seg::after {
+content: "";
+position: absolute;
+inset: 0;
+background: var(--accent);
+transform: scaleX(0);
+transform-origin: left;
+animation: rota-fill 10.5s linear calc(var(--i) * 3.5s) infinite both;
+}
+
+/* 3.5s of the 10.5s cycle each, so the three windows meet end to end. */
+@keyframes rota-line {
+0% { opacity: 0; transform: translateY(0.5em); }
+4%, 29% { opacity: 1; transform: none; }
+33.33%, 100% { opacity: 0; transform: translateY(-0.5em); }
+}
+
+@keyframes rota-fill {
+0% { transform: scaleX(0); }
+33.32% { transform: scaleX(1); }
+33.33%, 100% { transform: scaleX(0); }
+}
+
+/* Nothing moving: the three beats simply stand side by side and the rail is
+full. The blanket rule in the shell collapses .cue animations to nothing,
+which would leave three lines stacked on one another, so the stack is taken
+apart here rather than frozen. */
+@media (prefers-reduced-motion: reduce) {
+.rota__slot { height: auto; display: flex; flex-wrap: wrap; gap: 0 1.25rem; }
+.rota__line { position: static; opacity: 1; transform: none; animation: none; }
+.rota__seg::after { transform: scaleX(1); animation: none; }
+}
 
 /* --- The receipt, and what it becomes ----------------------------- */
 
@@ -552,15 +620,20 @@ font-weight: 750; text-wrap: balance; }
 
 .open {
 display: grid;
+/* minmax(0, ...) rather than a bare track, here and below: the code line inside
+each card refuses to wrap, so a track sized to its content makes the card
+wider than the page. */
+grid-template-columns: minmax(0, 1fr);
 gap: 1.25rem;
 margin-top: clamp(2.5rem, 6vw, 3.5rem);
 }
 
 @media (min-width: 48rem) {
-.open { grid-template-columns: 1fr 1fr; }
+.open { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 
 .open__card {
+min-width: 0;
 padding: clamp(1.5rem, 3vw, 2rem);
 border: 1px solid var(--line);
 border-radius: 1.25rem;
@@ -579,7 +652,15 @@ color: var(--paper);
 font-family: var(--mono);
 font-size: 0.8125rem;
 overflow-x: auto;
+overscroll-behavior-x: contain;
 white-space: nowrap;
+}
+
+/* On a phone the long line is allowed to wrap rather than sit in a scroller
+nobody will find. It also means no engine can ever size the card to a line
+that is wider than the screen. */
+@media (max-width: 47.999rem) {
+.open__code { white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
 }
 
 .open__code b { color: var(--accent); font-weight: 400; }
@@ -620,7 +701,18 @@ color: var(--ink-soft);
             <a class="hero__note" href="#how" style="text-decoration:none;border-bottom:1px solid var(--line)">See how
                 it works</a>
         </div>
-        <p class="hero__rhythm">Scan. Verify. Claim. <span></span></p>
+        <p class="rota">
+            <span class="rota__slot">
+                <span class="rota__line cue" style="--i:0"><b>Scan</b> the receipt</span>
+                <span class="rota__line cue" style="--i:1"><b>Karani</b> verifies it</span>
+                <span class="rota__line cue" style="--i:2"><b>Claim</b> the VAT</span>
+            </span>
+            <span class="rota__rail" aria-hidden="true">
+                <i class="rota__seg cue" style="--i:0"></i>
+                <i class="rota__seg cue" style="--i:1"></i>
+                <i class="rota__seg cue" style="--i:2"></i>
+            </span>
+        </p>
     </div>
 
     {# The promise, drawn: paper in, answer out. #}
