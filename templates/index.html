@@ -82,14 +82,19 @@
     <div class="mt-2 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
         <template x-for="card in statCards" :key="card.name">
             <div class="relative overflow-hidden rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
-                <div class="flex items-start justify-between">
-                    <div>
+                <div class="flex items-start justify-between gap-x-3">
+                    <div class="min-w-0 flex-1">
                         <dt class="truncate text-sm font-medium text-gray-500" x-text="card.name"></dt>
-                        <dd class="mt-1 text-2xl font-semibold tracking-tight text-gray-900" x-text="card.total"></dd>
+                        <!-- One line, always: the figure shrinks with its own length rather
+                             than wrapping the currency onto a second row. -->
+                        <dd class="mt-1 flex items-baseline gap-x-1 whitespace-nowrap" :title="card.exact">
+                            <span class="font-semibold tracking-tight text-gray-900" :class="card.amountClass" x-text="card.amount"></span>
+                            <span class="text-xs font-medium text-gray-400">TZS</span>
+                        </dd>
                         <dd class="mt-0.5 text-sm text-gray-500" x-text="`${card.count} receipt${card.count === 1 ? '' : 's'}`"></dd>
                     </div>
                     <!-- Rendered inline; the values are numbers from our own API, never text. -->
-                    <svg class="h-10 w-24 flex-shrink-0 overflow-visible" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+                    <svg class="h-8 w-16 flex-shrink-0 overflow-visible" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
                         <polyline :points="card.sparkline" fill="none" :stroke="card.trendStroke" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
                     </svg>
                 </div>
@@ -474,10 +479,13 @@ function dashboard() {
             return periods.map(period => {
                 const data = this.stats[period.key] || {};
                 const delta = data.delta_pct ?? null;
+                const amount = this.wholeShillings(data.total_cents);
                 return {
                     name: period.name,
                     count: data.count || 0,
-                    total: this.money(data.total_cents),
+                    amount,
+                    amountClass: this.amountSizeClass(amount),
+                    exact: this.money(data.total_cents),
                     delta,
                     comparison: delta === null ? `no spending ${period.comparison.replace('vs ', 'in the ')}` : period.comparison,
                     deltaClass: delta > 0 ? 'text-red-600' : (delta < 0 ? 'text-green-600' : 'text-gray-500'),
@@ -701,6 +709,19 @@ function dashboard() {
         money(cents) {
             if (cents === null || cents === undefined) return '---';
             return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' TZS';
+        },
+        // The stat cards carry period totals, where cents are noise and cost two
+        // characters of width. The exact figure stays on the card's tooltip.
+        wholeShillings(cents) {
+            if (cents === null || cents === undefined) return '---';
+            return Math.round(cents / 100).toLocaleString('en-US');
+        },
+        // A card is about 180px wide inside its padding and sparkline, so a long
+        // figure steps down a size or two instead of spilling out of the card.
+        amountSizeClass(amount) {
+            if (amount.length > 13) return 'text-lg';
+            if (amount.length > 10) return 'text-xl';
+            return 'text-2xl';
         },
         sparkline(series) {
             if (!series.length) return '';
