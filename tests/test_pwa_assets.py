@@ -1218,3 +1218,533 @@ def test_switching_views_lands_where_the_user_left_each_one(tmp_path):
     # And one being returned to picks up where it was - by the tap, and by Back.
     assert state['backOnHistory'] == 640
     assert state['wentBack'] == 640
+
+
+def test_a_photo_the_phone_could_not_decode_is_uploaded_bigger_than_one_it_could():
+    """
+    The two capture paths must not flatten this back to a single size.
+
+    A receipt reached the server at 720x1280 with its QR code about sixty pixels across
+    - under two pixels a module - and the server's decoder ran every pass it has over it
+    and found nothing, because there was nothing left to find. Whether the code survives
+    is settled on the phone, by the two numbers below, long before utils/qr.py gets a
+    look at it: what the camera was asked for, and how much of the result is kept.
+
+    Asserted on the source because there is no way to prove it otherwise without a
+    camera. Both `capture()` and `readImageFile()` must ask for the larger size, and
+    must ask for it only when their own decode came back empty - a photo whose code this
+    phone already read is evidence filed beside a verified receipt, and does not need
+    the bytes.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+
+    undecoded = int(re.search(r'var UNDECODED_MAX_EDGE = (\d+);', scanner).group(1))
+    default = int(re.search(r'maxEdge = maxEdge \|\| (\d+);', scanner).group(1))
+    assert undecoded > default, 'an unread code is the one case that needs the pixels'
+
+    conditional = re.findall(r'toJpeg\(full, text \? null : UNDECODED_MAX_EDGE\)', scanner)
+    assert len(conditional) == 2, 'both the shutter and the gallery import must do this'
+
+
+CAPTURE_HARNESS = r"""
+// Runs Scanner.grabAtFullResolution against a fake camera, and reports what it asked
+// the track for, in order, and what it ended up drawing.
+const fs = require('fs'), vm = require('vm');
+
+function fakeContext() {
+    return { drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }), putImageData() {} };
+}
+
+const sandbox = {
+    console, setTimeout, clearTimeout, Promise,
+    requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 0),
+    document: { createElement: () => ({ width: 0, height: 0, getContext: fakeContext }) },
+    navigator: {},
+};
+sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
+// The whole point of the path under test: no ImageCapture, as on every iPhone.
+delete sandbox.ImageCapture;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const asked = [];
+// A camera streaming a 720x1280 preview from a sensor that can do 2160x3840 - the
+// arrangement that produced the unreadable uploads.
+const video = { videoWidth: 720, videoHeight: 1280 };
+const track = {
+    getCapabilities: () => ({ width: { max: 2160 }, height: { max: 3840 } }),
+    getSettings: () => ({ width: video.videoWidth, height: video.videoHeight }),
+    async applyConstraints(c) {
+        asked.push(JSON.parse(JSON.stringify(c)));
+        // A real camera does not deliver the new size the instant the promise settles -
+        // it is reconfiguring hardware. Frames keep arriving at the old resolution for
+        // a while, which is the whole reason grabAtFullResolution waits rather than
+        // drawing as soon as applyConstraints resolves.
+        const edge = (c.height && c.height.ideal) || (c.width && c.width.ideal);
+        let framesLate = 4;
+        const tick = () => {
+            if (--framesLate > 0) return setTimeout(tick, 0);
+            video.videoHeight = edge;
+            video.videoWidth = Math.round(edge * 720 / 1280);
+        };
+        setTimeout(tick, 0);
+    },
+};
+
+const canvas = { width: 0, height: 0, getContext: fakeContext };
+
+(async () => {
+    const drew = await sandbox.Scanner.grabAtFullResolution(track, video, canvas);
+    console.log(JSON.stringify({
+        drew,
+        asked,
+        captured: canvas.width + 'x' + canvas.height,
+    }));
+})().catch((e) => console.log(JSON.stringify({ error: e.message, stack: e.stack })));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_still_is_taken_at_the_sensors_resolution_not_the_viewfinders(tmp_path):
+    """
+    The bug that made every server-side decode fail, run rather than grepped for.
+
+    `ImageCapture.takePhoto` is how a still is supposed to be taken at full sensor
+    resolution, and WebKit has never shipped it - so on every iPhone `capture()` fell
+    through to drawing the viewfinder instead. A viewfinder is a preview stream sized
+    for smooth playback, routinely 720x1280, and a receipt's QR code in one is about
+    sixty pixels across: under two pixels a module, which no decoder on either side of
+    the wire can read. That is the whole reason a server-side scan had never once
+    succeeded, and no amount of preprocessing in utils/qr.py could have changed it.
+
+    So the track is raised to its maximum for the shutter and put back afterwards, and
+    all three of those halves matter: raised, or the upload is unreadable; drawn after
+    the camera has actually switched, or the frame is the old size anyway; restored, or
+    the preview decode loop runs at full sensor resolution and cooks the phone.
+    """
+    harness = tmp_path / 'capture.js'
+    harness.write_text(CAPTURE_HARNESS)
+
+    result = subprocess.run(
+        ['node', str(harness), str(STATIC / 'js' / 'scanner.js')],
+        capture_output=True, text=True, timeout=30)
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert 'error' not in report, report
+    assert report['drew'] is True
+
+    # Raised to the sensor's own maximum, then put back to what the preview was on.
+    assert len(report['asked']) == 2, report['asked']
+    assert report['asked'][0] == {'height': {'ideal': 3840}}
+    assert report['asked'][1] == {'height': {'ideal': 1280}}
+
+    # And the frame was taken after the camera had switched, not before.
+    assert report['captured'] == '2160x3840'
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_camera_that_will_not_change_mode_still_yields_a_photograph(tmp_path):
+    """
+    Every step of the raise is allowed to fail into the old behaviour.
+
+    A camera that reports no capabilities, or refuses the constraint, must still produce
+    the viewfinder frame - which is exactly what this used to do unconditionally, and is
+    worth having over an error in front of someone holding a receipt.
+    """
+    harness = tmp_path / 'capture-refuses.js'
+    harness.write_text(CAPTURE_HARNESS.replace(
+        'getCapabilities: () => ({ width: { max: 2160 }, height: { max: 3840 } }),',
+        'getCapabilities: () => { throw new Error("not supported"); },'))
+
+    result = subprocess.run(
+        ['node', str(harness), str(STATIC / 'js' / 'scanner.js')],
+        capture_output=True, text=True, timeout=30)
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert 'error' not in report, report
+    assert report['drew'] is True
+    assert report['asked'] == [], 'a camera that reports nothing must not be reconfigured'
+    assert report['captured'] == '720x1280'
+
+
+def test_the_camera_is_asked_for_a_long_edge_rather_than_a_landscape_frame():
+    """
+    Where the 720x1280 came from.
+
+    `width: 1920, height: 1080` describes a landscape stream. A phone held upright
+    produces a portrait one, and a browser resolving that pair by aspect ratio hands
+    back the nearest mode it has - routinely 720p - from a camera holding twelve
+    megapixels. And because `ideal` obliges nobody, the request has to be made a second
+    time once the track's real capabilities can be read.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    constraints = re.search(r'var CAMERA_CONSTRAINTS = \{(.*?)\n    \};', scanner, re.S).group(1)
+
+    assert 'width:' not in constraints, 'a width pins the frame to landscape'
+    assert 'aspectRatio' in constraints and 'height:' in constraints
+
+    # And asked again with the answer in hand, on every path that starts a camera.
+    assert len(re.findall(r'await raiseResolution\(track\)', scanner)) == 2
+
+
+# --- A deploy reaching a phone that already has the app ----------------------
+#
+# The failure this covers is the one that produced "the PWA is broken": handleStatic
+# was cache-first with no revalidation, so /static/js/pwa.js and /static/js/scanner.js
+# were served out of the precache *permanently*, and the precache is only rebuilt when
+# CACHE_VERSION changes. Navigations, meanwhile, have always revalidated - so a deploy
+# that changed the scripts without bumping the constant gave every installed phone the
+# new HTML wrapped around the old JavaScript on the very next launch. That is not a
+# degraded app: the component throws while initialising and takes the whole shell down,
+# history and all, and reloading re-serves the same stale script.
+
+SERVICE_WORKER_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const served = new Map(JSON.parse(process.argv[3]));   // url -> what the server has now
+const seeded = new Map(JSON.parse(process.argv[4]));   // url -> what the phone cached
+
+class FakeResponse {
+    constructor(body, ok = true) { this.body = body; this.ok = ok; }
+    clone() { return new FakeResponse(this.body, this.ok); }
+}
+
+class FakeCache {
+    constructor() { this.store = new Map(); }
+    async match(request) { return this.store.get(request.url); }
+    async put(request, response) { this.store.set(request.url, response); }
+}
+
+const caches_ = new Map();
+const fetched = [];
+
+const context = {
+    console,
+    URL,
+    setTimeout,
+    clearTimeout,
+    AbortController,
+    fetched,
+    caches_,
+    FakeResponse,
+    caches: {
+        // Creation order matters: the real Cache Storage searches caches in the order
+        // they were opened, which is exactly how a stale precache entry beats a fresh
+        // runtime one.
+        async open(name) {
+            if (!caches_.has(name)) caches_.set(name, new FakeCache());
+            return caches_.get(name);
+        },
+        async match(request) {
+            for (const cache of caches_.values()) {
+                const hit = await cache.match(request);
+                if (hit) return hit;
+            }
+            return undefined;
+        },
+        async keys() { return [...caches_.keys()]; },
+        async delete(name) { return caches_.delete(name); },
+    },
+    async fetch(request) {
+        const url = typeof request === 'string' ? request : request.url;
+        fetched.push(url);
+        if (!served.has(url)) return new FakeResponse(null, false);
+        return new FakeResponse(served.get(url), true);
+    },
+    self: {
+        addEventListener() {},
+        location: { origin: 'https://karani.example' },
+        clients: { claim: async () => {} },
+        skipWaiting: async () => {},
+        registration: {},
+    },
+};
+context.globalThis = context;
+vm.createContext(context);
+
+vm.runInContext(
+    source + '\n;globalThis.__sw = { handleStatic, isOwnAsset, PRECACHE, RUNTIME };',
+    context
+);
+
+(async () => {
+    const sw = context.__sw;
+    const precache = await context.caches.open(sw.PRECACHE);
+    for (const [url, body] of seeded) {
+        await precache.put({ url }, new FakeResponse(body, true));
+    }
+
+    const read = async (url) => {
+        const waits = [];
+        const event = { waitUntil: (p) => waits.push(p) };
+        const response = await sw.handleStatic({ url, method: 'GET' }, event);
+        // The launch is over; whatever the worker asked to finish, finishes.
+        await Promise.all(waits.map((p) => p.catch(() => {})));
+        return response ? response.body : null;
+    };
+
+    const out = {};
+    for (const url of served.keys()) {
+        out[url] = { first: await read(url), second: await read(url) };
+    }
+    out.fetched = fetched;
+    console.log(JSON.stringify(out));
+})().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_new_script_reaches_a_phone_that_already_has_the_old_one(tmp_path):
+    """
+    Runs the real worker. Source-level checks are what let this ship in the first
+    place: every individual piece read correctly, and the bug was in what the pieces
+    did together over two launches.
+    """
+    app_js = 'https://karani.example/static/js/pwa.js'
+    vendor_js = 'https://karani.example/static/js/vendor/alpine.min.js'
+
+    harness = tmp_path / 'sw.js'
+    harness.write_text(SERVICE_WORKER_HARNESS)
+    result = subprocess.run(
+        ['node', str(harness), str(SERVICE_WORKER),
+         json.dumps([[app_js, 'NEW'], [vendor_js, 'NEW']]),
+         json.dumps([[app_js, 'OLD'], [vendor_js, 'OLD']])],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert 'error' not in out, out['error']
+
+    # The first launch still paints instantly from the cache - that is the whole point
+    # of precaching, and slowing it down would trade one complaint for another.
+    assert out[app_js]['first'] == 'OLD'
+    # The second launch has the deploy. Before this, it was 'OLD' forever.
+    assert out[app_js]['second'] == 'NEW'
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_pinned_vendor_bundles_are_not_refetched_on_every_launch(tmp_path):
+    """
+    The other half. zxing_reader.wasm and the Tailwind bundle are megabytes, they
+    change only when someone deliberately replaces them, and this app runs on metered
+    phone data - revalidating them every cold start would be a real cost paid for
+    nothing.
+    """
+    app_js = 'https://karani.example/static/js/pwa.js'
+    vendor_js = 'https://karani.example/static/js/vendor/alpine.min.js'
+    icon = 'https://karani.example/static/icons/icon-192.png'
+
+    harness = tmp_path / 'sw.js'
+    harness.write_text(SERVICE_WORKER_HARNESS)
+    result = subprocess.run(
+        ['node', str(harness), str(SERVICE_WORKER),
+         json.dumps([[app_js, 'NEW'], [vendor_js, 'NEW'], [icon, 'NEW']]),
+         json.dumps([[app_js, 'OLD'], [vendor_js, 'OLD'], [icon, 'OLD']])],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert 'error' not in out, out['error']
+
+    assert out[vendor_js]['second'] == 'OLD'
+    assert out[icon]['second'] == 'OLD'
+    assert vendor_js not in out['fetched']
+    assert icon not in out['fetched']
+
+
+def test_the_worker_was_reversioned_for_the_scripts_that_changed_with_it():
+    """
+    Revalidation heals a missed bump on the next launch; it does not make the bump
+    pointless. The version is what evicts the old precache in one step rather than
+    asset by asset, and it is the only thing that fixes the phones already sitting on
+    a broken pairing right now.
+    """
+    source = SERVICE_WORKER.read_text()
+    assert "const CACHE_VERSION = 'v5'" not in source, (
+        'pwa.js, scanner.js and the scan shell changed; CACHE_VERSION is still v5, '
+        'so installed phones keep the old scripts.'
+    )
+    assert "const CACHE_VERSION = 'v6'" not in source, (
+        'scanner.js now takes the still at the sensor resolution instead of the '
+        "viewfinder's; CACHE_VERSION is still v6, so every already-installed phone "
+        'keeps uploading the 720x1280 preview frames that no decoder can read.'
+    )
+    assert "const CACHE_VERSION = 'v7'" not in source, (
+        'pwa.js no longer lets a stuck outbox suppress the history pull; '
+        'CACHE_VERSION is still v7, so every already-installed phone keeps the build '
+        'whose history screen stays empty for as long as one receipt cannot be sent.'
+    )
+
+
+# --- The history that stopped arriving ----------------------------------------
+#
+# Reported from the field as two separate complaints - "I cannot see the receipts this
+# phone sent" and "my photos will not sync" - which were one bug wearing two hats. The
+# phone's summary kept updating (its own endpoint, its own timer), so the screen showed
+# live totals above an empty list: the most convincing way an app can say a receipt is
+# gone when it is not.
+
+SYNC_HARNESS = """
+const fs = require('fs');
+
+/*
+ * Enough of idb to run the real sync(), and no more: get/put/delete/getAll/count on a
+ * plain Map per store, plus the one cursor walk cachedHistory does. Stubbing sync()
+ * itself would test the stub; this way the code under test is the shipped file.
+ */
+function fakeDB() {
+    const stores = { outbox: new Map(), submissions: new Map(), meta: new Map() };
+    const keyOf = (name, value) => name === 'outbox' ? value.client_uuid
+                                 : name === 'meta' ? value.key : value.id;
+    const db = {
+        version: 1,
+        objectStoreNames: { contains: (n) => n in stores },
+        async get(name, key) { return stores[name].get(key); },
+        async getAll(name) { return Array.from(stores[name].values()); },
+        async count(name) { return stores[name].size; },
+        async put(name, value) { stores[name].set(keyOf(name, value), value); },
+        async delete(name, key) { stores[name].delete(key); },
+        transaction(name) {
+            const store = {
+                async put(value) { stores[name].set(keyOf(name, value), value); },
+                async openCursor() {
+                    const rows = Array.from(stores[name].values()).sort((a, b) => b.id - a.id);
+                    let i = 0;
+                    const at = () => i >= rows.length ? null : {
+                        value: rows[i], async continue() { i += 1; return at(); },
+                    };
+                    return at();
+                },
+            };
+            return { store, objectStore: () => store, done: Promise.resolve() };
+        },
+        close() {},
+    };
+    db._stores = stores;
+    return db;
+}
+
+const db = fakeDB();
+global.idb = { openDB: async () => db };
+
+const calls = [];
+global.fetch = async (url, options = {}) => {
+    calls.push(String(url));
+    const respond = (status, body) => ({
+        ok: status >= 200 && status < 300,
+        status,
+        async json() { return body; },
+        clone() { return this; },
+    });
+    if (String(url).indexOf('/scan/api/sync/photo') === 0) {
+        // The ingress refusing a photo larger than its body limit. Permanent, and the
+        // whole point of the scenario.
+        return respond(413, {});
+    }
+    if (String(url).indexOf('/scan/api/submissions') === 0) {
+        return respond(200, { submissions: JSON.parse(process.argv[3]), has_more: false });
+    }
+    return respond(200, {});
+};
+
+global.AbortController = class { constructor() { this.signal = null; } abort() {} };
+global.window = {
+    navigator: { onLine: true },
+    document: { addEventListener() {}, visibilityState: 'visible' },
+    addEventListener() {},
+    localStorage: {
+        getItem: () => JSON.stringify({ token: 'session-token', device: { name: 'Test Phone' } }),
+        setItem() {}, removeItem() {},
+    },
+    setTimeout: setTimeout,
+    crypto: { randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) },
+    fetch: global.fetch,
+    AbortController: global.AbortController,
+};
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const PWA = global.window.PWA;
+
+(async () => {
+    const out = {};
+    // One photo this server will never accept, sitting at the head of the queue - the
+    // state both screenshots from the field were in.
+    await db.put('outbox', {
+        client_uuid: 'stuck-photo', kind: 'photo',
+        // A real Blob: syncPhoto puts it through FormData, which rejects anything else.
+        photo: new Blob([new Uint8Array(1024)], { type: 'image/jpeg' }),
+        captured_at: '2026-08-11T19:10:00', attempts: 0, last_error: null,
+    });
+
+    const first = await PWA.sync();
+    out.firstSync = first;
+    out.historyAfterFirstSync = (await PWA.cachedHistory({})).map((r) => r.id);
+    out.askedFor = calls.slice();
+
+    const stuck = await db.get('outbox', 'stuck-photo');
+    out.attempts = stuck.attempts;
+    out.lastError = stuck.last_error;
+    // Still in the outbox: a receipt the server refused is not a receipt to delete.
+    out.stillQueued = (await PWA.outboxAll()).length;
+
+    // A second pass must not spend another request on a verdict already delivered...
+    calls.length = 0;
+    await PWA.sync();
+    out.retriedThePhoto = calls.some((u) => u.indexOf('/scan/api/sync/photo') === 0);
+    // ...and must still read history back.
+    out.pulledAgain = calls.some((u) => u.indexOf('/scan/api/submissions') === 0);
+
+    console.log(JSON.stringify(out));
+})().catch((e) => console.log(JSON.stringify({ error: String(e && e.stack || e) })));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_receipt_that_cannot_be_sent_does_not_hide_the_ones_that_were(tmp_path):
+    """
+    sync() drains the outbox and then reads history back. Those are two different jobs
+    that happen to share a timer, and the read used to be reachable only by falling off
+    the end of the drain: any `stop` returned early, and the pull was additionally
+    gated on `sent > 0 || settings.refresh`.
+
+    So one undeliverable photo - a 413 from the ingress body limit, say - was enough to
+    switch the history screen off permanently. `sent` cannot climb while the queue is
+    stuck, and the periodic sync passes no `refresh`, so the gate stayed shut on every
+    tick after boot. The phone showed a summary that kept moving above a list that
+    stayed empty, and reinstalling made it worse: that clears the cache the screen had
+    been falling back on.
+    """
+    rows = [{'id': 41, 'status': 'completed', 'captured_at': '2026-08-10T09:00:00'},
+            {'id': 42, 'status': 'completed', 'captured_at': '2026-08-11T09:00:00'}]
+
+    harness = tmp_path / 'sync.js'
+    harness.write_text(SYNC_HARNESS)
+    result = subprocess.run(
+        ['node', str(harness), str(STATIC / 'js' / 'pwa.js'), json.dumps(rows)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert 'error' not in out, out['error']
+
+    # The photo genuinely did not go, and is reported as not having gone...
+    assert out['firstSync']['sent'] == 0
+    assert out['firstSync']['failed'] == 1
+    # ...and is still on the phone. A refusal is not permission to drop a receipt.
+    assert out['stillQueued'] == 1
+
+    # The whole bug, in one assertion: history arrived anyway.
+    assert out['historyAfterFirstSync'] == [42, 41], \
+        'a stuck outbox is still suppressing the history pull'
+    assert any(u.startswith('/scan/api/submissions') for u in out['askedFor'])
+
+    # A permanent rejection is spent at once rather than dressed up as "Waiting" for
+    # eight more identical attempts, and it says what happened in words.
+    assert out['attempts'] == 8
+    assert 'too large' in out['lastError']
+    assert '413' in out['lastError']
+    assert not out['retriedThePhoto'], 'a 413 is being retried with the same bytes'
+
+    # And the read half keeps running on every tick, not just the one that sent something.
+    assert out['pulledAgain']

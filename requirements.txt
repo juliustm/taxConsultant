@@ -5,6 +5,14 @@ Flask-SQLAlchemy
 pyotp
 qrcode
 Pillow
+# Reads the QR code off a photographed receipt server-side, which is what turns a
+# photo the phone could not decode into a receipt TRA verifies. See utils/qr.py.
+#
+# The floor is not cosmetic: 2.x ships no arm64 wheels at all, so on an ARM host it
+# falls back to a CMake build that the slim image has no toolchain for and the whole
+# install fails. 3.1 publishes abi3 wheels for x86_64 and arm64 alike, which is also
+# why the Dockerfile is on Python 3.12 - see the note there.
+zxing-cpp>=3.1,<4
 requests
 boto3
 openai

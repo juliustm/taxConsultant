@@ -263,6 +263,32 @@ def test_a_receipt_with_no_verification_code_fails_verification():
     assert status_of(assessment, 'verification') == compliance.FAIL
 
 
+def test_a_document_that_is_not_an_efd_receipt_is_not_reported_as_a_failed_one():
+    """
+    A parking stub never had a verification code and never will.
+
+    'No verification code, so this cannot be confirmed against TRA' describes a receipt
+    that failed. This one did not fail - it is a different kind of document, still a
+    real cost, just one carrying no input VAT and no TRA record. Saying so is the
+    difference between a reader chasing a code and a reader filing the expense.
+    """
+    assessment = assess(build_receipt(
+        document_type='other_receipt', extraction_source='llm_vision',
+        receipt_verification_code=None,
+    ))
+    check = assessment.check('verification')
+    assert check.status == compliance.WARN
+    assert 'not a Tanzanian EFD receipt' in check.detail
+
+
+def test_a_photograph_of_something_that_is_not_a_receipt_fails_verification():
+    assessment = assess(build_receipt(
+        document_type='not_a_receipt', extraction_source='llm_vision',
+        receipt_verification_code=None,
+    ))
+    assert status_of(assessment, 'verification') == compliance.FAIL
+
+
 # --- Line-item judgments ----------------------------------------------------
 
 def test_withholding_is_estimated_on_the_amount_before_vat():

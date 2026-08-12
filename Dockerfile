@@ -1,5 +1,11 @@
 # Dockerfile
-FROM python:3.9-slim
+#
+# 3.12 rather than the 3.9 this image ran on for its first year. The forcing reason is
+# the QR decoder (see requirements.txt): its only wheels that cover both x86_64 and
+# arm64 need 3.10 or newer, and without a wheel the install is a CMake build this slim
+# image has no toolchain for. 3.9 also stopped receiving security fixes in October
+# 2025, and every dependency here is already tested against 3.12 and 3.13.
+FROM python:3.12-slim
 
 WORKDIR /app
 

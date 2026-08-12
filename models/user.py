@@ -13,6 +13,14 @@ class InstanceConfig(db.Model):
     totp_secret = db.Column(db.String(100), unique=True, nullable=False)
     llm_provider = db.Column(db.String(50), nullable=True)
     llm_api_key = db.Column(db.String(200), nullable=True)
+    # Which model to ask, when the defaults are not the right answer. Left blank on
+    # almost every instance: utils/llm_processor holds a candidate list and walks past
+    # any model the provider has retired. These exist because that is a race we cannot
+    # always win - a hosted model can be decommissioned overnight, and when it is, an
+    # instance owner needs a way to name a working one from the configure page rather
+    # than waiting on a release. Blank means "decide for me".
+    llm_text_model = db.Column(db.String(100), nullable=True)
+    llm_vision_model = db.Column(db.String(100), nullable=True)
 
     # --- Who this instance files for ---
     # Without the TIN there is no way to tell a receipt issued to this business from
@@ -128,6 +136,28 @@ class Submission(db.Model):
     # something to show the admin, and ties such a submission to a vendor later if the
     # same receipt does eventually arrive. See utils/tra.parse_receipt_url.
     receipt_code = db.Column(db.String(50), nullable=True, index=True)
+    # The TRA verification URL we will actually ask the portal for, when that is not the
+    # one that came in. Written by the photo pipeline the moment it works out which
+    # receipt an image is - by decoding its QR code on the server, or from the code and
+    # time the vision model transcribed off the paper - so a retry goes straight back to
+    # the portal instead of paying for the decode and the vision call again, and so a
+    # photo that never verifies still says which receipt it was taken to be. Also written
+    # by an admin correcting that address by hand, which is why it outranks input_data
+    # for a URL submission too: a corrected address that only applied to the attempt that
+    # set it would be re-broken by the next scheduled retry.
+    recovered_url = db.Column(db.String(200), nullable=True)
+    # When a human last re-read the code and time off the photograph and fixed them.
+    # Kept because the two are otherwise indistinguishable from what a model transcribed,
+    # and a page that says where an address came from is the difference between trusting
+    # it and checking it again.
+    corrected_at = db.Column(db.DateTime, nullable=True)
+    # What the server-side QR decoder saw, as the JSON report utils.qr.scan returns.
+    # Stored rather than logged because the three ways a photograph reaches the vision
+    # model - the decoder is not installed, the upload was unopenable, the code is
+    # genuinely unreadable - are indistinguishable from the outside and want three
+    # different things done about them. NULL means the decoder was never run on this
+    # submission: a URL submission, or a photo whose receipt was already identified.
+    qr_scan = db.Column(db.Text, nullable=True)
     # The scanner's idempotency key, minted on the phone before the receipt has ever
     # been near a network. A queued scan is retried until it is acknowledged, and
     # without this every dropped response would leave a duplicate behind.
@@ -280,9 +310,30 @@ class Receipt(db.Model):
     # 'tra_html' when the facts were parsed from the verified page, 'llm_vision' when
     # a photo left no alternative to reading them out of the image.
     extraction_source = db.Column(db.String(20), nullable=True)
+    # What kind of document this is, as opposed to where its numbers came from:
+    # 'tra_efd_receipt', 'other_receipt' (a parking stub, a handwritten chit, a foreign
+    # till slip) or 'not_a_receipt'. Only a photograph can be anything but the first,
+    # and the distinction matters because a non-EFD document is not a failed EFD
+    # receipt - it is a real expense with no input VAT behind it, and saying so is
+    # different from saying verification did not work.
+    document_type = db.Column(db.String(30), nullable=True)
     # The verified page exactly as TRA served it, so any field can be re-derived
     # later without asking the portal again.
     source_html = db.Column(db.Text, nullable=True)
+
+    # --- What a human fixed by hand ---
+    # A receipt read off a photograph is a model's best reading of a crumpled thermal
+    # print, and some of those readings are wrong in ways that matter: a digit out of a
+    # TIN splits one supplier into two, a wrong date moves the VAT claim window. An admin
+    # with the photograph in front of them can fix that in seconds, and these two columns
+    # are what stop the fix from being invisible afterwards - which fields stopped being
+    # the model's reading, and when. Never set on a receipt parsed from TRA's own page:
+    # those numbers are the portal's and are not edited here.
+    corrected_at = db.Column(db.DateTime, nullable=True)
+    # The labels of the fields a human has overwritten, as a JSON list. Cumulative: a
+    # second correction adds to it rather than replacing it, because the question being
+    # answered is "which of these numbers is still the model's?".
+    corrected_fields = db.Column(db.Text, nullable=True)
     category = db.Column(db.String(50), nullable=True, index=True)
     # 'ok', 'unavailable' (the model could not be reached) or 'skipped'.
     llm_status = db.Column(db.String(20), nullable=True)

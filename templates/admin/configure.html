@@ -118,11 +118,34 @@
                             </select>
                         </div>
                         {{ secret_field('llm_api_key', config.llm_api_key, 'API Key', span='sm:col-span-6') }}
+                        {{ text_field('llm_text_model', config.llm_text_model, 'Analysis model (optional)',
+                                      'leave blank to choose automatically',
+                                      'Which model judges a receipt. Blank is right for almost everyone.',
+                                      span='sm:col-span-3', mono=true) }}
+                        {{ text_field('llm_vision_model', config.llm_vision_model, 'Photo-reading model (optional)',
+                                      'leave blank to choose automatically',
+                                      'Which model reads photographed receipts. Set one only if the logs say the
+                                       default has been retired by your provider.',
+                                      span='sm:col-span-3', mono=true) }}
                     </div>
                     {% if not config.is_configured() %}
                     <p class="mt-4 text-xs text-amber-700">
                         Until this is set, receipts are still recorded in full, but each one is stored
                         without a category or a deductibility note.
+                    </p>
+                    {% endif %}
+
+                    {# The photo path reads a receipt's QR code here on the server before it
+                       asks any model, because a decoded code means TRA's own figures instead
+                       of a transcription. Without the decoder that step is skipped silently -
+                       everything still works, every photographed receipt is just weaker than
+                       it needed to be - so it is worth one line where somebody will see it. #}
+                    {% if qr_decoder_problem %}
+                    <p class="mt-4 rounded-md bg-amber-50 p-3 text-xs text-amber-800">
+                        <span class="font-medium">Photographed receipts are not being QR-checked on the server.</span>
+                        {{ qr_decoder_problem }} They are still read by the model above, but a photo
+                        whose code could have been decoded is being transcribed instead of verified
+                        against TRA.
                     </p>
                     {% endif %}
                 </div>

@@ -214,6 +214,25 @@ def _check_validity(receipt, assessment):
 
 def _check_verification(receipt, assessment):
     """The verification code is what makes the receipt checkable against TRA at all."""
+    # A document that was never an EFD receipt is not a receipt that failed
+    # verification, and reporting it as one sends the reader looking for a code that
+    # was never printed. It is still a real expense - a parking stub is a cost of doing
+    # business - it just carries no recoverable input VAT and no TRA record behind it.
+    document_type = getattr(receipt, 'document_type', None)
+    if document_type in ('other_receipt', 'not_a_receipt'):
+        detail = (
+            'This is not a Tanzanian EFD receipt, so there is nothing to verify against '
+            'TRA. It can support a deduction if the business purpose is clear, but no '
+            'input VAT may be claimed on it.' if document_type == 'other_receipt'
+            else 'The photograph does not appear to be a purchase document at all. '
+                 'Check it before claiming anything on it.'
+        )
+        assessment.checks.append(Check(
+            'verification', 'TRA verification',
+            WARN if document_type == 'other_receipt' else FAIL, detail, weight=20,
+        ))
+        return
+
     if receipt.receipt_verification_code:
         source = getattr(receipt, 'extraction_source', None)
         detail = (

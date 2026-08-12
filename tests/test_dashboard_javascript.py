@@ -136,7 +136,9 @@ def test_the_dashboard_component_initialises(dashboard_scripts, tmp_path):
         vendor: component.page.submissions[0].receipt.vendor_name,
         score: component.page.submissions[0].receipt.assessment.score,
         cards: component.statCards.length,
-        cardTotal: component.statCards[0].total,
+        cardAmount: component.statCards[0].amount,
+        cardExact: component.statCards[0].exact,
+        cardClass: component.statCards[0].amountClass,
         tabCount: component.page.tab_counts.processed,
         activeTab: component.filters.tab,
     }));
@@ -152,9 +154,15 @@ def test_the_dashboard_component_initialises(dashboard_scripts, tmp_path):
     assert state['total'] == 1
     assert state['vendor'] == 'PLASCO LIMITED'
     assert state['score'] == 100
-    # Four period cards, each formatted rather than left as raw cents.
+    # Four period cards, each formatted rather than left as raw cents. The headline
+    # figure and the exact one are separate fields: the card shows whole shillings at a
+    # size chosen from their length, and keeps the full amount for the hover title.
     assert state['cards'] == 4
-    assert 'TZS' in state['cardTotal']
+    assert ',' in state['cardAmount'] or state['cardAmount'].isdigit()
+    assert 'TZS' in state['cardExact']
+    # The size class is what the font-size fix turns on; an undefined one is how the
+    # figure silently loses its styling.
+    assert state['cardClass']
     assert state['tabCount'] == 1
     assert state['activeTab'] == 'processed'
 

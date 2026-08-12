@@ -417,7 +417,11 @@
             photo: fields.photo || null,
             description: fields.description || null,
             location: fields.location || null,
-            captured_at: new Date().toISOString(),
+            // Normally now, because normally the receipt is in front of the camera. A
+            // photo imported from the gallery passes the date the picture was taken
+            // instead: a receipt from last week belongs in last week, and 'when the
+            // phone got round to uploading it' is not a date anyone can file on.
+            captured_at: fields.captured_at || new Date().toISOString(),
             attempts: 0,
             last_error: null,
             submission_id: null,
@@ -517,13 +521,58 @@
         }
     }
 
-    async function noteAttempt(entry, error) {
+    async function noteAttempt(entry, error, settings) {
+        settings = settings || {};
         var db = await getDB();
         var current = await db.get('outbox', entry.client_uuid);
         if (!current) return;
-        current.attempts = (current.attempts || 0) + 1;
+        // A permanent rejection spends the whole budget at once. Retrying it is not
+        // caution, it is eight identical requests carrying the same bytes to the same
+        // refusal - and, until the last one, a row that reads "Waiting" to the person
+        // holding the phone when nothing is waiting for anything. See terminalStatus().
+        current.attempts = settings.terminal ? MAX_ATTEMPTS : (current.attempts || 0) + 1;
         current.last_error = error ? String(error).slice(0, 200) : null;
         await db.put('outbox', current);
+    }
+
+    /*
+     * Whether an HTTP status means "not this receipt, ever" rather than "not now".
+     *
+     * 5xx is the server having a bad minute and 429 is it asking for a slower one; both
+     * are worth coming back to. A 4xx is a verdict on what was sent, and sending it
+     * again unchanged asks the same question. 413 is the one that actually bites here -
+     * a photo larger than the ingress body limit is refused before Flask ever sees it,
+     * and no amount of patience shrinks it.
+     *
+     * 401 is not in here deliberately: it is handled before this is reached, and it is
+     * a verdict on the session rather than on the receipt. The queue survives it.
+     */
+    function terminalStatus(status) {
+        if (status === 408 || status === 429) return false;
+        return status >= 400 && status < 500;
+    }
+
+    /*
+     * What a rejection says to somebody standing in a shop.
+     *
+     * "HTTP 413" is a fact and it is useless: it appears under a receipt on a phone, in
+     * a list whose whole job is to say whether a receipt got where it was going. The
+     * number is kept on the end regardless, because the same string is what the
+     * diagnostics screen shows and what gets read down a phone line to whoever runs the
+     * server - and for 413 in particular that person, not this one, is the one who can
+     * do anything about it.
+     */
+    function httpReason(status) {
+        var reasons = {
+            400: 'The server could not read this receipt',
+            403: 'This device is not allowed to send',
+            404: 'The server has no address for this',
+            413: 'This photo is too large for the server to accept',
+        };
+        var reason = reasons[status];
+        if (!reason) return status >= 500 ? 'The server had a problem (HTTP ' + status + ')'
+                                          : 'HTTP ' + status;
+        return reason + ' (HTTP ' + status + ')';
     }
 
     // ---------------------------------------------------------------- sync
@@ -562,22 +611,50 @@
             var urls = pending.filter(function (e) { return e.kind === 'url'; });
             var photos = pending.filter(function (e) { return e.kind === 'photo'; });
 
-            for (var i = 0; i < urls.length; i += URL_BATCH_SIZE) {
+            // `stopped` rather than an early return, because what follows this loop is
+            // the *read* half of a sync and it does not belong to the outbox. See the
+            // note above pullHistory() below.
+            var stopped = false;
+
+            for (var i = 0; i < urls.length && !stopped; i += URL_BATCH_SIZE) {
                 var batch = urls.slice(i, i + URL_BATCH_SIZE);
                 var result = await syncUrlBatch(batch);
                 sent += result.sent;
                 failed += result.failed;
-                if (result.stop) return finish(sent, failed);
+                stopped = !!result.stop;
             }
 
-            for (var j = 0; j < photos.length; j++) {
+            for (var j = 0; j < photos.length && !stopped; j++) {
                 var photoResult = await syncPhoto(photos[j]);
                 sent += photoResult.sent;
                 failed += photoResult.failed;
-                if (photoResult.stop) return finish(sent, failed);
+                stopped = !!photoResult.stop;
             }
 
-            if (sent > 0 || settings.refresh) await pullHistory();
+            /*
+             * Unconditional, and that is the fix for the empty history screen.
+             *
+             * This used to be `if (sent > 0 || settings.refresh)`, reached only by
+             * falling off the end of both loops - so one undeliverable receipt in the
+             * outbox took the whole read path down with it. A photo the server would not
+             * accept (an upload past the ingress body limit answers 413, and a stalled
+             * one throws) set `stop`, the function returned here, and history was never
+             * asked for. The periodic sync passes no `refresh`, and `sent` cannot climb
+             * while the queue is stuck, so the condition stayed false on every tick
+             * afterwards: the phone would go on showing an empty list, next to a summary
+             * that kept updating because /scan/api/summary is polled on its own timer.
+             * That is the exact pair of symptoms - live totals above, nothing below.
+             *
+             * Sending and reading are two different jobs that happen to share a timer.
+             * A queue that cannot drain is a reason to keep showing what the server has,
+             * not a reason to stop asking. When the network really is gone this costs one
+             * fetch that fails and falls back to the cache, which is what it did before.
+             *
+             * A 401 on the way up needs no guard: handleAuthFailure() has already cleared
+             * the session, and pullHistory() returns without a request when there is no
+             * token to send.
+             */
+            await pullHistory();
             return finish(sent, failed);
         } finally {
             syncing = false;
@@ -617,7 +694,10 @@
             return { sent: 0, failed: batch.length, stop: true };
         }
         if (!response.ok) {
-            for (var m = 0; m < batch.length; m++) await noteAttempt(batch[m], 'HTTP ' + response.status);
+            var urlTerminal = terminalStatus(response.status);
+            for (var m = 0; m < batch.length; m++) {
+                await noteAttempt(batch[m], httpReason(response.status), { terminal: urlTerminal });
+            }
             return { sent: 0, failed: batch.length, stop: response.status >= 500 };
         }
 
@@ -674,7 +754,8 @@
             return { sent: 0, failed: 1, stop: true };
         }
         if (!response.ok) {
-            await noteAttempt(entry, 'HTTP ' + response.status);
+            await noteAttempt(entry, httpReason(response.status),
+                              { terminal: terminalStatus(response.status) });
             return { sent: 0, failed: 1, stop: response.status >= 500 };
         }
 
@@ -1448,8 +1529,11 @@
         // some browsers fires pagehide without ever marking the document hidden first.
         global.addEventListener('pagehide', flushOnHide);
 
+        // No `{ refresh: true }` on the boot call any more. It used to be the one way to
+        // make a sync also read history back; every sync does that now, so the flag would
+        // only suggest the periodic ticks do less than they do.
         setInterval(function () { sync().catch(function () {}); }, SYNC_INTERVAL_MS);
-        sync({ refresh: true }).catch(function () {});
+        sync().catch(function () {});
     }
 
     global.PWA = {

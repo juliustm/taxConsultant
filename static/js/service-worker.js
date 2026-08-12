@@ -9,7 +9,7 @@
  * Bump CACHE_VERSION on any change to APP_SHELL or to the files it names. Old caches
  * are deleted on activate, so the bump is the whole upgrade mechanism.
  */
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v8';
 const PRECACHE = `scan-precache-${CACHE_VERSION}`;
 const RUNTIME = `scan-runtime-${CACHE_VERSION}`;
 
@@ -173,15 +173,75 @@ async function handleNavigation(request) {
     }
 }
 
-async function handleStatic(request) {
-    const cached = await caches.match(request);
-    if (cached) return cached;
-    const response = await fetch(request);
-    if (response && response.ok) {
-        const runtime = await caches.open(RUNTIME);
-        runtime.put(request, response.clone());
+/*
+ * Whether this repository ships the file, as opposed to it being a pinned third-party
+ * bundle or an icon. The two are cached differently - see handleStatic.
+ */
+function isOwnAsset(pathname) {
+    if (pathname.startsWith('/static/js/vendor/') || pathname.startsWith('/static/icons/')) {
+        return false;
     }
-    return response;
+    return pathname.startsWith('/static/js/')
+        || pathname.startsWith('/static/css/')
+        || pathname === '/scan/manifest.json';
+}
+
+/* Whichever cache already holds this request, so a refetch replaces the copy that is
+   actually being served. Writing the fresh copy to RUNTIME while a stale one sat in
+   PRECACHE would achieve nothing: caches.match() searches in creation order, and
+   PRECACHE is created first, so the stale copy would go on winning. */
+async function cacheHolding(request) {
+    for (const name of [PRECACHE, RUNTIME]) {
+        const cache = await caches.open(name);
+        if (await cache.match(request)) return cache;
+    }
+    return null;
+}
+
+/*
+ * Static assets: served from the cache, with this app's own scripts refetched behind
+ * that for the next launch.
+ *
+ * The refetch is not an optimisation, it is the fix for a whole class of broken
+ * install. A precache is only rebuilt when CACHE_VERSION changes, so a deploy that
+ * changed pwa.js or scanner.js and forgot the bump left every phone serving the old
+ * script *permanently* - while handleNavigation, which has always revalidated, quietly
+ * updated the HTML around it on the very next launch. New markup calling into old
+ * JavaScript is not a degraded app: the component throws as it initialises and takes
+ * every screen inside the shell down with it, history included. Reloading cannot clear
+ * it, because reloading is precisely what serves the stale copy again. One conditional
+ * GET per asset per launch buys immunity to the entire failure mode, and it is the
+ * failure mode most likely to recur - it depends on someone remembering a constant.
+ *
+ * Only for the files this repository ships. The vendored bundles and the icons are
+ * pinned; they change when someone deliberately replaces them, which is a deliberate
+ * act that can carry a version bump with it. Re-fetching several megabytes of wasm on
+ * every cold start is a real cost on the phones and networks this actually runs on.
+ */
+async function handleStatic(request, event) {
+    const holder = await cacheHolding(request);
+    const cached = holder ? await holder.match(request) : null;
+
+    const refresh = async () => {
+        const response = await fetch(request);
+        if (response && response.ok) {
+            const cache = holder || await caches.open(RUNTIME);
+            await cache.put(request, response.clone());
+        }
+        return response;
+    };
+
+    if (!cached) return refresh();
+
+    if (isOwnAsset(new URL(request.url).pathname)) {
+        // Through waitUntil so the worker is not killed mid-refetch the moment the
+        // cached response is handed over - otherwise the update this exists for is the
+        // thing most likely to be cut short. Offline, it simply fails and the cached
+        // copy stands, which is still the right answer.
+        const updated = refresh().catch(() => {});
+        if (event && event.waitUntil) event.waitUntil(updated);
+    }
+    return cached;
 }
 
 self.addEventListener('fetch', (event) => {
@@ -204,7 +264,7 @@ self.addEventListener('fetch', (event) => {
     }
 
     if (url.pathname.startsWith('/static/') || url.pathname === '/scan/manifest.json') {
-        event.respondWith(handleStatic(request));
+        event.respondWith(handleStatic(request, event));
     }
 });
 
