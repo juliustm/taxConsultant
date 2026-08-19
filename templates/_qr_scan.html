@@ -1,0 +1,173 @@
+{# templates/_qr_scan.html
+
+   What the server-side QR decoder did with this photograph.
+
+   Included from both the submission page and the receipt page, because the question an
+   admin has is the same on either and the answer is only interesting next to the photo:
+   this receipt's numbers came either from TRA's portal or from a model reading a
+   picture, and the QR scan is the fork in the road. When it decoded, this says so and
+   the receipt above is verified. When it did not, this says which of the several very
+   different reasons it was - and only one of them is the photographer's fault.
+
+   Expects `scan` (the stored report from utils.qr.scan), `scan_summary`
+   (utils.qr.summarise of it) and `submission`. Renders nothing when there is no
+   photograph.
+
+   Carries its own x-data rather than reaching into the page's: this is included by two
+   templates with two different Alpine scopes, and a shared partial that expects state
+   its host happens to define is one rename away from a button that silently stops
+   working on one page only. #}
+
+{% if photo_url %}
+{% set tone = (scan_summary.tone if scan_summary else 'warn') %}
+<div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5"
+     x-data="qrRescan({{ submission.id if submission else 'null' }})">
+    <div class="flex items-start justify-between gap-x-4 border-b border-gray-200 px-6 py-4">
+        <div>
+            <h2 class="text-base font-semibold text-gray-900">Server-side QR scan</h2>
+            <p class="mt-1 text-sm text-gray-500">
+                The second look at the code, run here after the phone had its go and before
+                the photograph was ever shown to a model.
+            </p>
+        </div>
+        {% if submission %}
+        {# Worth offering even on a scan that decoded: the button is also how an admin
+           confirms a photograph still reads after the decoder or the capture changed. #}
+        <button @click="rescan()" :disabled="busy" type="button"
+                class="shrink-0 rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
+            <span x-text="busy ? 'Scanning...' : 'Scan again'"></span>
+        </button>
+        {% endif %}
+    </div>
+    <div class="px-6 py-5">
+        <p x-show="message" x-cloak class="mb-4 rounded-md p-3 text-sm"
+           :class="failed ? 'bg-red-50 text-red-900' : 'bg-blue-50 text-blue-900'"
+           x-text="message"></p>
+
+        {% if not scan %}
+        <p class="text-sm text-gray-600">
+            No scan was recorded for this submission. Either it predates this record being
+            kept, or the receipt had already been identified and the decoder was not run
+            again.
+        </p>
+        {% else %}
+        <div class="rounded-md p-3 {{ {'good': 'bg-green-50 text-green-900', 'warn': 'bg-yellow-50 text-yellow-900', 'bad': 'bg-red-50 text-red-900'}[tone] }}">
+            <p class="text-sm font-medium">{{ scan_summary.title }}</p>
+            <p class="mt-1 text-sm opacity-90">{{ scan_summary.detail }}</p>
+        </div>
+
+        <dl class="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+            {% for label, value in [
+                ('Decoded on', scan['pass']),
+                ('Passes tried', scan.attempts or None),
+                ('Time taken', (scan.ms ~ ' ms') if scan.ms is not none else None),
+                ('Image scanned', scan.image),
+            ] %}
+                {% if value %}
+                <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1">
+                    <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
+                    <dd class="text-right text-sm text-gray-900">{{ value }}</dd>
+                </div>
+                {% endif %}
+            {% endfor %}
+        </dl>
+
+        {% if scan.url %}
+        <p class="mt-4 break-all text-sm">
+            <span class="text-gray-500">Code read:</span>
+            <a href="{{ scan.url }}" target="_blank" rel="noopener" class="font-mono text-indigo-600 hover:underline">{{ scan.url }}</a>
+        </p>
+        {% endif %}
+
+        {% if scan.ignored %}
+        <div class="mt-4">
+            <p class="text-sm text-gray-500">Codes found and set aside as not TRA receipts:</p>
+            <ul class="mt-1 space-y-1">
+                {% for text in scan.ignored %}
+                <li class="break-all rounded bg-gray-50 p-2 font-mono text-xs text-gray-700">{{ text }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {# The decoder being absent is not a receipt problem and cannot be fixed by
+           anyone looking at this receipt, so it gets the one thing that does fix it. #}
+        {% if scan.outcome == 'unavailable' %}
+        <p class="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-900">
+            Until the wheel is present, no photographed receipt on this instance can be
+            verified against TRA - they will all be transcriptions.
+            <a href="{{ url_for('configure_instance') }}" class="font-medium underline">Instance settings</a>
+            shows the same warning with the import error in full.
+        </p>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+<script>
+/*
+ * The rescan button.
+ *
+ * Always reloads on a completed scan rather than patching the panel, and that is the
+ * whole design. A rescan rewrites the stored report - the passes, the timing, the
+ * dimensions, the summary above them - and a decode goes further still, putting the
+ * code to TRA and potentially replacing every number on the page or moving the
+ * submission to a different one. Patching a subset of that in JavaScript is how a
+ * fresh verdict ends up rendered beside stale figures.
+ *
+ * Which leaves the outcome needing to survive the reload to be readable at all, hence
+ * the handoff below: written before navigating, shown and cleared once on the way back
+ * up. Kept in this partial rather than in either host page, so the two pages that
+ * include it cannot drift into two behaviours.
+ */
+const QR_RESCAN_NOTE = 'qr-rescan-note';
+
+function qrRescan(submissionId) {
+    return {
+        busy: false,
+        message: '',
+        failed: false,
+
+        init() {
+            const note = sessionStorage.getItem(QR_RESCAN_NOTE);
+            if (!note) return;
+            sessionStorage.removeItem(QR_RESCAN_NOTE);
+            const parsed = JSON.parse(note);
+            this.message = parsed.message;
+            this.failed = parsed.failed;
+        },
+
+        async rescan() {
+            this.busy = true;
+            this.message = '';
+            this.failed = false;
+            try {
+                const response = await fetch(`/submissions/${submissionId}/rescan`, { method: 'POST' });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'The rescan was refused.');
+
+                let message;
+                if (payload.scan && payload.scan.url) {
+                    message = payload.verified
+                        ? 'The code was read, and TRA confirmed it. This receipt is now verified.'
+                        : 'The code was read, but TRA would not confirm it yet.';
+                } else {
+                    message = (payload.summary && payload.summary.title)
+                        || 'The photograph was scanned again.';
+                }
+                sessionStorage.setItem(QR_RESCAN_NOTE, JSON.stringify({
+                    message: message, failed: false,
+                }));
+                window.location.reload();
+            } catch (error) {
+                // Left on the page rather than handed to a reload: nothing was stored,
+                // so there is nothing newer to re-render and the message is all there is.
+                this.message = error.message;
+                this.failed = true;
+                this.busy = false;
+            }
+        },
+    };
+}
+</script>
+{% endif %}

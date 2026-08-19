@@ -10,9 +10,10 @@
  * Three decisions follow from that:
  *
  *   1. Resolution beats framerate. A small code has few pixels per module, so the
- *      camera is asked for 1920 wide and the region of interest is cut out at the
- *      sensor's own resolution and never scaled down. Downscaling to "go faster" is
- *      what makes a marginal code unreadable.
+ *      camera is asked for 1920 on its long edge - and asked again once the track can
+ *      be interrogated, because the first request is only a wish - and the region of
+ *      interest is cut out at the sensor's own resolution and never scaled down.
+ *      Downscaling to "go faster" is what makes a marginal code unreadable.
  *
  *   2. Binarization beats everything. Deciding which pixels are black is the whole
  *      problem on faded ink and watermarked stock, and a single global threshold -
@@ -315,19 +316,165 @@
         return true;
     }
 
+    // How long to let the camera reconfigure, and how many frames to let it settle
+    // afterwards. Both deliberately short: this sits between the user pressing the
+    // shutter and the photo appearing, and a still that arrives late enough to feel
+    // broken is worse than one taken at the preview's resolution.
+    var FULL_RES_DEADLINE_MS = 900;
+    var SETTLE_FRAMES = 3;
+
+    /* One delivered frame, where the browser will say so, and one paint otherwise. */
+    function nextFrame(video) {
+        return new Promise(function (resolve) {
+            if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(function () { resolve(); });
+            else global.requestAnimationFrame(function () { resolve(); });
+        });
+    }
+
+    /*
+     * Waits for the video element to actually be producing the frames we asked for.
+     *
+     * `applyConstraints` resolving means the track has accepted the new mode, not that a
+     * frame in it has arrived - and on a phone the camera is genuinely reconfiguring
+     * hardware, which takes a moment. Drawing before that lands copies the old
+     * resolution, or worse a torn frame from the middle of the switch.
+     *
+     * Two waits, because either alone is wrong. The dimensions must change - or the
+     * deadline pass, since a camera is free to have given us nothing new and this may
+     * not hang the shutter on it - and then a few more frames must go by: the first
+     * frame at a new mode is routinely mis-exposed and still hunting for focus, which on
+     * a QR code is the difference between a read and a retake.
+     */
+    async function settleAfterModeChange(video, wasEdge, deadlineMs) {
+        var until = Date.now() + deadlineMs;
+        while (Date.now() < until) {
+            if (Math.max(video.videoWidth, video.videoHeight) !== wasEdge) break;
+            await nextFrame(video);
+        }
+        for (var i = 0; i < SETTLE_FRAMES; i++) await nextFrame(video);
+    }
+
+    /*
+     * The still, at the best resolution this camera actually has.
+     *
+     * This exists because of what the fallback used to be. Where `ImageCapture` is
+     * missing - which means every iPhone, since WebKit has never shipped it - `capture`
+     * simply drew the viewfinder, and the viewfinder is a preview stream: negotiated for
+     * smooth playback at a size chosen to be cheap, routinely 720x1280 on a phone whose
+     * sensor holds twelve megapixels. A receipt's QR code in such a frame is about sixty
+     * pixels across, under two pixels per module, and it is unreadable by this decoder,
+     * by the one on the server, and by any preprocessing either of them could apply.
+     * That single fallback is why server-side decoding on iOS never once succeeded.
+     *
+     * So the track is asked for its maximum just long enough to take the frame, and put
+     * back afterwards. Not left raised: the preview loop decodes ten frames a second and
+     * doing that at full sensor resolution is a hot phone and a stuttering viewfinder,
+     * which is the trade PREVIEW_TARGET_EDGE already settled for the live path.
+     *
+     * Every step is allowed to fail into the old behaviour. A camera that will not
+     * change mode, or has no capabilities to report, still yields the preview frame -
+     * which is exactly what this used to do, and is worth having over an error.
+     */
+    async function grabAtFullResolution(track, video, canvas) {
+        var restore = null;
+        var wasEdge = Math.max(video.videoWidth || 0, video.videoHeight || 0);
+
+        try {
+            var caps = track.getCapabilities ? track.getCapabilities() : null;
+            var settings = track.getSettings ? track.getSettings() : {};
+            var upright = (settings.height || 0) > (settings.width || 0);
+            var limit = caps && (upright ? caps.height : caps.width);
+            var current = Math.max(settings.width || 0, settings.height || 0);
+
+            if (limit && limit.max && limit.max > current) {
+                // Only the long edge is constrained, so the camera keeps its own aspect
+                // ratio instead of being asked for a mode it does not have - the same
+                // reasoning as raiseResolution, and the same failure if ignored.
+                restore = upright ? { height: { ideal: settings.height } }
+                                  : { width: { ideal: settings.width } };
+                await track.applyConstraints(
+                    upright ? { height: { ideal: limit.max } } : { width: { ideal: limit.max } });
+                await settleAfterModeChange(video, wasEdge, FULL_RES_DEADLINE_MS);
+            }
+        } catch (e) { /* the preview resolution is still a photograph */ }
+
+        var drew = drawFull(video, canvas);
+
+        // Restored even when the draw failed, or the viewfinder is left running at full
+        // sensor resolution for the rest of the session.
+        if (restore) {
+            try {
+                await track.applyConstraints(restore);
+            } catch (e) { /* it will be corrected the next time the camera is opened */ }
+        }
+        return drew;
+    }
+
     // ------------------------------------------------------------- camera
 
+    /*
+     * Asking for more than we display on purpose: the extra pixels are for the decoder,
+     * not the viewfinder.
+     *
+     * Asked for as a long edge and an aspect ratio rather than as a width and a height,
+     * which is not a stylistic choice. A phone held upright produces a portrait stream,
+     * and `width: 1920, height: 1080` describes a landscape one; browsers resolve that
+     * pair by aspect ratio first and then hand back the nearest mode they have, which
+     * on a portrait device is routinely 720x1280 - a megapixel, from a camera holding
+     * twelve. That is not a theory: a receipt reached the server at exactly 720x1280,
+     * with a QR code about 110px across, which is three pixels a module before the JPEG
+     * gets to it and below what any amount of server-side preprocessing can recover.
+     *
+     * `aspectRatio` is expressed the same way round for either orientation - the spec
+     * defines it as width over height, so 9/16 is what asks for an upright frame.
+     */
     var CAMERA_CONSTRAINTS = {
         audio: false,
         video: {
             facingMode: { ideal: 'environment' },
-            // Asking for more than we display on purpose: the extra pixels are for the
-            // decoder, not the viewfinder.
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            height: { ideal: 1920 },
+            aspectRatio: { ideal: 9 / 16 },
             frameRate: { ideal: 30 },
         },
     };
+
+    /*
+     * What the track will give, once we can see what it has.
+     *
+     * The constraints above are a request made before anything is known about the
+     * camera, and a browser is free to answer one with whatever it feels like - `ideal`
+     * carries no obligation. Capabilities are the other half of the conversation: they
+     * are the modes this camera actually has, and they can only be read after the
+     * stream exists. So the resolution is asked for twice, and the second time it is
+     * asked with the answer in hand.
+     *
+     * Capped rather than maximised. The top mode on a modern sensor can be 4000px and
+     * 30fps of it is a preview that stutters and a phone that gets hot; 1920 on the long
+     * edge is where a receipt's QR code stops being the limiting factor, and past it
+     * the gain goes to the still (which ImageCapture takes at full sensor resolution
+     * anyway) rather than to the live decode.
+     */
+    var PREVIEW_TARGET_EDGE = 1920;
+
+    async function raiseResolution(track) {
+        if (!track.getCapabilities || !track.applyConstraints) return;
+        try {
+            var caps = track.getCapabilities();
+            var settings = track.getSettings ? track.getSettings() : {};
+            var upright = (settings.height || 0) > (settings.width || 0);
+            var limit = upright ? caps.height : caps.width;
+            if (!limit || !limit.max) return;
+
+            var target = Math.min(PREVIEW_TARGET_EDGE, limit.max);
+            if (target <= Math.max(settings.width || 0, settings.height || 0)) return;
+
+            // Only the long edge, so the browser keeps the camera's own aspect ratio
+            // rather than being asked for a mode that does not exist and falling back
+            // to something smaller than it started with.
+            await track.applyConstraints(
+                upright ? { height: { ideal: target } } : { width: { ideal: target } });
+        } catch (e) { /* the stream is still usable at whatever it negotiated */ }
+    }
 
     function requestCamera() {
         if (!global.navigator.mediaDevices || !global.navigator.mediaDevices.getUserMedia) {
@@ -510,7 +657,10 @@
                 await video.play();
 
                 track = stream.getVideoTracks()[0] || null;
-                if (track) await applyFocusHints(track);
+                if (track) {
+                    await applyFocusHints(track);
+                    await raiseResolution(track);
+                }
 
                 hasNative = !!(await getBarcodeDetector());
 
@@ -603,7 +753,10 @@
                 } catch (e) { /* a tap resumes it; the stream itself is fine */ }
 
                 track = stream.getVideoTracks()[0] || null;
-                if (track) await applyFocusHints(track);
+                if (track) {
+                    await applyFocusHints(track);
+                    await raiseResolution(track);
+                }
                 report('onStarted', { torch: track ? hasTorch(track) : false, native: hasNative });
                 return true;
             },
@@ -638,6 +791,10 @@
              * code - a frame that video could not read frequently reads here. Whatever
              * happens, the caller gets a JPEG small enough to sit in an outbox and cross
              * a mobile connection.
+             *
+             * Both routes to those pixels are here because neither is available
+             * everywhere, and the difference between them is the difference between a
+             * receipt TRA confirms and one a model guesses at. See grabAtFullResolution.
              */
             async capture() {
                 if (!track) throw new Error('Camera is not running.');
@@ -657,29 +814,187 @@
                     full.height = bitmap.height;
                     full.getContext('2d').drawImage(bitmap, 0, 0);
                     bitmap.close();
-                } else if (!drawFull(video, full)) {
+                } else if (!await grabAtFullResolution(track, video, full)) {
                     throw new Error('No frame to capture.');
                 }
 
-                var text = await decodeWithNative(full);
-                if (!text) {
-                    try { text = await decodeWithZXing(full); } catch (e) { text = null; }
-                }
-
-                return { text: text, blob: await toJpeg(full) };
+                var text = await decodeStill(full);
+                return { text: text, blob: await toJpeg(full, text ? null : UNDECODED_MAX_EDGE) };
             },
         };
     }
 
     /*
+     * The same read, applied to a picture that already exists.
+     *
+     * Receipts do not only arrive through this app's viewfinder. They arrive as photos
+     * someone already took - a driver who snapped a fuel receipt before the app was
+     * installed, a receipt WhatsApped in by a colleague, the pile that built up while a
+     * phone was offline in the field. Those are the same receipts and deserve the same
+     * treatment, so a picked file goes through the identical two engines a live frame
+     * does, and a decode here means it is queued as a verified TRA scan rather than as
+     * a photograph of one.
+     *
+     * A gallery photo is usually far larger than a preview frame - twelve megapixels is
+     * ordinary - so the decode canvas is capped. Past a couple of thousand pixels the
+     * extra detail buys nothing on a QR code and costs a buffer per file, on a phone
+     * that may be importing twenty of them at once.
+     */
+    var IMPORT_DECODE_MAX_EDGE = 2000;
+
+    /*
+     * The upload size for a photo whose code this phone could not read.
+     *
+     * Two sizes rather than one, because the two photos are not carrying the same job.
+     * A photo whose QR already decoded here is evidence - it is filed beside a receipt
+     * whose numbers came from TRA, and 2000px is comfortably enough to look at. A photo
+     * that did not decode is the only copy of a receipt nobody has read yet, and every
+     * pass the server makes at it is made on whatever pixels this line decided to keep.
+     *
+     * The server is not merely asking the same question again: it stretches the
+     * contrast, and it crops the frame into overlapping tiles and triples each one, so
+     * the code is judged against its own corner of the photograph rather than against
+     * the whole picture (utils/qr.py). That preprocessing is what makes the extra
+     * pixels worth carrying - but it cannot recover a module that was resampled away
+     * before the upload, and at 2000px a code that started at 150px in a 12MP frame
+     * arrives at about 74px, which is two pixels a module and below anything that
+     * decodes. At 3000 the same code lands near 110px and comes back.
+     *
+     * Measured, not reasoned about: at 2000 that code comes back 'no code found' from
+     * the full ladder, and at 3000 it decodes on the first pass. It costs about 50KB
+     * more - 98KB against 48KB - on the photos that take this path, which are the
+     * minority of them and exactly the minority where the alternative is a receipt
+     * transcribed by a model instead of confirmed by the revenue authority.
+     *
+     * Not higher than 3000 because the next band down does not come back either way: a
+     * 120px code is still under two and a quarter pixels a module at 3000, and the
+     * answer for it is the verification code printed underneath in plain type, which
+     * the vision model reads and `reconstructed_receipt_url` turns back into a portal
+     * address.
+     */
+    var UNDECODED_MAX_EDGE = 3000;
+
+    /*
+     * Every read this phone can make of a single still, cheapest first.
+     *
+     * The live loop gets ten frames a second and can afford to try one thing on each.
+     * A still gets one look, so it is worth spending all three passes on it here rather
+     * than uploading and hoping - a decode on this side means the receipt is queued as
+     * a verified TRA scan instead of as a photograph of one.
+     *
+     * The contrast pass works on a copy, and that is not fastidiousness. `stretchContrast`
+     * rewrites the pixels it is given, and on the capture path the canvas it would be
+     * given is also the canvas that gets uploaded: stretching it in place would send the
+     * server a grey, clipped rendering of the receipt to run its own decoder over and
+     * show its vision model. The copy is bounded on its long edge because it is the
+     * desperation pass, and a full-size copy of a 12MP frame is a large allocation to
+     * make on a phone at the exact moment it is already holding the photograph.
+     */
+    async function decodeStill(canvas) {
+        var text = await decodeWithNative(canvas);
+        if (!text) {
+            try { text = await decodeWithZXing(canvas); } catch (e) { text = null; }
+        }
+        if (text) return text;
+
+        var boosted = global.document.createElement('canvas');
+        var scale = Math.min(1, IMPORT_DECODE_MAX_EDGE / Math.max(canvas.width, canvas.height));
+        boosted.width = Math.max(1, Math.round(canvas.width * scale));
+        boosted.height = Math.max(1, Math.round(canvas.height * scale));
+        boosted.getContext('2d', { willReadFrequently: true })
+               .drawImage(canvas, 0, 0, boosted.width, boosted.height);
+
+        if (!stretchContrast(boosted)) return null;
+        try { return await decodeWithZXing(boosted); } catch (e) { return null; }
+    }
+
+    async function readImageFile(file) {
+        var source = await loadBitmap(file);
+        var canvas = global.document.createElement('canvas');
+        var scale = Math.min(1, IMPORT_DECODE_MAX_EDGE / Math.max(source.width, source.height));
+
+        canvas.width = Math.max(1, Math.round(source.width * scale));
+        canvas.height = Math.max(1, Math.round(source.height * scale));
+        canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+        if (source.close) source.close();
+
+        var text = await decodeStill(canvas);
+
+        // Re-encoded from the source rather than from the canvas above: that one has
+        // been downscaled for the decoder. What gets uploaded should be the photograph,
+        // at the size the server's vision model and its own QR decoder can work with.
+        var full = global.document.createElement('canvas');
+        var reload = await loadBitmap(file);
+        full.width = reload.width;
+        full.height = reload.height;
+        full.getContext('2d').drawImage(reload, 0, 0);
+        if (reload.close) reload.close();
+
+        return { text: text, blob: await toJpeg(full, text ? null : UNDECODED_MAX_EDGE) };
+    }
+
+    /*
+     * A picked file as something drawable, the right way up.
+     *
+     * Phones write orientation into EXIF instead of rotating the pixels, so a receipt
+     * shot in portrait decodes sideways without this - and 'sideways' is one of the
+     * states a QR finder pattern tolerates least once the image is also soft. The
+     * option is honoured by every current browser and ignored by older ones, which is
+     * why there are three attempts and not one.
+     */
+    async function loadBitmap(file) {
+        if (global.createImageBitmap) {
+            try {
+                return await global.createImageBitmap(file, { imageOrientation: 'from-image' });
+            } catch (e) { /* older Safari rejects the options argument outright */ }
+            try {
+                return await global.createImageBitmap(file);
+            } catch (e) { /* fall through to the <img> path */ }
+        }
+
+        return new Promise(function (resolve, reject) {
+            var url = URL.createObjectURL(file);
+            var image = new global.Image();
+            image.onload = function () {
+                URL.revokeObjectURL(url);
+                resolve(image);
+            };
+            image.onerror = function () {
+                URL.revokeObjectURL(url);
+                reject(new Error('That file could not be read as an image.'));
+            };
+            image.src = url;
+        });
+    }
+
+    /*
      * Down to something a phone can hold hundreds of and still sync over 3G.
      *
-     * 1600px on the long edge keeps a receipt's printed text legible to the vision
-     * model that reads photos server-side, which is the only consumer that matters.
+     * 2000px on the long edge, raised from 1600. 1600 was chosen when the vision model
+     * was the only thing that ever looked at an uploaded photo, and for reading printed
+     * words it is plenty. It is not plenty for the server's QR decoder, which is the
+     * other consumer now and the one that produces a receipt TRA confirms rather than
+     * one a model transcribed.
+     *
+     * The difference is narrow and entirely real. A receipt photographed end to end
+     * puts its QR code at roughly 150px in a 12MP frame; at 1600 that lands at about
+     * 60px - three pixels a module before JPEG gets to it - and does not decode at any
+     * amount of preprocessing. At 2000 the same code decodes, for about 70KB a photo.
+     *
+     * 2000 rather than more because this curve has a knee and it is here. Codes larger
+     * than that band were never in danger, and each further step up recovers a thinner
+     * slice of smaller ones for a steeper price - 2400px would buy the 125px code at
+     * half again the bytes, on a device that syncs a day's receipts over 3G and stores
+     * them until it can. Below the band the answer is not a bigger upload anyway: it is
+     * the verification code the vision model reads off the paper in print, which is
+     * legible long after the code above it has stopped scanning.
+     *
+     * That is the size for a photo whose code this phone has already read. When it has
+     * not, the callers pass UNDECODED_MAX_EDGE instead - see the note there.
      */
     function toJpeg(canvas, maxEdge, quality) {
-        maxEdge = maxEdge || 1600;
-        quality = quality || 0.8;
+        maxEdge = maxEdge || 2000;
+        quality = quality || 0.82;
 
         var w = canvas.width, h = canvas.height;
         var scale = Math.min(1, maxEdge / Math.max(w, h));
@@ -723,12 +1038,18 @@
     global.Scanner = {
         create: createScanner,
         parseReceipt: parseReceipt,
+        readImageFile: readImageFile,
         requestCamera: requestCamera,
         acquireStream: acquireStream,
         getBarcodeDetector: getBarcodeDetector,
         getZXing: getZXing,
         warmDecoder: warmDecoder,
         toJpeg: toJpeg,
+        // Exported to be testable. Whether the still is taken at the sensor's
+        // resolution or at the viewfinder's is the single decision that determines
+        // whether a server-side decode is possible at all, and it is not observable
+        // from anywhere else without a camera in the room.
+        grabAtFullResolution: grabAtFullResolution,
         RECEIPT_URL_RE: RECEIPT_URL_RE,
         CAMERA_CONSTRAINTS: CAMERA_CONSTRAINTS,
     };

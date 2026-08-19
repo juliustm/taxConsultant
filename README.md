@@ -24,7 +24,7 @@ This project empowers you to build your own internal, automated accounting assis
 
 ## Key Features
 
--   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint.
+-   **Multi-Channel Input**: Submit receipts via URL or direct image upload through a secure API endpoint, or import a backlog straight from a phone's photo gallery, several at a time.
 -   **A Scanner That Works With No Signal**: An installable phone app (`/scan/`) that opens straight into a fullscreen QR scanner — no menu, no login screen, camera live in about a second. It is offline-first in the literal sense: with the network switched off it still opens, still scans, still shows history, and queues everything in IndexedDB until connectivity returns. Nothing is loaded from a CDN at runtime.
 -   **Exact Extraction from TRA**: The verified receipt page is structured HTML, so it is parsed, not guessed at — vendor, TIN, VRN, EFD serial, Z number, tax office, line items, each printed tax rate and the totals, exactly as TRA issued them. Amounts are stored as integer cents, never floats.
 -   **AI for Judgment, Not Facts**: The LLM (Groq, OpenAI) is given the parsed JSON and asked only what the purchase *means* — expense category, deductibility, input VAT and withholding tax. It cannot invent a date or an amount, it costs a fraction of the tokens the scraped page did, and when it is unreachable the receipt is still recorded in full.
@@ -37,7 +37,7 @@ This project empowers you to build your own internal, automated accounting assis
 -   **Vendor Profiles**: One supplier at their own address — what they cost, which checks their receipts fail *repeatedly* (one receipt made out to a walk-in customer is an annoyance; nine out of twelve is a conversation to have with them), what their prices have done, how many tills they issue from, and whether they upload to TRA on time.
 -   **Locations Without a Geocoder**: Regions are worked out from the device's coordinates against a built-in table of Tanzania's 31 regional centres — offline, no API key, no per-receipt network call, and no third party told where your business spends its money. Labelled approximate wherever it appears.
 -   **Cancelled and Test Receipts**: Detected from the verification page and excluded from every spending total, instead of being counted as real expenses.
--   **Vision for Photos**: Photographed receipts have no verified page behind them, so a vision model transcribes them; they are flagged as such so they stay distinguishable from the exact ones.
+-   **Photos That Still Try to Verify**: A photographed receipt is not treated as unverifiable just because a phone could not read its QR code in a dim shop. The server decodes the code again at full resolution, and failing that reads the verification code and time off the paper and rebuilds the receipt's address on TRA's portal — so a creased, faded or thumb-covered code still ends up as an exact receipt. Only when both fail is the vision model's transcription kept, flagged `extraction_source='llm_vision'` so it stays distinguishable from the exact ones. A document that was never an EFD receipt at all — a parking stub, a handwritten chit — is recorded as exactly that.
 -   **Multiple Export Destinations**:
     -   **Google Sheets**: Automatically logs all submissions and processed data into a monthly-tabbed spreadsheet.
     -   **Webhook**: Sends real-time event notifications (`queued`, `processed`, `failed`, `duplicate`) to any URL you provide.
@@ -71,7 +71,9 @@ The people who hold the receipts are not the person who runs the dashboard. They
 
 **Reading the code is the hard part.** An EFD QR code is printed by a thermal head onto a narrow roll, so in practice it arrives small, faded, creased, and sitting on watermarked stock, photographed in a dim shop. The scanner uses the platform's native `BarcodeDetector` where there is one, and falls back to ZXing-C++ compiled to WebAssembly — chosen for its local-average binarizer, which thresholds per region and is what survives uneven fade and watermark bleed-through where a single global threshold does not. The camera is asked for full resolution and the region of interest is cut out at 1:1 and never downscaled, because downscaling is what makes a marginal code unreadable. Failed frames periodically retry with contrast stretched and against the whole frame.
 
-**And there is always a way out.** After a few seconds of not decoding, the app offers a photo instead. Taking one first tries a decode at full sensor resolution — which often succeeds where the preview stream could not — and only otherwise submits the image to the vision path that already exists.
+**And there is always a way out.** After a few seconds of not decoding, the app offers a photo instead. Taking one first tries a decode at full sensor resolution — which often succeeds where the preview stream could not — and only otherwise submits the image to the photo path described below.
+
+**Receipts that were photographed before this app was involved** go in through the gallery button, several at a time. Each picked image is put through the same two decoders a live frame is, so one whose QR code reads is queued as a verified TRA scan rather than as a picture of one, and each carries the date the photo was taken rather than the date somebody got round to uploading it.
 
 **Nothing waits on the network.** A scan is written to IndexedDB and the UI is finished with it; a separate loop drains that queue whenever the server is actually reachable. Every scan carries a `client_uuid` minted on the phone, which is also the server's idempotency key, so a response lost on the way back can never produce a second submission. `navigator.onLine` is not trusted — every request has an explicit deadline and repeated failures open a circuit breaker.
 
@@ -87,7 +89,17 @@ A receipt has two very different kinds of information on it, and they are handle
 
 **The judgment is asked of an LLM** (`utils/llm_processor.py`). The model receives the parsed JSON - about a tenth of the tokens the scraped page cost - and answers only what the numbers do not contain: which expense category this is, whether it is deductible, whether input VAT is recoverable, whether withholding tax should have been deducted. It is never in a position to invent a date or an amount. If the model is unreachable, the receipt is still recorded in full, with `llm_status` saying why there is no analysis.
 
-Photographed receipts are the exception: with no verified page behind them, a vision model transcribes the fields, and the receipt is marked `extraction_source='llm_vision'`.
+**A photograph is worked through in order of how much the answer can be trusted** (`_receipt_from_photo` in `main.py`), because "the phone could not read the QR code" is rarely the same thing as "this receipt cannot be verified":
+
+1. **The QR code, read again on the server** (`utils/qr.py`). A still at full resolution, with the contrast stretched and the image upscaled and inverted in turn, decodes a fair share of the codes a moving preview stream could not. A hit means the photo goes down the ordinary verified path and its numbers come from TRA.
+2. **The verification code and time, transcribed off the paper.** The vision model is required to read both, and they rebuild `https://verify.tra.go.tz/<CODE>_<HHMMSS>` — the receipt's address on TRA's portal. This is what rescues a receipt whose QR is creased, torn or half under a thumb: the characters beneath the code are large, plain and legible long after the code above them has stopped scanning. A code that comes back half-read is discarded rather than sent, since a wrong code lands on somebody else's receipt.
+3. **The transcription itself**, marked `extraction_source='llm_vision'` as before.
+
+Whatever URL a photo yields is stored on the submission (`recovered_url`), so a retry hours later goes straight back to the portal instead of paying for the decode and the vision call again — and a photo that never verifies still says which receipt we took it to be.
+
+Not every photograph is an EFD receipt. A parking stub, a handwritten chit or a proforma invoice is recorded as `document_type='other_receipt'` and reported as what it is: a real expense with no input VAT behind it, rather than an EFD receipt that failed verification.
+
+**Models are not hard-coded.** `utils/llm_processor.py` holds a candidate list per provider and walks past any model the provider says has been retired, consulting the provider's own catalogue if every known name is gone. A hosted model can be decommissioned overnight — that is how every photographed receipt on an instance started failing with `model_not_found` on a perfectly good API key — so an instance can also pin a working model on the configure page without waiting for a release.
 
 **The compliance verdict is computed** (`utils/compliance.py`). It sits in neither camp: it is arithmetic and rule-checking over the parsed facts, so it is exact, free, offline and identical on every run — which is what a figure destined for a tax return has to be. It is computed on read rather than stored, because two of its answers (how many days are left to claim, and whether the buyer TIN matches yours) change as the calendar moves and as the instance is configured; a stored verdict would be stale the day after it was written.
 
@@ -231,6 +243,8 @@ The activation link works once. To move a device to a different phone, issue a n
 The **Devices** page also handles renaming, signing a phone out, revoking a device entirely (which kills its API key too), and rotating the API key used by server-side integrations posting to `/receipt`.
 
 > **HTTPS is required.** Browsers only grant camera access and offline mode in a secure context, so the scanner will not work over plain `http://` except on `localhost`. `/scan/diagnostics` reports this in plain language if it is the problem.
+
+> **Let photo uploads through.** The app accepts bodies up to 20MB (`MAX_CONTENT_LENGTH`), and receipt photos are the reason. If you run it behind a reverse proxy, raise that proxy's own body limit to match — nginx defaults to 1MB (`client_max_body_size 20m`), which is under a phone photograph and refuses it before the app is ever reached. A phone whose uploads are being refused says so under the receipt in **My receipts**; the stored file is bounded to 3000px on the way in regardless, so the ceiling costs no disk.
 
 ---
 

@@ -1,5 +1,5 @@
 # main.py
-import os, time, json, csv, io, uuid, pyotp, requests, gevent
+import os, re, time, json, csv, io, uuid, pyotp, requests, gevent
 from functools import wraps
 from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
@@ -8,19 +8,22 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
-from utils import analytics, branding, compliance, geo, peek
+from utils import analytics, branding, compliance, geo, peek, qr
+from utils.images import store_photo
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
     REJECTION_MESSAGES,
 )
 from utils.security import generate_totp_provisioning_uri, generate_qr_code_base64
 from utils.export import dispatch_event, format_currency
-from utils.llm_processor import analyse_receipt, extract_receipt_details, LlmUnavailable
+from utils.llm_processor import (
+    analyse_receipt, extract_receipt_details, reconstructed_receipt_url, LlmUnavailable,
+)
 from utils.money import format_cents, from_cents, to_cents, to_decimal
 from utils import sse_broker
 from utils.tra import (
-    fetch_receipt_html, parse_receipt_url, TraError, TraReceiptNotUploaded, TraThrottled,
-    TraTransportError, TraUnexpectedResponse,
+    build_receipt_url, fetch_receipt_html, parse_receipt_url, TraError, TraReceiptNotUploaded,
+    TraThrottled, TraTransportError, TraUnexpectedResponse,
 )
 from utils.tra_parser import normalise_vrn, parse_receipt_html, TAX_CODES, TraParseError
 from sqlalchemy import text as sa_text
@@ -30,6 +33,26 @@ app = Flask(__name__)
 app.config.from_object(Config)
 
 app.jinja_env.filters['currency'] = format_currency
+
+
+@app.errorhandler(413)
+def too_large(_error):
+    """
+    An upload past Config.MAX_CONTENT_LENGTH, answered in the same shape as every other
+    refusal on these routes.
+
+    Both routes that take a file are JSON APIs, and the callers are a phone's outbox and
+    a bot - neither of which can do anything with Werkzeug's HTML page. The scanner reads
+    the status rather than this body (see httpReason in pwa.js) and now treats it as
+    final instead of retrying the same bytes eight times, but the message is what a
+    direct API integrator gets, and it should say the limit rather than make them guess.
+    """
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    return jsonify({
+        'error': f'That file is larger than the {limit_mb}MB limit.',
+        'max_bytes': app.config['MAX_CONTENT_LENGTH'],
+    }), 413
+
 
 # UPLOAD_FOLDER comes from Config along with everything else on the persistence
 # volume - see config.py. Nothing here may name a data path of its own.
@@ -55,14 +78,19 @@ PENDING_COLUMNS = {
         ('brand_logo_url', 'VARCHAR(500)'),
         ('landing_cta_label', 'VARCHAR(60)'),
         ('landing_cta_url', 'VARCHAR(500)'),
+        ('llm_text_model', 'VARCHAR(100)'),
+        ('llm_vision_model', 'VARCHAR(100)'),
     ),
     'submission': (
         ('next_attempt_at', 'DATETIME'),
         ('claimed_at', 'DATETIME'),
         ('failure_reason', 'VARCHAR(50)'),
         ('receipt_code', 'VARCHAR(50)'),
+        ('recovered_url', 'VARCHAR(200)'),
+        ('qr_scan', 'TEXT'),
         ('client_uuid', 'VARCHAR(64)'),
         ('captured_at', 'DATETIME'),
+        ('corrected_at', 'DATETIME'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -89,9 +117,12 @@ PENDING_COLUMNS = {
         ('is_cancelled', 'BOOLEAN NOT NULL DEFAULT 0'),
         ('is_test', 'BOOLEAN NOT NULL DEFAULT 0'),
         ('extraction_source', 'VARCHAR(20)'),
+        ('document_type', 'VARCHAR(30)'),
         ('source_html', 'TEXT'),
         ('category', 'VARCHAR(50)'),
         ('llm_status', 'VARCHAR(20)'),
+        ('corrected_at', 'DATETIME'),
+        ('corrected_fields', 'TEXT'),
     ),
 }
 
@@ -314,7 +345,8 @@ FAILURE_GUIDANCE = {
         'title': 'The time in the receipt URL is wrong',
         'detail': 'The portal asked for the receipt time again, which means the six digits after '
                   'the code do not match the receipt. Retrying sends the same wrong time.',
-        'action': 'Re-read the time printed on the receipt and submit the corrected URL.',
+        'action': 'Read the time off the photograph and correct it above - the portal is asked '
+                  'again as soon as you do.',
     },
     'TraRefererRejected': {
         'title': 'The portal rejected our request',
@@ -329,6 +361,38 @@ FAILURE_GUIDANCE = {
         'action': 'The stored page needs a look; the parser probably needs updating.',
     },
 }
+
+# The fields a human may key in off the photograph, and how each one is read back.
+#
+# Deliberately short. Karani exists so that nobody types receipts in, so this is not a
+# data-entry form - it is the list of values that quietly break something downstream
+# when a model misreads them, next to a photograph of the paper they are printed on.
+# Everything here is a printed fact; nothing computed, and nothing the model was asked
+# to judge. Declared once and used by both the form and the route that saves it, so the
+# page can never offer a field the route ignores.
+#
+# `hint` says what the field costs when it is wrong, not what it is - the label already
+# says what it is.
+CORRECTABLE_FIELDS = (
+    # (attribute, label, kind, hint)
+    ('vendor_name', 'Vendor', 'text',
+     'The trading name printed at the top.'),
+    ('vendor_tin', 'Vendor TIN', 'text',
+     'Every receipt from this supplier is grouped on it. A digit out files this one under a supplier of its own.'),
+    ('vrn', 'VRN', 'text',
+     'Leave blank when the paper says NOT REGISTERED. No VRN means no input VAT may be claimed.'),
+    ('receipt_date', 'Receipt date', 'date',
+     'Every report keys off it, and it opens the six-month VAT claim window.'),
+    ('receipt_time', 'Receipt time', 'time',
+     'The six digits after the code in the TRA address.'),
+    ('receipt_verification_code', 'Verification code', 'text',
+     "The receipt's identity, and what a second submission of it is caught on."),
+    ('receipt_number', 'Receipt no.', 'text', None),
+    ('total_incl_tax_cents', 'Total incl. tax', 'money', None),
+    ('total_excl_tax_cents', 'Total excl. tax', 'money', None),
+    ('total_tax_cents', 'Tax', 'money',
+     'The VAT charged. The ledger claims from this figure.'),
+)
 
 def safe_serialize(obj):
     """Safely serialize SQLAlchemy objects for JSON, handling dates."""
@@ -436,6 +500,7 @@ def receipt_to_dict(receipt, config=None, detailed=True):
         "is_expense": receipt.is_expense,
         "category": receipt.category,
         "extraction_source": receipt.extraction_source,
+        "document_type": receipt.document_type,
         "llm_status": receipt.llm_status,
         "items": [
             {
@@ -789,13 +854,19 @@ def retry_plan(submission):
     return plan
 
 
-def schedule_retry_or_fail(submission, error):
+def schedule_retry_or_fail(submission, error, fail_permanently=True):
     """
-    Applies the retry policy for a failed TRA fetch.
+    Applies the retry policy for a failed TRA fetch. Returns True if a retry was
+    scheduled, False if this submission is out of attempts.
 
     Retryable failures go back to 'queued' with a next_attempt_at in the future;
     permanent ones (wrong time in the URL, rejected Referer) fail immediately rather
     than burning ten more requests against a rate-limited portal.
+
+    `fail_permanently=False` keeps the attempt on the record but leaves the submission
+    alone when the retries run out, for a caller that has a fallback of its own. Only
+    the photo path uses it: a photograph whose recovered code the portal will not
+    confirm is still a photograph we can read.
     """
     attempt = submission.retry_count or 0
     submission.retry_count = attempt + 1
@@ -807,10 +878,21 @@ def schedule_retry_or_fail(submission, error):
     delay_minutes = schedule[attempt] if attempt < len(schedule) else None
 
     if delay_minutes is None:
+        reason = 'permanent' if not error.retryable else f'no retries left after {attempt + 1} attempts'
+
+        if not fail_permanently:
+            # The caller carries on from here, so the row keeps its 'processing' status
+            # and its own code writes the outcome. Committed anyway: the attempt count
+            # and the reason are real, and are what explains a photo that was recorded
+            # unverified.
+            submission.failure_reason = type(error).__name__
+            db.session.commit()
+            print(f"[FetchFallback] Submission {submission.id} unverified ({reason}): {error}")
+            return False
+
         submission.status = 'failed'
         submission.claimed_at = None
         submission.next_attempt_at = None
-        reason = 'permanent' if not error.retryable else f'no retries left after {attempt + 1} attempts'
         submission.error_message = f"{type(error).__name__} ({reason}): {error}"
         print(f"[FetchFailed] Submission {submission.id} failed: {submission.error_message}")
         db.session.commit()
@@ -820,7 +902,7 @@ def schedule_retry_or_fail(submission, error):
             "error_message": submission.error_message, "device_id": submission.device_id,
         }
         dispatch_event('submission.failed', payload, get_instance_config())
-        return
+        return False
 
     submission.status = 'queued'
     submission.claimed_at = None
@@ -839,6 +921,7 @@ def schedule_retry_or_fail(submission, error):
         "device_id": submission.device_id,
     }
     dispatch_event('submission.retry_scheduled', payload, get_instance_config())
+    return True
 
 def trigger_url_in_background(url_to_trigger):
     """
@@ -939,12 +1022,25 @@ def calculate_dashboard_stats():
         }
     return stats
 
-def _receipt_from_tra_url(submission, config):
+def _receipt_from_tra_url(submission, config, url=None, on_exhausted=None):
     """
     Builds a Receipt from the TRA verified page. Returns None if there is nothing to
     store yet (a retry was scheduled, or this receipt is already in the ledger).
+
+    `url` overrides the submission's own input_data, which is how a photograph gets
+    verified: its QR code, or the verification code the vision model read off it, names
+    a receipt on the portal even though the submission itself carries a filename.
+
+    `on_exhausted`, given, is called instead of failing the submission when the portal
+    cannot be reached and no retries remain. A photograph has somewhere else to go - the
+    image is still in hand - and 'we could not reach TRA' is not a reason to throw away
+    a receipt we can still read.
     """
-    url = submission.input_data
+    # recovered_url outranks input_data because it is always the more considered answer:
+    # a QR code decoded off the image, or an address an admin corrected by hand. Without
+    # this, a hand-corrected URL submission would be re-broken by its next scheduled
+    # retry, which would go back to reading the address that was already failing.
+    url = url or submission.recovered_url or submission.input_data
 
     # Checked before the portal is touched. The verification code was read off the URL
     # at intake and it is the receipt's identity, so a receipt already in the ledger
@@ -958,7 +1054,9 @@ def _receipt_from_tra_url(submission, config):
     try:
         html = fetch_receipt_html(url)
     except TraError as e:
-        schedule_retry_or_fail(submission, e)
+        if not schedule_retry_or_fail(submission, e, fail_permanently=on_exhausted is None):
+            if on_exhausted is not None:
+                return on_exhausted(e)
         return None
 
     print(f"[FetchSuccess] Retrieved HTML (length: {len(html)}).")
@@ -972,6 +1070,18 @@ def _receipt_from_tra_url(submission, config):
     if _register_duplicate(submission, parsed.verification_code, config):
         return None
 
+    return _receipt_from_parsed_page(submission, config, parsed, html)
+
+
+def _receipt_from_parsed_page(submission, config, parsed, html):
+    """
+    Builds the Receipt a verified TRA page describes. Not stored - the caller decides.
+
+    Split out of _receipt_from_tra_url so the interactive path - an admin correcting the
+    code by hand and asking the portal there and then - writes exactly the receipt the
+    queue would have written, rather than a second mapping of the same page that drifts
+    from this one the next time a field is added.
+    """
     judgment, llm_status = _judge_receipt(parsed, submission, config)
 
     receipt = Receipt(
@@ -1010,19 +1120,99 @@ def _receipt_from_tra_url(submission, config):
 
     return receipt
 
+def _scan_photo_qr(submission, photo_path):
+    """
+    Runs the server-side decoder over the photograph and records what it saw.
+
+    The recording is the point of this wrapper. A photo read by the vision model has
+    walked past the decoder on the way, and until the report was stored there was no
+    way to tell from the outside whether it walked past a decoder that found nothing, a
+    decoder that could not open the upload, or no decoder at all - three states that
+    look identical on the submission page and want three different things done about
+    them. Committed immediately, because everything after this can raise.
+    """
+    report = qr.scan(photo_path)
+    submission.qr_scan = json.dumps(report)
+    db.session.commit()
+    return report.get('url')
+
+
 def _receipt_from_photo(submission, config):
     """
-    Builds a Receipt from a photograph.
+    Builds a Receipt from a photograph, preferring TRA's numbers over the model's.
 
-    The only path where the model is still trusted with facts, because there is no
-    verified page behind the image. Recorded as extraction_source='llm_vision' so
-    these receipts stay distinguishable from the exact ones.
+    A photo used to mean one thing: hand it to the vision model and store whatever it
+    read. That is the weakest receipt this app can produce, and it was being produced
+    for receipts that were never actually unverifiable - only unverified, because the
+    phone had one look at the QR code in bad light and moved on.
+
+    So the photograph is now worked through in order of how much the answer can be
+    trusted, and the first layer that lands wins:
+
+      1. The QR code, read here rather than on the phone (see utils/qr). A still, with
+         the contrast stretched, the image upscaled and the code judged against its own
+         corner of the frame, decodes a fair number of the codes a moving preview stream
+         could not. A hit means the receipt goes down the ordinary verified path and its
+         numbers come from TRA. Hit or miss, what the decoder saw is written to the
+         submission, because the layers below are silent about which of them answered.
+
+      2. The verification code and time the vision model transcribes off the paper,
+         rebuilt into the same portal URL (see llm_processor.reconstructed_receipt_url).
+         This is the layer that rescues a receipt whose QR is creased, torn, half under
+         a thumb or simply not printed - the code beneath it is large, plain text and
+         legible long after the code above it has stopped scanning.
+
+      3. The transcription itself, recorded as extraction_source='llm_vision' exactly
+         as before. Where a document is not an EFD receipt at all - a parking stub, a
+         handwritten chit - this is not a fallback but the right answer, and the
+         document_type the model returns says so rather than leaving it looking like an
+         EFD receipt that failed verification.
     """
     if not config.is_configured():
         raise ValueError("Instance is not configured with LLM provider and API key.")
 
-    data = extract_receipt_details(submission_photo_path(submission), True, config)
+    photo_path = submission_photo_path(submission)
 
+    # Layer 0: an earlier attempt already worked out which receipt this is, and only the
+    # portal was unwilling. Neither the decoder nor the model can improve on that, and
+    # re-running them once per retry would spend a vision call each time to arrive back
+    # at the same URL.
+    if submission.recovered_url:
+        print(f"[Photo] Retrying the code recovered earlier: {submission.recovered_url}")
+        receipt, settled = _verify_photo_against_tra(
+            submission, config, submission.recovered_url, source='the code recovered from it')
+        if settled:
+            return receipt
+
+    # Layer 1: the code is machine-readable after all.
+    qr_url = None if submission.recovered_url else _scan_photo_qr(submission, photo_path)
+    if qr_url:
+        print(f"[Photo] Server-side QR decode succeeded: {qr_url}")
+        receipt, settled = _verify_photo_against_tra(
+            submission, config, qr_url, source='its QR code')
+        if settled:
+            return receipt
+        print("[Photo] Portal would not confirm the decoded code; reading the photo instead.")
+
+    data = extract_receipt_details(photo_path, True, config)
+
+    # Layer 2: the model read the code off the paper, so the portal can still be asked.
+    # Skipped when a URL has already been recovered - by an earlier attempt or by the
+    # decoder above - because that one came from the machine-readable code and the
+    # portal has just declined it. Asking again with a transcription of the same code
+    # spends a request to be told the same thing.
+    document_type = (data.get('document_type') or '').strip() or 'tra_efd_receipt'
+    if document_type == 'tra_efd_receipt' and not submission.recovered_url:
+        rebuilt = reconstructed_receipt_url(data)
+        if rebuilt:
+            print(f"[Photo] Rebuilt a verification URL from the transcription: {rebuilt}")
+            receipt, settled = _verify_photo_against_tra(
+                submission, config, rebuilt, source='the code printed on it')
+            if settled:
+                return receipt
+            print("[Photo] Portal would not confirm the transcribed code; storing what was read.")
+
+    # Layer 3: what the model read, kept as the model's reading.
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
     if _register_duplicate(submission, verification_code, config):
         return None
@@ -1032,6 +1222,7 @@ def _receipt_from_photo(submission, config):
         'category': category,
         'llm_extracted_description': data.get('llm_extracted_description'),
         'llm_tax_analysis': data.get('llm_tax_analysis'),
+        'document_type': document_type,
     }
 
     # The paper says "VRN: NOT REGISTERED" when the supplier is not VAT registered,
@@ -1057,6 +1248,7 @@ def _receipt_from_photo(submission, config):
         receipt_time=_parse_iso_time(data.get('receipt_time')),
         is_cancelled=bool(data.get('is_cancelled')),
         extraction_source='llm_vision', llm_status='ok',
+        document_type=document_type,
         category=category, raw_llm_response=json.dumps(judgment),
         device_id=submission.device_id, submission_id=submission.id,
     )
@@ -1070,7 +1262,56 @@ def _receipt_from_photo(submission, config):
             amount_cents=to_cents(item.get('amount')), tax_code=item.get('tax_code'),
         ))
 
+    # Only if nothing better is already there: a code recovered from the QR came off the
+    # machine-readable part of the paper, and a transcription of the same characters is
+    # not an improvement on it.
+    if verification_code and not submission.receipt_code:
+        submission.receipt_code = verification_code
     return receipt
+
+
+def _verify_photo_against_tra(submission, config, url, source):
+    """
+    Tries to turn a photograph into a verified receipt using a URL recovered from it.
+
+    Returns (receipt, settled). `settled` is the important half: True means this
+    submission's outcome is decided and the caller must stop - it verified, or it is a
+    duplicate of one we hold, or a retry is booked for later. False means verification
+    is off the table for now and the photograph itself is the remaining answer.
+
+    The recovered URL is written to the submission before the portal is called, so a
+    retry hours later goes straight back to the same receipt instead of paying for the
+    decode and the vision call again, and so an admin looking at a stuck photo can see
+    which receipt we think it is.
+    """
+    submission.recovered_url = url
+    submission.receipt_code = _code_from_url(url)
+    db.session.commit()
+
+    # Appended to only when the portal has been asked as many times as it is going to
+    # be. A flag of its own rather than an inference from submission.status: the status
+    # belongs to the task runner and says nothing about whether this path is finished.
+    exhausted = []
+
+    try:
+        receipt = _receipt_from_tra_url(
+            submission, config, url=url,
+            on_exhausted=lambda error: exhausted.append(error),
+        )
+    except TraParseError as e:
+        # A URL submission fails here on purpose - guessing at numbers is what this
+        # pipeline exists to avoid. A photograph is different: nobody is guessing,
+        # there is a picture of the receipt and a model that can read it.
+        print(f"[Photo] The verified page did not parse ({e}); reading the photo instead.")
+        return None, False
+
+    if receipt is not None:
+        # The photograph is still the submission's input, and is still worth looking at,
+        # but the numbers on this receipt came from the portal - which is what
+        # extraction_source='tra_html', set by the URL path, already records.
+        print(f"[Photo] Verified against TRA via {source}: {submission.receipt_code}")
+
+    return receipt, not exhausted
 
 def _judge_receipt(parsed, submission, config):
     """
@@ -1402,10 +1643,12 @@ def receipt_detail(receipt_id):
     # no tile server, no API key) - just the one point this receipt was collected at,
     # so a single receipt gets the same visual its aggregate view already has.
     position = geo.parse_location(receipt.submission.location) if receipt.submission else None
+    scan = _stored_qr_scan(receipt.submission)
     return render_template(
         'receipt_detail.html',
         receipt=receipt,
         submission=receipt.submission,
+        scan=scan, scan_summary=qr.summarise(scan),
         assessment=assess_receipt(receipt, config),
         llm_analysis=judgment.get('llm_tax_analysis'),
         duplicates=find_possible_duplicates(receipt),
@@ -1415,6 +1658,12 @@ def receipt_detail(receipt_id):
         siblings=siblings,
         business=config,
         photo_url=submission_photo_url(receipt.submission),
+        # Only a receipt read off a photograph is correctable, but the form is described
+        # here either way: the template decides whether to offer it, and it must not have
+        # a second opinion about which fields exist. See CORRECTABLE_FIELDS.
+        correctable=CORRECTABLE_FIELDS,
+        correction_values=correction_form_values(receipt),
+        corrected_fields=json.loads(receipt.corrected_fields or '[]'),
     )
 
 # Windows the insights page can be run over. Bounded on purpose: every analysis there
@@ -1850,6 +2099,21 @@ def vat_ledger():
         periods=[compliance.add_months(today.replace(day=1), -offset).strftime('%Y-%m') for offset in range(12)],
     )
 
+def _stored_qr_scan(submission):
+    """
+    The server-side QR report kept on a submission, or None if it was never scanned.
+
+    Tolerant of junk on purpose: this is diagnostic detail on a page whose whole job is
+    explaining a failure, and it may not fail again to explain itself.
+    """
+    if submission is None or not submission.qr_scan:
+        return None
+    try:
+        return json.loads(submission.qr_scan)
+    except ValueError:
+        return None
+
+
 @app.route('/submissions/<int:submission_id>')
 @login_required
 def submission_detail(submission_id):
@@ -1875,12 +2139,17 @@ def submission_detail(submission_id):
     if submission.receipt_code:
         twin = Receipt.query.filter_by(receipt_verification_code=submission.receipt_code).first()
 
+    scan = _stored_qr_scan(submission)
     return render_template(
         'submission_detail.html',
         submission=submission,
+        scan=scan, scan_summary=qr.summarise(scan),
         plan=retry_plan(submission),
         reason=FAILURE_GUIDANCE.get(submission.failure_reason),
-        receipt_time=receipt_time_from_url(submission.input_data) if submission.input_type == 'url' else None,
+        # Whichever address we would actually ask the portal for. A photograph's lives in
+        # recovered_url and a URL submission's in input_data, but the time printed on the
+        # receipt is the same fact either way, and it is half of what an admin corrects.
+        receipt_time=receipt_time_from_url(submission.recovered_url or submission.input_data),
         region=geo.region_for(geo.parse_location(submission.location)),
         twin=twin,
         photo_url=submission_photo_url(submission),
@@ -1931,6 +2200,446 @@ def requeue_submission(submission_id):
 @login_required
 def retry_submission(submission_id):
     return requeue_submission(submission_id)
+
+
+@app.route('/submissions/<int:submission_id>/rescan', methods=['POST'])
+@login_required
+def rescan_submission_photo(submission_id):
+    """
+    Runs the server-side QR decoder over a stored photograph again, on demand.
+
+    The queue scans a photo once, on the way past, and whatever it found then is what
+    the submission has carried ever since. That is the wrong number of times for two
+    reasons, and both of them are ordinary rather than exotic.
+
+    The first is that the decoder changes. Its ladder is preprocessing, and preprocessing
+    gets better - the sharpening passes in utils/qr read codes the version before them
+    could not. Every photo scanned before that improvement holds a 'no code found' that
+    is now merely out of date, and there is otherwise no way to ask again short of
+    re-uploading a receipt the photographer has long since thrown away.
+
+    The second is that a scan can be run against pixels nobody would choose. A phone
+    that uploaded a viewfinder frame instead of a photograph produces an unreadable code
+    and a truthful report saying so; once the capture is fixed the old submissions are
+    still there, and re-running the decoder is what tells you which of them were the
+    camera's fault rather than the receipt's.
+
+    A decode is not left as a nicer diagnostic panel. If a TRA address comes back it is
+    put straight to the portal, exactly as a correction typed by hand would be, because
+    the entire value of reading the code is the verified receipt on the other side of
+    it - see verify_submission_now.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+
+    if submission.input_type != 'photo':
+        return jsonify({'error': 'This submission is a URL, not a photograph.'}), 409
+
+    photo_path = submission_photo_path(submission)
+    if not os.path.exists(photo_path):
+        return jsonify({'error': 'The photograph for this submission is no longer on disk.'}), 409
+
+    report = qr.scan(photo_path)
+    submission.qr_scan = json.dumps(report)
+    db.session.commit()
+
+    payload = {
+        'submission_id': submission.id,
+        'scan': report,
+        'summary': qr.summarise(report),
+        'verified': False,
+    }
+
+    url = report.get('url')
+    if not url:
+        return jsonify(payload), 200
+
+    # The decode is only worth having if it is acted on. Anything the portal says about
+    # it - confirmed, unreachable, already in the ledger - is verify_submission_now's to
+    # decide and to record, so that a code recovered here lands in exactly the state a
+    # code recovered any other way would.
+    config = get_instance_config()
+    if not config or not config.is_configured():
+        return jsonify({**payload, 'error': 'The code was read, but this instance is not '
+                                            'configured to contact TRA.'}), 200
+
+    verification, _status = verify_submission_now(submission, config, url)
+    return jsonify({**payload, 'verified': bool(verification.get('verified')),
+                    'verification': verification}), 200
+
+
+# --- CORRECTING BY HAND ---
+#
+# Everything below exists for the same moment: the automation has done all it can, the
+# photograph is on the screen, and a person can read off it what no decoder and no model
+# could. Two things can be fixed from there, and they are different in kind.
+#
+# The first is the address. A receipt is fetched from TRA at <code>_<HHMMSS>, and both
+# halves are guesses when the QR code would not decode - so a receipt that exists on the
+# portal can sit failing forever behind one misread digit. Correcting those two fields
+# is worth more than every other edit combined, because it does not enter data at all:
+# it hands the pipeline the right address and the portal supplies the facts, exactly as
+# if the code had scanned. See verify_submission_now.
+#
+# The second is the receipt itself, and only ever one read off a photograph. Those
+# numbers are a model's reading of a crumpled thermal print, and some misreadings are
+# expensive - see CORRECTABLE_FIELDS. A receipt parsed from TRA's own verified page is
+# never editable here: those numbers are the portal's, not ours to revise.
+
+
+def _read_correction(kind, raw):
+    """
+    Reads one typed field. Returns (value, problem), where problem is None if it read.
+
+    Blank is a value, not an omission: someone deleting a VRN the model invented is
+    saying the supplier has none, and that answer has to be storable.
+    """
+    text = (raw or '').strip()
+    if not text:
+        return None, None
+
+    if kind == 'money':
+        # Typed off paper, so it arrives as it is printed: '76,000', '76000.00 TZS'.
+        amount = to_decimal(re.sub(r'(?i)[,\s]|tzs|/=', '', text))
+        if amount is None:
+            return None, 'is not a number'
+        if amount < 0:
+            return None, 'cannot be negative'
+        return to_cents(amount), None
+
+    if kind == 'date':
+        value = _parse_iso_date(text)
+        return (value, None) if value else (None, 'should be a date, as YYYY-MM-DD')
+
+    if kind == 'time':
+        value = _parse_iso_time(text)
+        return (value, None) if value else (None, 'should be a time, as HH:MM:SS')
+
+    return text, None
+
+
+def correction_form_values(receipt):
+    """This receipt's current values, as the correction form needs to show them."""
+    values = {}
+    for attribute, _label, kind, _hint in CORRECTABLE_FIELDS:
+        value = getattr(receipt, attribute, None)
+        if value is None:
+            values[attribute] = ''
+        elif kind == 'money':
+            values[attribute] = format_cents(value)
+        elif kind == 'date':
+            values[attribute] = value.isoformat()
+        elif kind == 'time':
+            values[attribute] = value.strftime('%H:%M:%S')
+        else:
+            values[attribute] = str(value)
+    return values
+
+
+def _apply_corrections(receipt, form):
+    """
+    Writes hand-read values onto a receipt. Returns (changed labels, problems).
+
+    A field the form did not post is left alone rather than blanked, so a caller may
+    correct two fields without having to send back the other eight unchanged.
+    """
+    changed, problems = [], []
+
+    for attribute, label, kind, _hint in CORRECTABLE_FIELDS:
+        if attribute not in form:
+            continue
+
+        value, problem = _read_correction(kind, form.get(attribute))
+        if problem:
+            problems.append(f'{label} {problem}.')
+            continue
+
+        # 'VRN: NOT REGISTERED' is printed on the paper and gets typed in as faithfully
+        # as the model transcribed it. Stored as-is it reads as a VRN.
+        if attribute == 'vrn':
+            value = normalise_vrn(value)
+
+        if value != getattr(receipt, attribute):
+            setattr(receipt, attribute, value)
+            changed.append(label)
+
+    return changed, problems
+
+
+def _rekey_vendor(receipt, changed):
+    """
+    Re-files a receipt under the supplier its corrected details now name.
+
+    Suppliers are grouped on TIN rather than on the printed name (see
+    Vendor.make_lookup_key), so a corrected TIN is not a cosmetic edit - it moves this
+    receipt, and its share of every per-supplier total, from one vendor to another.
+    Without this the row would go on pointing at the vendor the wrong TIN created.
+    """
+    vendor = Vendor.upsert(
+        tin=receipt.vendor_tin, name=receipt.vendor_name, vrn=receipt.vrn,
+        phone=receipt.vendor_phone, tax_office=receipt.tax_office,
+    )
+    receipt.vendor = vendor
+
+    # upsert only ever fills a blank in, so that details survive a later receipt printed
+    # without them. A hand correction is the opposite case - someone saying this value is
+    # wrong - and it has to be able to clear one.
+    if vendor is not None and 'VRN' in changed:
+        vendor.vrn = receipt.vrn
+    return vendor
+
+
+def _note_correction(record, changed):
+    """Records that a human overwrote these fields, cumulatively across corrections."""
+    if not changed:
+        return
+    already = json.loads(record.corrected_fields or '[]')
+    record.corrected_fields = json.dumps(sorted(set(already) | set(changed)))
+    record.corrected_at = datetime.utcnow()
+
+
+def verify_submission_now(submission, config, url):
+    """
+    Asks TRA about this submission right now, and stores whatever the portal says.
+    Returns a (payload, status) response for the caller to hand back as JSON.
+
+    The queue's job is to be patient. This one's job is to answer the person who just
+    typed a correction and is watching the button, so there is no retry schedule here and
+    no ten-second wake-up: one request to the portal, one outcome, reported straight back.
+
+    What becomes of the submission afterwards depends on what it already had behind it. A
+    submission with no receipt goes back on the queue when the portal was merely
+    unreachable, so the corrected address keeps being tried with nobody watching. One that
+    already holds a receipt read off its photograph keeps it either way: a portal we
+    cannot reach is not a reason to throw away a receipt we can already read.
+    """
+    existing = submission.receipt
+
+    submission.recovered_url = url
+    submission.receipt_code = _code_from_url(url)
+    submission.corrected_at = datetime.utcnow()
+    # Claimed before the portal is called, so a runner tick landing mid-request cannot
+    # work the same submission alongside us - its claim only ever matches a queued row.
+    if existing is None:
+        submission.status = 'processing'
+        submission.claimed_at = datetime.utcnow()
+    db.session.commit()
+
+    print(f"[Correction] Submission {submission.id} re-pointed at {url}")
+
+    try:
+        html = fetch_receipt_html(url)
+        parsed = parse_receipt_html(html)
+    except (TraError, TraParseError) as error:
+        return _correction_unverified(submission, existing, error)
+
+    # The corrected address may name a receipt that is already in the ledger under
+    # another submission - which is a real answer, not a failure: this photograph is a
+    # second copy of a receipt we already hold.
+    clash = Receipt.query.filter(
+        Receipt.receipt_verification_code == parsed.verification_code,
+        Receipt.submission_id != submission.id,
+    ).first()
+    if clash is not None:
+        # Only a submission with nothing of its own becomes the duplicate. One already
+        # holding a receipt read off its photograph stays completed and keeps it - it is
+        # not a duplicate, it is a receipt whose corrected code turned out to name
+        # somebody else's row, and saying otherwise would take it out of the ledger.
+        if existing is None:
+            submission.status = 'duplicate'
+            submission.error_message = f'Duplicate of submission ID {clash.submission_id}'
+            db.session.commit()
+            dispatch_event('submission.duplicate', {
+                'submission_id': submission.id, 'status': submission.status,
+                'error_message': submission.error_message, 'device_id': submission.device_id,
+            }, config)
+        else:
+            db.session.commit()
+
+        return {
+            'verified': False, 'status': submission.status, 'url': url,
+            'receipt_id': clash.id,
+            'message': (
+                f'That code belongs to receipt #{clash.id}, which is already in the ledger. '
+                'Nothing was stored twice.'
+            ),
+        }, 200
+
+    # The portal answered, so its numbers replace the reading of the photograph. Flushed
+    # rather than left to the session's own ordering: receipt.submission_id is unique and
+    # SQLAlchemy issues inserts before deletes, so the new row would collide with the old.
+    if existing is not None:
+        print(f"[Correction] Replacing receipt {existing.id}, read from the photo, with TRA's own page.")
+        db.session.delete(existing)
+        db.session.flush()
+
+    receipt = _receipt_from_parsed_page(submission, config, parsed, html)
+    submission.failure_reason = None
+    submission.error_message = None
+    submission.next_attempt_at = None
+    submission.claimed_at = None
+    _complete_submission(submission, receipt, config)
+
+    return {
+        'verified': True, 'status': submission.status, 'url': url,
+        'receipt_id': receipt.id,
+        'message': "TRA confirmed it. This receipt now carries the portal's own numbers.",
+    }, 200
+
+
+def _correction_unverified(submission, existing, error):
+    """The portal did not confirm the corrected address. Decides what happens next."""
+    reason = type(error).__name__
+    guidance = FAILURE_GUIDANCE.get(reason) or {}
+    retryable = getattr(error, 'retryable', False)
+
+    submission.failure_reason = reason
+    submission.error_message = f'{reason}: {error}'
+
+    if existing is not None:
+        # The reading of the photograph is still the best answer we have, and it is still
+        # in the ledger. Only the upgrade to TRA's own numbers did not happen.
+        submission.status = 'completed'
+        tail = 'The reading from the photograph stays in the ledger.'
+    elif retryable:
+        # The address has changed, so the schedule starts again rather than resuming: the
+        # attempts already spent were spent on a different address.
+        submission.status = 'queued'
+        submission.retry_count = 0
+        submission.next_attempt_at = None
+        submission.claimed_at = None
+        tail = 'The corrected address is saved and back on the queue, so it will keep being tried.'
+    else:
+        submission.status = 'failed'
+        submission.next_attempt_at = None
+        submission.claimed_at = None
+        tail = 'The corrected address is saved, but nothing will retry on its own.'
+
+    db.session.commit()
+    print(f"[Correction] Submission {submission.id} still unverified ({reason}): {error}")
+
+    return {
+        'verified': False, 'status': submission.status, 'url': submission.recovered_url,
+        'reason': reason, 'guidance': guidance or None,
+        'message': f"{guidance.get('title') or 'TRA would not confirm it'}. {tail}",
+    }, 200
+
+
+@app.route('/submissions/<int:submission_id>/correct', methods=['POST'])
+@login_required
+def correct_submission_url(submission_id):
+    """
+    Re-points a submission at the receipt its photograph actually names, and asks TRA.
+
+    The two fields this takes - the verification code and the printed time - are the
+    whole of the address, and both are legible on the paper long after the QR square
+    above them has stopped scanning. Correcting them is the cheapest repair in the
+    system: it enters no data at all, it just tells the pipeline where to look.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+
+    config = get_instance_config()
+    if config is None:
+        return jsonify({'error': 'This instance has not been set up yet.'}), 409
+
+    existing = submission.receipt
+    if existing is not None and existing.extraction_source == 'tra_html':
+        return jsonify({
+            'error': "This receipt was already fetched from TRA's verified page, so its address is "
+                     'the one the portal answered to. There is nothing to correct.',
+        }), 409
+
+    try:
+        url = build_receipt_url(
+            request.form.get('receipt_code'), request.form.get('receipt_time'),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    if url == submission.recovered_url and submission.status == 'processing':
+        return jsonify({'error': 'That address is being checked right now.'}), 409
+
+    payload, status = verify_submission_now(submission, config, url)
+    return jsonify(payload), status
+
+
+@app.route('/receipts/<int:receipt_id>/correct', methods=['POST'])
+@login_required
+def correct_receipt(receipt_id):
+    """
+    Overwrites what the model read off a photograph with what a human reads off it.
+
+    Refused outright for a receipt parsed from TRA's verified page. Those numbers are the
+    portal's own record of the sale and the whole pipeline is built on preferring them to
+    anybody's reading, this one included - a TRA receipt that looks wrong is a parser
+    problem, not a typing problem.
+
+    With `verify` set, the corrected code and time are then put to the portal, and if it
+    answers, everything typed here is superseded by TRA's own page. That is the intended
+    ending: hand-read values are the fallback, never the goal.
+    """
+    receipt = db.session.get(Receipt, receipt_id)
+    if receipt is None:
+        return jsonify({'error': 'No such receipt.'}), 404
+
+    if receipt.extraction_source == 'tra_html':
+        return jsonify({
+            'error': "These numbers were parsed from TRA's own verified page, so they are not edited "
+                     'by hand. If they are wrong, the page has changed and the parser needs a look.',
+        }), 409
+
+    code = (request.form.get('receipt_verification_code') or '').strip()
+    if code:
+        clash = Receipt.query.filter(
+            Receipt.receipt_verification_code == code, Receipt.id != receipt.id,
+        ).first()
+        if clash is not None:
+            return jsonify({
+                'error': f'Receipt #{clash.id} already carries that verification code. Two receipts '
+                         'cannot share one - check whether this is the same purchase twice.',
+            }), 409
+
+    changed, problems = _apply_corrections(receipt, request.form)
+    if problems:
+        db.session.rollback()
+        return jsonify({'error': ' '.join(problems)}), 400
+
+    _rekey_vendor(receipt, changed)
+    _note_correction(receipt, changed)
+    db.session.commit()
+
+    if changed:
+        print(f"[Correction] Receipt {receipt.id} corrected by hand: {', '.join(changed)}")
+
+    saved = (
+        f"Saved. {len(changed)} field{'' if len(changed) == 1 else 's'} now read as you entered "
+        f"{'it' if len(changed) == 1 else 'them'}." if changed else 'Nothing was changed.'
+    )
+
+    if request.form.get('verify') not in ('1', 'true', 'on'):
+        return jsonify({
+            'verified': False, 'changed': changed, 'receipt_id': receipt.id, 'message': saved,
+        }), 200
+
+    config = get_instance_config()
+    if config is None:
+        return jsonify({'error': 'This instance has not been set up yet.'}), 409
+
+    try:
+        url = build_receipt_url(receipt.receipt_verification_code, receipt.receipt_time)
+    except ValueError as e:
+        return jsonify({
+            'verified': False, 'changed': changed, 'receipt_id': receipt.id,
+            'message': f'{saved} TRA could not be asked, though: {e}',
+        }), 200
+
+    payload, status = verify_submission_now(receipt.submission, config, url)
+    payload['changed'] = changed
+    payload['message'] = f"{saved} {payload['message']}"
+    return jsonify(payload), status
 
 @app.route('/receipts/<int:receipt_id>/reanalyse', methods=['POST'])
 @login_required
@@ -2107,6 +2816,10 @@ def configure_instance():
             config.landing_cta_url = optional('landing_cta_url')
         config.llm_provider = request.form.get('llm_provider')
         config.llm_api_key = request.form.get('llm_api_key')
+        # Blank means "use the built-in candidates", which is what almost every
+        # instance wants - so an empty box has to store NULL, not ''.
+        config.llm_text_model = optional('llm_text_model')
+        config.llm_vision_model = optional('llm_vision_model')
         config.google_sheet_id = request.form.get('google_sheet_id')
         config.google_service_account_json = request.form.get('google_service_account_json')
         config.post_callback_url = request.form.get('post_callback_url')
@@ -2126,7 +2839,12 @@ def configure_instance():
     devices = Device.query.all()
     
     # Pass the active_tab variable to the template
-    return render_template('admin/configure.html', config=config, devices=devices, active_tab=active_tab)
+    return render_template(
+        'admin/configure.html', config=config, devices=devices, active_tab=active_tab,
+        # Photographed receipts degrade quietly without it - they are read by the model
+        # instead of verified against TRA - so the one place it can be noticed is here.
+        qr_decoder_problem=qr.unavailable_reason(),
+    )
 
 # --- DEVICE MANAGEMENT ---
 
@@ -2806,7 +3524,15 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         input_type = 'photo'
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
 
-        photo.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+        # Not photo.save(). What arrives can be a 12MP frame straight off a sensor, and
+        # every pixel past utils.images.STORED_MAX_EDGE is one the decoder discards on
+        # every pass, the vision model is billed for base64-encoding, and the
+        # persistence volume then carries for good. store_photo bounds it - and leaves
+        # it alone when it already is, which is what the scanner's own uploads are.
+        #
+        # Reassigned, because a re-encode also settles the extension: what is stored is
+        # the name of the file that actually exists, not the one that was uploaded.
+        filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
 
         # Only the filename is stored. Writing the absolute path here would tie every
         # row to wherever the persistence volume happened to be mounted that day, and
@@ -3034,7 +3760,7 @@ def export_csv():
             'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
             'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
             'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
-            'Category', 'Source', 'Items', 'LLM Description', 'Tax Analysis',
+            'Category', 'Source', 'Document Type', 'Items', 'LLM Description', 'Tax Analysis',
             'Customer Name', 'Customer ID',
             # Computed by utils/compliance, so a spreadsheet can be filtered on what is
             # actually claimable rather than on what was merely spent.
@@ -3067,7 +3793,10 @@ def export_csv():
                 format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
                 format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
                 'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
-                receipt.category, receipt.extraction_source, items, receipt.submission.description,
+                receipt.category, receipt.extraction_source,
+                # Blank on everything TRA verified, which is by far the common case:
+                # only a photograph can be anything other than an EFD receipt.
+                receipt.document_type or '', items, receipt.submission.description,
                 raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id,
                 assessment.score, format_cents(assessment.input_vat_cents),
                 format_cents(assessment.recoverable_vat_cents),

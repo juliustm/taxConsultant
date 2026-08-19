@@ -119,8 +119,10 @@ def test_migration_adds_the_new_schema(legacy_database):
 
     receipt_columns = main._table_columns('receipt')
     assert {'total_incl_tax_cents', 'is_cancelled', 'source_html', 'vendor_id',
-            'efd_serial', 'z_number', 'tax_office', 'receipt_time'} <= receipt_columns
-    assert {'next_attempt_at', 'claimed_at', 'client_uuid', 'captured_at'} <= main._table_columns('submission')
+            'efd_serial', 'z_number', 'tax_office', 'receipt_time',
+            'corrected_at', 'corrected_fields'} <= receipt_columns
+    assert {'next_attempt_at', 'claimed_at', 'client_uuid', 'captured_at',
+            'corrected_at'} <= main._table_columns('submission')
     assert {'business_name', 'business_tin', 'business_vrn'} <= main._table_columns('instance_config')
     assert {'enrolment_token', 'session_token_hash', 'revoked_at', 'last_seen_at',
             'activated_at', 'created_at'} <= main._table_columns('device')

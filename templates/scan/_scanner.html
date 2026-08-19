@@ -211,6 +211,12 @@
             <template x-if="foreignCode">
                 <p class="mt-1 text-xs text-red-300">That isn't a TRA receipt code.</p>
             </template>
+            <template x-if="importing">
+                <p class="mt-1 text-xs text-white/70" x-text="importProgress"></p>
+            </template>
+            <template x-if="importError">
+                <p class="mt-1 text-xs text-red-300" x-text="importError"></p>
+            </template>
         </div>
 
         <!-- Mode switch -->
@@ -222,12 +228,31 @@
         </div>
 
         <!-- Controls -->
-        <div class="safe-bottom flex items-center justify-between px-8 pb-5">
+        <div class="safe-bottom flex items-center justify-between px-6 pb-5">
             <a href="{{ url_for('scan_history') }}" @click.prevent="ScanRouter.go('history')" class="control control-round" aria-label="History">
                 <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
             </a>
+
+            {# Receipts that were photographed before this app was involved - by a
+               colleague, on a phone that was offline for a week, or simply days ago -
+               are the same receipts. `multiple` because that backlog is never one
+               photo, and no `capture` attribute because that is precisely what tells a
+               phone to open the camera instead of the library. #}
+            <input type="file" x-ref="gallery" accept="image/*" multiple class="hidden"
+                   @change="importFromGallery($event)">
+            <button type="button" class="control control-round" :disabled="importing"
+                    @click="$refs.gallery.click()" aria-label="Add photos from the gallery">
+                <template x-if="!importing">
+                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+                    </svg>
+                </template>
+                <template x-if="importing">
+                    <span class="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
+                </template>
+            </button>
 
             <!-- In QR mode scanning is automatic, so a shutter would invite pointless
                  taps; the slot keeps the row from shifting when modes change. -->
@@ -266,17 +291,47 @@
                  x-transition:leave-end="translate-y-full">
                 <div class="mx-auto mb-4 h-1.5 w-12 rounded-full bg-white/25"></div>
 
-                <template x-if="confirming && confirming.previewUrl">
+                <template x-if="confirming && confirming.kind !== 'batch' && confirming.previewUrl">
                     <img :src="confirming.previewUrl" alt="" class="mb-4 max-h-64 w-full rounded-xl object-cover">
+                </template>
+
+                {# A batch is shown as the strip it is, so an accidental extra photo -
+                   the screenshot, the picture of the car - is caught here rather than
+                   after it has been queued. #}
+                <template x-if="confirming && confirming.kind === 'batch'">
+                    <ul class="mb-4 flex gap-2 overflow-x-auto pb-1">
+                        <template x-for="(item, index) in confirming.items" :key="index">
+                            <li class="relative h-20 w-16 flex-none overflow-hidden rounded-lg bg-white/10">
+                                <template x-if="item.previewUrl">
+                                    <img :src="item.previewUrl" alt="" class="h-full w-full object-cover">
+                                </template>
+                                <template x-if="!item.previewUrl">
+                                    <span class="flex h-full w-full items-center justify-center text-2xl">🧾</span>
+                                </template>
+                            </li>
+                        </template>
+                    </ul>
                 </template>
 
                 <div class="flex items-center gap-3">
                     <span class="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-green-500/20 text-lg text-green-400">✓</span>
                     <div class="min-w-0">
-                        <p class="text-base font-semibold text-white">Receipt saved on this phone</p>
+                        <p class="text-base font-semibold text-white"
+                           x-text="confirming && confirming.kind === 'batch'
+                                   ? `${confirming.items.length} receipts saved on this phone`
+                                   : 'Receipt saved on this phone'"></p>
                         <p class="truncate font-mono text-sm text-white/60" x-text="confirming && confirming.label"></p>
                     </div>
                 </div>
+
+                {# One note for the whole batch. Asking per photo is how a note stops
+                   being attached to any of them. #}
+                <template x-if="confirming && confirming.kind === 'batch'">
+                    <p class="mt-3 text-xs text-white/40">
+                        <span x-text="confirming.verified"></span> read straight off their QR codes;
+                        the rest are read on the server after they upload.
+                    </p>
+                </template>
 
                 <label for="confirm-note" class="mt-5 block text-sm font-medium text-white/60">Note (optional)</label>
                 <textarea id="confirm-note" x-model="noteText" rows="3" maxlength="200"
@@ -292,7 +347,10 @@
 
                 <button type="button" class="control control-primary mt-4 w-full disabled:opacity-60"
                         @click="continueScanning()" :disabled="submitting">
-                    <span x-text="submitting ? 'Saving…' : 'Submit receipt'"></span>
+                    <span x-text="submitting ? 'Saving…'
+                                  : (confirming && confirming.kind === 'batch'
+                                     ? `Submit ${confirming.items.length} receipts`
+                                     : 'Submit receipt')"></span>
                 </button>
                 <button type="button" class="mt-2 w-full py-1 text-center text-xs text-white/40 underline"
                         @click="discardConfirming()">
@@ -320,6 +378,9 @@ function scannerApp() {
         torchOn: false,
         struggling: false,
         capturing: false,
+        importing: false,
+        importError: null,
+        importProgress: '',
         flash: false,
         confirming: null,
         submitting: false,
@@ -612,10 +673,9 @@ function scannerApp() {
             const note = this.noteText.trim();
 
             try {
-                if (item.kind === 'photo') {
-                    await PWA.queueScan({ photo: item.blob, description: note || null, location: PWA.currentLocation() });
-                } else {
-                    await PWA.queueScan({ receipturl: item.receipt.raw, description: note || null, location: PWA.currentLocation() });
+                var queue = item.kind === 'batch' ? item.items : [item];
+                for (var i = 0; i < queue.length; i++) {
+                    await this.queueOne(queue[i], note);
                 }
 
                 this.dismissConfirm();
@@ -634,6 +694,26 @@ function scannerApp() {
             }
         },
 
+        /*
+         * One item onto the outbox.
+         *
+         * Location is attached only to something photographed here and now. A gallery
+         * import carries `capturedAt` from the file instead, and stamping it with where
+         * the phone is standing when it was imported would put a Mwanza fuel stop in
+         * Dar es Salaam - a wrong answer is worse than no answer on a field that exists
+         * to corroborate a receipt.
+         */
+        queueOne(item, note) {
+            var fields = {
+                description: note || null,
+                location: item.capturedAt ? null : PWA.currentLocation(),
+                captured_at: item.capturedAt || null,
+            };
+            if (item.kind === 'photo') fields.photo = item.blob;
+            else fields.receipturl = item.receipt.raw;
+            return PWA.queueScan(fields);
+        },
+
         /* A mis-scan - the wrong receipt, someone else's - without a way back out of
            this sheet would just teach people to stop checking. */
         discardConfirming() {
@@ -642,6 +722,13 @@ function scannerApp() {
 
         dismissConfirm() {
             if (this.confirming && this.confirming.previewUrl) URL.revokeObjectURL(this.confirming.previewUrl);
+            // A batch holds one object URL per thumbnail, and leaking twenty of them per
+            // import is a real amount of memory on the phone this runs on.
+            if (this.confirming && this.confirming.items) {
+                this.confirming.items.forEach(function (item) {
+                    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+                });
+            }
             this.confirming = null;
             this.noteText = '';
             this.confirmError = null;
@@ -669,6 +756,106 @@ function scannerApp() {
                 this.cameraError = (e && e.message) || 'Could not take a photo.';
             } finally {
                 this.capturing = false;
+            }
+        },
+
+        /*
+         * Receipts that were photographed before this app got involved.
+         *
+         * The camera is the fast path, not the only one: a backlog builds up in a
+         * phone's gallery - photos taken before the app was installed, receipts sent in
+         * by a colleague, a week in the field where nobody had time to open anything.
+         * Making people re-photograph a photograph to get it in here is how a backlog
+         * stays a backlog.
+         *
+         * Each picked file goes through the same decoders a live frame does, so an
+         * image whose QR code reads is queued as a verified TRA scan and not as a
+         * picture. What does not read is queued as a photo, which the server now takes
+         * considerably further than it used to - it decodes the QR again at full size,
+         * and failing that reads the verification code off the paper (see
+         * _receipt_from_photo in main.py). So "not decoded here" is no longer the end
+         * of the road it once was, which is why a stubborn image is worth queuing
+         * rather than refusing.
+         */
+        async importFromGallery(event) {
+            var files = Array.from(event.target.files || []);
+            // Cleared immediately so picking the very same file again still fires a
+            // change event - otherwise a retry after an error appears to do nothing.
+            event.target.value = '';
+            if (!files.length || this.importing) return;
+
+            this.importing = true;
+            this.importError = null;
+            this.discardConfirming();
+
+            var items = [];
+            var failed = 0;
+            try {
+                for (var i = 0; i < files.length; i++) {
+                    var file = files[i];
+                    this.importProgress = files.length > 1
+                        ? `Reading ${i + 1} of ${files.length}…` : 'Reading the photo…';
+                    if (file.type && file.type.indexOf('image/') !== 0) continue;
+
+                    try {
+                        var shot = await Scanner.readImageFile(file);
+                    } catch (e) {
+                        // One unreadable file out of twenty must not cost the other
+                        // nineteen. It is counted and reported at the end instead.
+                        failed += 1;
+                        continue;
+                    }
+
+                    var receipt = shot.text ? Scanner.parseReceipt(shot.text) : null;
+                    items.push(receipt
+                        ? { kind: 'qr', receipt: receipt, label: receipt.code, capturedAt: this.takenAt(file) }
+                        : {
+                            kind: 'photo', blob: shot.blob, previewUrl: URL.createObjectURL(shot.blob),
+                            label: file.name || 'Photo', capturedAt: this.takenAt(file),
+                        });
+                }
+            } finally {
+                this.importing = false;
+                this.importProgress = '';
+            }
+
+            if (!items.length) {
+                this.importError = 'None of those files could be read as a photo.';
+                return;
+            }
+            if (failed) {
+                this.importError = `${failed} file(s) could not be read and were skipped.`;
+            }
+
+            if (items.length === 1) {
+                this.confirm(items[0]);
+                return;
+            }
+
+            this.confirm({
+                kind: 'batch',
+                items: items,
+                verified: items.filter(function (item) { return item.kind === 'qr'; }).length,
+                label: `${items.length} photos from the gallery`,
+            });
+        },
+
+        /*
+         * When the picture was taken, as far as the file knows.
+         *
+         * An imported receipt is not a receipt scanned today, and dating it today puts
+         * a March expense in whatever month somebody got round to uploading it. The
+         * file's own timestamp is the best available answer without parsing EXIF; it is
+         * accurate for a photo taken on this phone, and no worse than 'now' for one
+         * that arrived over WhatsApp.
+         */
+        takenAt(file) {
+            var stamp = file && file.lastModified;
+            if (!stamp || stamp > Date.now()) return null;
+            try {
+                return new Date(stamp).toISOString();
+            } catch (e) {
+                return null;
             }
         },
 

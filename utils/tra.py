@@ -94,6 +94,45 @@ class TraRefererRejected(TraError):
     retryable = False
 
 
+def build_receipt_url(code, receipt_time) -> str:
+    """
+    The portal address for a receipt, from its verification code and printed time.
+
+    The inverse of parse_receipt_url, and the only place that construction lives. Two
+    very different callers build this address - the vision model, from a transcription
+    of the paper, and an admin, reading the same paper by hand off the photograph - and
+    they must not be able to disagree about what the portal expects.
+
+    The time is read as fields rather than as a run of digits, because it arrives as
+    '10:47:40', as '9:20:22', as '10:47' where the EFD printed no seconds, and as the
+    bare '104740' copied out of a URL. Stripping the punctuation out of those gives six,
+    five, four and six digits for four times that are all perfectly readable.
+
+    Raises ValueError with a sentence for whoever typed it, rather than returning None:
+    a half-guessed code costs a request against a rate-limited portal and, worse, could
+    land on somebody else's receipt.
+    """
+    cleaned = ''.join(ch for ch in (code or '') if ch.isalnum())
+    if not cleaned:
+        raise ValueError('A verification code is needed - it is the long code printed under the QR square.')
+
+    parts = [part for part in re.split(r'\D+', str(receipt_time or '')) if part]
+    # Six digits in one field is the URL's own form, not three fields run together.
+    if len(parts) == 1 and len(parts[0]) == 6:
+        parts = [parts[0][0:2], parts[0][2:4], parts[0][4:6]]
+    # An EFD that printed no seconds leaves two; the portal still wants all six digits.
+    if len(parts) == 2:
+        parts.append('0')
+    if len(parts) != 3 or any(len(part) > 2 for part in parts):
+        raise ValueError("The receipt time should read as HH:MM:SS, e.g. '10:47:40'.")
+
+    hours, minutes, seconds = (int(part) for part in parts)
+    if hours > 23 or minutes > 59 or seconds > 59:
+        raise ValueError(f'{hours:02d}:{minutes:02d}:{seconds:02d} is not a time of day.')
+
+    return f'{TRA_BASE_URL}/{cleaned}_{hours:02d}{minutes:02d}{seconds:02d}'
+
+
 def parse_receipt_url(url: str):
     """
     Extracts (code, hhmmss) from a submitted receipt URL or bare receipt code.

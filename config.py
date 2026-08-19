@@ -44,6 +44,27 @@ class Config:
     # the @login_required /uploads/<filename> route and read by the vision model.
     UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
 
+    # The largest request body this app will take, which in practice means the largest
+    # receipt photo.
+    #
+    # Set explicitly because the alternative is not "no limit", it is "whatever the
+    # proxy in front of gunicorn happens to default to" - and phones in the field found
+    # that the hard way. An upload past that limit is refused by the ingress before
+    # Flask is ever reached, so the app answered nothing at all and the scanner showed a
+    # bare 'HTTP 413' under a receipt that then sat in its outbox forever. A limit named
+    # here is one the app can enforce, explain, and be tested against.
+    #
+    # 20MB rather than something snug: a phone photograph is the input, an unmodified
+    # 12MP HEIC-to-JPEG conversion clears 8MB without trying, and the direct API path
+    # takes whatever a bot sends. Nothing is stored at this size regardless - see
+    # utils/images.store_photo, which caps the pixels on the way in - so the number only
+    # has to be generous enough that a real receipt is never turned away at the door.
+    #
+    # NOTE: this is a ceiling, not a floor. The ingress in front of this app has its own
+    # body limit and the lower of the two wins, so raising this without raising that
+    # (nginx: client_max_body_size 20m) changes nothing.
+    MAX_CONTENT_LENGTH = 20 * 1024 * 1024
+
     # Created at import so a brand-new empty volume bootstraps itself on first boot.
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)

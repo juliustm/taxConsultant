@@ -100,6 +100,90 @@
                     <p class="mt-1 text-xs text-gray-500">Opening it yourself is the quickest way to tell whether TRA has the receipt at all.</p>
                     {% endif %}
 
+                    {# The address, and the two fields it is built from.
+
+                       This is the highest-value repair on the page and the cheapest one.
+                       <code>_<HHMMSS> is the whole of what TRA is ever asked for; both
+                       halves are guesses whenever the QR square would not decode; and
+                       both are printed in plain characters on the paper right below it,
+                       legible long after the code above them has stopped scanning. One
+                       corrected digit turns a submission that would have failed forever
+                       into an ordinary verified receipt carrying the portal's own numbers
+                       - nothing is typed in here that TRA does not then supply.
+
+                       Which is why the photograph sits directly underneath rather than
+                       above: the two fields and the paper they are read off want to be on
+                       screen together. #}
+                    <div class="mt-5 border-t border-gray-200 pt-5">
+                        <div class="flex items-start justify-between gap-x-4">
+                            <div>
+                                <h3 class="text-sm font-semibold text-gray-900">The address we ask TRA for</h3>
+                                <p class="mt-1 text-sm text-gray-500">
+                                    {% if submission.recovered_url %}
+                                        Worked out from the photograph &mdash; by decoding the QR code here, or by
+                                        reading the code and time off the paper. If it opens for you and not for
+                                        us, it is right and the portal was simply unreachable.
+                                    {% else %}
+                                        Built from the verification code and the time printed on the receipt. If
+                                        either is wrong, nothing after it can be right.
+                                    {% endif %}
+                                </p>
+                            </div>
+                            <button x-show="!editing" @click="editing = true"
+                                    class="flex-none rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                                Correct it
+                            </button>
+                        </div>
+
+                        {% if submission.recovered_url %}
+                        <p class="mt-3 break-all text-sm">
+                            <a href="{{ submission.recovered_url }}" target="_blank" rel="noopener"
+                               class="font-mono text-indigo-600 hover:underline">{{ submission.recovered_url }}</a>
+                        </p>
+                        {% endif %}
+                        {% if submission.corrected_at %}
+                        <p class="mt-1 text-xs text-gray-500">
+                            Corrected by hand on {{ submission.corrected_at.strftime('%d %b %Y at %H:%M') }} UTC.
+                        </p>
+                        {% endif %}
+
+                        <div x-show="editing" x-cloak class="mt-4 rounded-md bg-gray-50 p-4 ring-1 ring-inset ring-gray-200">
+                            <p class="text-sm text-gray-600">
+                                Both are on the photograph below: the code is the long one printed under the
+                                QR square, the time sits on the same line as the receipt date.
+                            </p>
+                            <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <div>
+                                    <label for="fix-code" class="block text-xs font-medium uppercase tracking-wide text-gray-500">Verification code</label>
+                                    <input id="fix-code" type="text" x-model="code" spellcheck="false" autocomplete="off"
+                                           class="mt-1 block w-full rounded-md border-0 py-1.5 font-mono uppercase text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm">
+                                </div>
+                                <div>
+                                    <label for="fix-time" class="block text-xs font-medium uppercase tracking-wide text-gray-500">Receipt time</label>
+                                    <input id="fix-time" type="text" x-model="time" placeholder="10:47:40" spellcheck="false" autocomplete="off"
+                                           class="mt-1 block w-full rounded-md border-0 py-1.5 font-mono text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm">
+                                </div>
+                            </div>
+
+                            <p class="mt-3 text-xs uppercase tracking-wide text-gray-500">We will ask for</p>
+                            <p class="break-all font-mono text-sm" :class="preview ? 'text-gray-900' : 'text-gray-400'"
+                               x-text="preview || 'a code and a time are both needed'"></p>
+
+                            <div class="mt-4 flex items-center gap-x-3">
+                                <button @click="correct()" :disabled="!preview || busy"
+                                        class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
+                                    <span x-text="busy ? 'Asking TRA...' : 'Save and ask TRA'"></span>
+                                </button>
+                                <button @click="editing = false" :disabled="busy"
+                                        class="text-sm font-semibold text-gray-600 hover:text-gray-900 disabled:opacity-50">Cancel</button>
+                            </div>
+                            <p class="mt-3 text-xs text-gray-500">
+                                The portal is asked there and then rather than on the next queue tick, so this
+                                can sit for a few seconds before it answers.
+                            </p>
+                        </div>
+                    </div>
+
                     {% if photo_url %}
                     <div class="mt-4">
                         <p class="mb-2 text-sm text-gray-500">Photograph</p>
@@ -108,6 +192,8 @@
                     {% endif %}
                 </div>
             </div>
+
+            {% include "_qr_scan.html" %}
 
             <!-- What went wrong -->
             {% if submission.error_message or reason %}
@@ -218,10 +304,69 @@ function submissionPage() {
         nextAttemptAt: {% if plan.next_attempt_at %}{{ (plan.next_attempt_at ~ 'Z')|tojson }}{% else %}null{% endif %},
         countdown: '',
 
+        // --- Correcting the address by hand ---
+        // Open from the start in the two cases where nothing else can move: the portal
+        // has said in so many words that the time is wrong, or we never read a code off
+        // this submission at all. Otherwise it stays behind its button - most
+        // submissions on this page are waiting on TRA, not on a person.
+        editing: {{ (submission.failure_reason == 'TraWrongReceiptTime' or not submission.receipt_code)|tojson }},
+        code: {{ (submission.receipt_code or '')|tojson }},
+        time: {{ (receipt_time or '')|tojson }},
+
         init() {
             if (!this.nextAttemptAt) return;
             this.tick();
             setInterval(() => this.tick(), 1000);
+        },
+
+        // What those two fields build, shown as it is typed. A mirror of
+        // utils.tra.build_receipt_url, which is what actually runs - this only exists so
+        // the address is visible before it is spent on a rate-limited portal, and an
+        // empty string here just greys the button out rather than deciding anything.
+        get preview() {
+            const code = (this.code || '').replace(/[^A-Za-z0-9]/g, '');
+            if (!code) return '';
+
+            let parts = (this.time || '').split(/\D+/).filter(Boolean);
+            if (parts.length === 1 && parts[0].length === 6) {
+                parts = [parts[0].slice(0, 2), parts[0].slice(2, 4), parts[0].slice(4, 6)];
+            }
+            if (parts.length === 2) parts.push('0');
+            if (parts.length !== 3 || parts.some(part => part.length > 2)) return '';
+
+            const [hours, minutes, seconds] = parts.map(Number);
+            if (hours > 23 || minutes > 59 || seconds > 59) return '';
+
+            const pad = value => String(value).padStart(2, '0');
+            return `https://verify.tra.go.tz/${code}_${pad(hours)}${pad(minutes)}${pad(seconds)}`;
+        },
+
+        async correct() {
+            this.busy = true;
+            this.failed = false;
+            this.message = '';
+            try {
+                const body = new FormData();
+                body.append('receipt_code', this.code);
+                body.append('receipt_time', this.time);
+                const response = await fetch('{{ url_for('correct_submission_url', submission_id=submission.id) }}', { method: 'POST', body });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'The correction was refused.');
+
+                // A verified receipt has its own page, saying far more than this one can.
+                if (payload.verified && payload.receipt_id) {
+                    window.location = `/receipts/${payload.receipt_id}`;
+                    return;
+                }
+                // Everything else changed this page - the status, the retry schedule, the
+                // address itself - so it is reloaded rather than patched in three places.
+                this.message = payload.message;
+                setTimeout(() => window.location.reload(), 1200);
+            } catch (error) {
+                this.failed = true;
+                this.message = error.message;
+                this.busy = false;
+            }
         },
         tick() {
             const seconds = Math.round((new Date(this.nextAttemptAt) - new Date()) / 1000);
