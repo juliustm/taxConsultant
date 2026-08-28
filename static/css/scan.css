@@ -104,15 +104,24 @@ input, textarea, [contenteditable] {
 
 .reticle.is-hit { outline-color: #22c55e; outline-width: 4px; }
 
-/* Photo mode frames the whole sensor, because that is what a photo captures.
-   Showing the small QR box while taking a full-frame picture told the user their
-   receipt had to fit inside a box it was never cropped to. */
+/* Photo mode's brackets mark the edge of the picture, and that is all they do.
+
+   Scanner.capture keeps exactly what the viewfinder was showing - the whole preview,
+   mapped back through `object-fit: cover` onto the sensor - so these are pulled out to
+   the edge of the glass, inside the safe area by enough to be seen on a notched phone.
+
+   They spent a version inset from the screen while being treated as the crop, which is
+   the worse of the two ways to get this wrong: a receipt that was entirely visible in
+   the preview came back with its top line or its total missing, and nothing on screen
+   said which strip had gone. A viewfinder that keeps less than it shows is not a
+   viewfinder. Moving these insets no longer moves the photograph - the preview decides
+   that now - so they can be placed for legibility. */
 .photo-frame {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 3.5rem);
-    right: 1rem;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 8.5rem);
-    left: 1rem;
+    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+    right: 0.5rem;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);
+    left: 0.5rem;
     pointer-events: none;
 }
 
@@ -400,6 +409,57 @@ input, textarea, [contenteditable] {
         radial-gradient(120% 90% at 15% 0%, rgba(79, 70, 229, 0.55) 0%, rgba(79, 70, 229, 0) 60%),
         linear-gradient(180deg, #14141a 0%, #0a0a0c 100%);
     color: #fff;
+}
+
+/* The instance's name, in the strip of hero above the figures.
+
+   Absolutely positioned inside the hero's own top padding rather than being the first
+   flex item in it: the hero centres its content in a fixed block, so anything added to
+   the flow pushes the total and the three stats down by its full height. This sits in
+   space that was already empty. */
+.dash-brand {
+    position: absolute;
+    top: calc(var(--hero-inset) + 1rem);
+    left: 1.5rem;
+    right: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.dash-brand-logo {
+    height: 1.5rem;
+    width: 1.5rem;
+    border-radius: 0.375rem;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.dash-brand-initial {
+    display: flex;
+    height: 1.5rem;
+    width: 1.5rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.375rem;
+    background: rgba(255, 255, 255, 0.14);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+/* Truncated rather than wrapped: a two-line business name in a fixed-height hero
+   pushes into the eyebrow underneath it. */
+.dash-brand-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.7);
 }
 
 .dash-eyebrow {

@@ -22,6 +22,21 @@
     {# The top third. Numbers only - every control on this screen lives in the sheet
        below, where a thumb can reach it. #}
     <header class="dash-hero">
+        {# Whose app this is. It sits in the hero's top padding rather than in the flow,
+           so it costs the figures below it nothing - see .dash-brand. A field user has
+           this installed next to their bank and their WhatsApp, and an app that opens
+           on an unnamed black screen full of money is one they have to recognise by its
+           icon alone. The logo when the instance has set one, its initial when it has
+           not; the name either way. #}
+        <div class="dash-brand">
+            {% if brand.logo_url %}
+                <img src="{{ brand.logo_url }}" alt="" class="dash-brand-logo">
+            {% else %}
+                <span class="dash-brand-initial">{{ brand.initial }}</span>
+            {% endif %}
+            <span class="dash-brand-name">{{ brand.name }}</span>
+        </div>
+
         <p class="dash-eyebrow" x-text="heroLabel"></p>
         <p class="dash-total">
             <span class="dash-total-currency">TZS</span><span x-text="heroTotal"></span>
@@ -154,7 +169,9 @@
                    x-text="query ? 'Nothing matches that.' : 'Nothing sent yet. Scan a receipt to get started.'"></p>
             </template>
 
-            <template x-for="group in groupedSubmissions" :key="group.label">
+            {# Keyed on group.key - the day itself - and never on the label. Two groups
+               that shared a key is what emptied this whole list; see groupedSubmissions. #}
+            <template x-for="group in groupedSubmissions" :key="group.key">
                 <div class="mb-4">
                     <h2 class="mb-2 inline-block rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-500"
                         x-text="group.label"></h2>
@@ -450,28 +467,76 @@ function historyPage() {
         get filteredOutbox() { return this.outbox.filter((i) => this.matches(this.outboxText(i))); },
 
         /*
-         * Date-grouped for the WhatsApp-style timeline: consecutive rows sharing a
-         * label are folded under one heading. `submissions` is already in id-desc
-         * (= chronological-desc) order, so this is a single pass, not a re-sort.
+         * Date-grouped for the WhatsApp-style timeline: every row captured on the same
+         * day sits under one heading, newest day first.
+         *
+         * By the day, not by runs of the same label, and that distinction is the whole
+         * reason this is written out rather than being a three-line fold.
+         *
+         * `submissions` is ordered by id - the order the server received them, which is
+         * also what loadMore() pages backwards through. The heading comes from
+         * `captured_at`, which is when somebody stood in front of the receipt. Those two
+         * agree for a scan and part company for an import: a photo taken in June and
+         * picked out of the gallery today gets a June heading and a today-sized id. So a
+         * list ordered by id runs "Today, 28 Jun, Today, 3 Aug, 28 Jun" - the same day
+         * arriving more than once, in more than one place.
+         *
+         * Folding consecutive runs turned each of those arrivals into its own group, and
+         * `:key="group.label"` then handed Alpine two groups with the same key. Alpine's
+         * keyed x-for reconciles duplicate keys by looking up a key that is no longer in
+         * its table, throws inside the effect, and never reaches the pass that inserts
+         * new elements - so the entire sent list rendered as nothing at all, under a
+         * "You've reached the beginning" that was telling the truth about rows nobody
+         * could see. Thirteen receipts on the server, thirteen in the cache, none on the
+         * screen.
+         *
+         * Grouping into a Map by the calendar day makes the key unique by construction,
+         * which is what stops it happening again - and it happens to be the better
+         * timeline too: one heading per day, wherever in the list that day's receipts
+         * turn up.
          */
         get groupedSubmissions() {
-            const groups = [];
-            let current = null;
+            const byDay = new Map();
             for (const sub of this.submissions) {
-                const label = this.dateLabel(sub.captured_at || sub.received_at);
-                if (!current || current.label !== label) {
-                    current = { label, items: [] };
-                    groups.push(current);
-                }
-                current.items.push(sub);
+                const when = sub.captured_at || sub.received_at;
+                const key = this.dayKey(when);
+                if (!byDay.has(key)) byDay.set(key, { key, label: this.dateLabel(when), items: [] });
+                byDay.get(key).items.push(sub);
             }
-            return groups;
+            // Newest day first; a row carrying no date at all sits at the bottom rather
+            // than sorting somewhere arbitrary in the middle of a year.
+            return Array.from(byDay.values()).sort((a, b) => {
+                if (a.key === b.key) return 0;
+                if (a.key === 'unknown') return 1;
+                if (b.key === 'unknown') return -1;
+                return a.key < b.key ? 1 : -1;
+            });
+        },
+
+        /* The calendar day a receipt belongs to, in the phone's own timezone, as a
+           sortable string. Not the label: two different days can read "Tuesday", and
+           this is what has to be unique. */
+        dayKey(iso) {
+            const d = this.asDate(iso);
+            if (!d) return 'unknown';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        },
+
+        /* Server timestamps are UTC and arrive without a zone marker. Parsing one as
+           local time puts a receipt three hours out here, which around midnight is a
+           receipt scanned this morning filed under "Yesterday". Tolerant of a value
+           that is not a string at all: a cached row written by an older build must not
+           be able to throw inside the getter that renders the whole list. */
+        asDate(iso) {
+            if (typeof iso !== 'string' || !iso) return null;
+            const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+            return isNaN(d) ? null : d;
         },
 
         dateLabel(iso) {
-            if (!iso) return 'Unknown date';
-            const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
-            if (isNaN(d)) return 'Unknown date';
+            const d = this.asDate(iso);
+            if (!d) return 'Unknown date';
             const startOfDay = (dt) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
             const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
             if (diffDays === 0) return 'Today';
@@ -677,9 +742,8 @@ function historyPage() {
         },
 
         when(iso) {
-            if (!iso) return '';
-            const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
-            if (isNaN(d)) return '';
+            const d = this.asDate(iso);
+            if (!d) return '';
             return d.toLocaleString([], {
                 day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
             });

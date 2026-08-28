@@ -276,6 +276,19 @@
                                                :data-peek="`category:${sub.receipt.category}`"
                                                x-text="(sub.receipt.category || '').replace(/_/g, ' ')"></a>
                                             <span x-show="sub.receipt.items?.length > 1" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="`${sub.receipt.items.length} items`"></span>
+                                            <!-- The paper behind the figures. A scan whose QR code the phone
+                                                 read files the photograph alongside it now, so this is on
+                                                 verified rows too and not only on ones that had to be read
+                                                 by a model - which is the point: the receipt TRA confirmed
+                                                 used to have no image anyone could go back to. -->
+                                            <a x-show="sub.photo_url" :href="sub.photo_url" target="_blank" rel="noopener"
+                                               class="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600 hover:bg-gray-200">
+                                                <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.132.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.804-2.169a47.865 47.865 0 00-1.132-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/>
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z"/>
+                                                </svg>
+                                                Photo
+                                            </a>
                                             <template x-for="chip in flagChips(sub)" :key="chip.label">
                                                 <span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium" :class="chip.class" x-text="chip.label"></span>
                                             </template>

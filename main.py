@@ -80,6 +80,7 @@ PENDING_COLUMNS = {
         ('landing_cta_url', 'VARCHAR(500)'),
         ('llm_text_model', 'VARCHAR(100)'),
         ('llm_vision_model', 'VARCHAR(100)'),
+        ('rebuild_url_from_text', 'BOOLEAN'),
     ),
     'submission': (
         ('next_attempt_at', 'DATETIME'),
@@ -91,6 +92,9 @@ PENDING_COLUMNS = {
         ('client_uuid', 'VARCHAR(64)'),
         ('captured_at', 'DATETIME'),
         ('corrected_at', 'DATETIME'),
+        ('photo_filename', 'VARCHAR(255)'),
+        ('llm_draft', 'TEXT'),
+        ('rebuild_declined', 'BOOLEAN NOT NULL DEFAULT 0'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -740,24 +744,49 @@ def _tab_counts(filters):
     ).count()
     return counts
 
+def submission_photo_name(submission):
+    """
+    The stored filename of this submission's photograph, or None if it has none.
+
+    Two columns hold one idea, for a reason that is historical rather than designed. A
+    photo submission keeps its image in input_data, because for a long time a photo was
+    the *only* thing such a submission had. A submission that carries both a QR code and
+    the picture it was read from keeps the picture in photo_filename, because input_data
+    is the URL and there is only one of it. Every reader wants the same answer - "is
+    there a photograph, and what is it called" - so it is worked out in one place.
+
+    photo_filename first: a photo submission never has one, so the order only decides
+    what happens to a row that somehow has both, and the explicit column is the newer
+    and more specific statement.
+    """
+    if submission is None:
+        return None
+    if getattr(submission, 'photo_filename', None):
+        return submission.photo_filename
+    if submission.input_type == 'photo' and submission.input_data:
+        return submission.input_data
+    return None
+
 def submission_photo_path(submission):
     """
-    Where a photo submission's file actually is, right now.
+    Where a submission's photograph actually is, right now.
 
-    input_data holds a bare filename, but rows written before the persistence volume
+    The stored name is a bare filename, but rows written before the persistence volume
     moved hold an absolute path into a directory that no longer exists. Resolving by
     basename against the current UPLOAD_FOLDER reads both, and keeps the database
     free of any dependency on where the volume happens to be mounted.
     """
-    return os.path.join(
-        current_app.config['UPLOAD_FOLDER'], os.path.basename(submission.input_data)
-    )
+    name = submission_photo_name(submission)
+    if not name:
+        return None
+    return os.path.join(current_app.config['UPLOAD_FOLDER'], os.path.basename(name))
 
 def submission_photo_url(submission):
-    """The public URL for a photo submission's image, or None if it isn't a photo."""
-    if not submission or submission.input_type != 'photo':
+    """The public URL for a submission's photograph, or None if it has none."""
+    name = submission_photo_name(submission)
+    if not name:
         return None
-    return url_for('uploaded_file', filename=os.path.basename(submission.input_data))
+    return url_for('uploaded_file', filename=os.path.basename(name))
 
 def prepare_submissions_for_frontend(submissions, detailed=True):
     """Converts Submission objects into a JSON-serialisable list of dictionaries."""
@@ -771,11 +800,22 @@ def prepare_submissions_for_frontend(submissions, detailed=True):
 
         # A photo's stored filename becomes a public /uploads/... URL; a URL
         # submission is already the thing the frontend should show.
-        frontend_input_data = submission_photo_url(sub) or sub.input_data
+        #
+        # Kept apart from photo_url below, which a URL submission can now also have.
+        # Collapsing the two - which this did, while a photograph and a URL were still
+        # mutually exclusive - would put an image path in input_data on a row whose
+        # input_type says 'url', and every reader of that pair would then be wrong.
+        photo_url = submission_photo_url(sub)
+        frontend_input_data = (photo_url or sub.input_data) if sub.input_type == 'photo' \
+            else sub.input_data
 
         data = {
             "id": sub.id, "status": sub.status, "received_at": sub.received_at.isoformat(),
             "input_type": sub.input_type, "input_data": frontend_input_data, # Use the transformed path
+            # The photograph, whatever the input was. A scan whose QR code the phone read
+            # now files the picture it read it from alongside the code, so a verified
+            # receipt has the paper behind it too.
+            "photo_url": photo_url,
             "description": sub.description, "location": sub.location,
             "error_message": sub.error_message, "is_duplicate": sub.status == 'duplicate',
             "receipt": receipt_data, "device_name": sub.device.name if sub.device else 'Unknown Device',
@@ -1137,6 +1177,55 @@ def _scan_photo_qr(submission, photo_path):
     return report.get('url')
 
 
+def _may_rebuild_url(submission, config):
+    """
+    Whether a portal address may be guessed from text the model read off this photo.
+
+    Two switches, deliberately at different altitudes. The instance setting is the
+    default for every photograph nobody has looked at; the submission flag is one
+    admin's verdict on the document in front of them, and it wins - a person who has
+    read the picture and said "this is not a TRA receipt" knows something the pipeline
+    does not, and a later retry must not overrule them.
+    """
+    if submission.rebuild_declined:
+        return False
+    return config is None or config.rebuilds_urls_from_text()
+
+
+def _store_llm_draft(submission, data):
+    """
+    Keeps what the vision model read, so no outcome below can throw it away.
+
+    Committed on its own, before the layers that act on it, for the same reason
+    _scan_photo_qr commits its report: everything after this can raise or reschedule,
+    and the reading is worth having either way. A draft that cannot be serialised is
+    simply not stored - this is a convenience for the admin page, never a reason to
+    fail a receipt that is otherwise fine.
+    """
+    try:
+        submission.llm_draft = json.dumps(data)
+        db.session.commit()
+    except (TypeError, ValueError) as e:
+        db.session.rollback()
+        print(f'[Photo] Could not store the transcription for submission {submission.id}: {e}')
+
+
+def _stored_llm_draft(submission):
+    """
+    The stored transcription for a submission, or None.
+
+    Tolerant of junk for the same reason _stored_qr_scan is: it is read by a page whose
+    job is explaining why a receipt has not landed, and it may not fail while doing it.
+    """
+    if submission is None or not submission.llm_draft:
+        return None
+    try:
+        draft = json.loads(submission.llm_draft)
+    except ValueError:
+        return None
+    return draft if isinstance(draft, dict) else None
+
+
 def _receipt_from_photo(submission, config):
     """
     Builds a Receipt from a photograph, preferring TRA's numbers over the model's.
@@ -1167,6 +1256,23 @@ def _receipt_from_photo(submission, config):
          handwritten chit - this is not a fallback but the right answer, and the
          document_type the model returns says so rather than leaving it looking like an
          EFD receipt that failed verification.
+
+    Layer 2 is a guess, and the two things that follow from that are what most of the
+    care below is about.
+
+    The first is that the guess is now *skippable*. An instance can turn it off
+    (InstanceConfig.rebuild_url_from_text) and an admin can turn it off for one
+    submission (Submission.rebuild_declined), because on a document that was never an
+    EFD receipt it does real harm: a mobile-money SMS yields a plausible run of digits,
+    those become a portal address nobody will ever confirm, and the submission then
+    spends two days on the retry schedule.
+
+    The second is that the transcription is never thrown away again. It is written to
+    the submission the moment it exists, before any of it is acted on, so a photograph
+    sitting in a retry schedule still has a vendor, a total and a date an admin can
+    read - and accept, in one click, as the receipt. It used to be discarded the instant
+    layer 2 booked a retry, which is how a receipt that had already been read and paid
+    for showed an admin nothing at all.
     """
     if not config.is_configured():
         raise ValueError("Instance is not configured with LLM provider and API key.")
@@ -1177,7 +1283,11 @@ def _receipt_from_photo(submission, config):
     # portal was unwilling. Neither the decoder nor the model can improve on that, and
     # re-running them once per retry would spend a vision call each time to arrive back
     # at the same URL.
-    if submission.recovered_url:
+    #
+    # Not when an admin has declined the rebuild since that attempt: the address in
+    # recovered_url is then exactly the guess they have just judged wrong, and going
+    # back to the portal with it is the loop they asked to be let out of.
+    if submission.recovered_url and not submission.rebuild_declined:
         print(f"[Photo] Retrying the code recovered earlier: {submission.recovered_url}")
         receipt, settled = _verify_photo_against_tra(
             submission, config, submission.recovered_url, source='the code recovered from it')
@@ -1196,13 +1306,19 @@ def _receipt_from_photo(submission, config):
 
     data = extract_receipt_details(photo_path, True, config)
 
+    # Written before anything is done with it. Everything below this line can end in a
+    # retry booked for tomorrow, and until this was stored that outcome took the whole
+    # transcription with it - see the docstring.
+    _store_llm_draft(submission, data)
+
     # Layer 2: the model read the code off the paper, so the portal can still be asked.
     # Skipped when a URL has already been recovered - by an earlier attempt or by the
     # decoder above - because that one came from the machine-readable code and the
     # portal has just declined it. Asking again with a transcription of the same code
     # spends a request to be told the same thing.
     document_type = (data.get('document_type') or '').strip() or 'tra_efd_receipt'
-    if document_type == 'tra_efd_receipt' and not submission.recovered_url:
+    if (document_type == 'tra_efd_receipt' and not submission.recovered_url
+            and _may_rebuild_url(submission, config)):
         rebuilt = reconstructed_receipt_url(data)
         if rebuilt:
             print(f"[Photo] Rebuilt a verification URL from the transcription: {rebuilt}")
@@ -1213,6 +1329,20 @@ def _receipt_from_photo(submission, config):
             print("[Photo] Portal would not confirm the transcribed code; storing what was read.")
 
     # Layer 3: what the model read, kept as the model's reading.
+    return _receipt_from_transcription(submission, data, config)
+
+
+def _receipt_from_transcription(submission, data, config):
+    """
+    A Receipt built out of what the vision model read, or None if it is a duplicate.
+
+    Split out of _receipt_from_photo so the admin page can build the same receipt from
+    the same stored transcription (see accept_submission_extraction). One reader of one
+    shape of data: a receipt an admin accepts by hand has to be indistinguishable from
+    one the pipeline stored on its own, or the two paths drift and only one of them
+    keeps getting the fixes.
+    """
+    document_type = (data.get('document_type') or '').strip() or 'tra_efd_receipt'
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
     if _register_duplicate(submission, verification_code, config):
         return None
@@ -2114,6 +2244,48 @@ def _stored_qr_scan(submission):
         return None
 
 
+# What of a stored transcription is worth putting on the submission page, in the order
+# somebody checking a document reads it. Deliberately the same fields, and the same
+# labels, that CORRECTABLE_FIELDS offers on the receipt page afterwards: this panel is
+# the preview of that form, and two lists that disagree would show an admin a figure
+# here they then cannot find there.
+DRAFT_FIELDS = (
+    ('vendor_name', 'Vendor', 'text'),
+    ('vendor_tin', 'Vendor TIN', 'text'),
+    ('vrn', 'VRN', 'text'),
+    ('receipt_date', 'Receipt date', 'text'),
+    ('receipt_time', 'Receipt time', 'text'),
+    ('receipt_verification_code', 'Verification code', 'text'),
+    ('receipt_number', 'Receipt no.', 'text'),
+    ('total_amount', 'Total incl. tax', 'money'),
+    ('total_excl_tax', 'Total excl. tax', 'money'),
+    ('vat_amount', 'Tax', 'money'),
+)
+
+
+def _draft_fields(draft):
+    """
+    A stored transcription as (label, value) rows, or None when there is none.
+
+    Money is formatted through the same helper the rest of the app uses rather than
+    printed as whatever JSON the model returned, so a total reads as a total on a page
+    whose whole purpose is letting somebody check it against the paper beside them.
+    """
+    if not draft:
+        return None
+
+    rows = []
+    for key, label, kind in DRAFT_FIELDS:
+        value = draft.get(key)
+        if value is None or value == '':
+            continue
+        if kind == 'money':
+            cents = to_cents(value)
+            value = format_cents(cents) if cents is not None else value
+        rows.append((label, str(value)))
+    return rows
+
+
 @app.route('/submissions/<int:submission_id>')
 @login_required
 def submission_detail(submission_id):
@@ -2140,12 +2312,20 @@ def submission_detail(submission_id):
         twin = Receipt.query.filter_by(receipt_verification_code=submission.receipt_code).first()
 
     scan = _stored_qr_scan(submission)
+    config = get_instance_config()
     return render_template(
         'submission_detail.html',
         submission=submission,
         scan=scan, scan_summary=qr.summarise(scan),
         plan=retry_plan(submission),
         reason=FAILURE_GUIDANCE.get(submission.failure_reason),
+        # What the vision model read, and whether the address being retried was built
+        # out of it. Together they are the whole of the question this page could not
+        # answer before: is this actually a TRA receipt, and if not, what is it?
+        draft=_stored_llm_draft(submission),
+        draft_fields=_draft_fields(_stored_llm_draft(submission)),
+        rebuild_allowed=_may_rebuild_url(submission, config),
+        rebuild_allowed_here=(config is None or config.rebuilds_urls_from_text()),
         # Whichever address we would actually ask the portal for. A photograph's lives in
         # recovered_url and a URL submission's in input_data, but the time printed on the
         # receipt is the same fact either way, and it is half of what an admin corrects.
@@ -2185,7 +2365,9 @@ def requeue_submission(submission_id):
         'id': submission.id, 'submission_id': submission.id, 'status': submission.status,
         'received_at': submission.received_at.isoformat(), 'input_type': submission.input_type,
         # The same public URL every other event carries - never the server-side path.
-        'input_data': submission_photo_url(submission) or submission.input_data,
+        'input_data': (submission_photo_url(submission) if submission.input_type == 'photo'
+                       else submission.input_data),
+        'photo_url': submission_photo_url(submission),
         'description': submission.description,
         'location': submission.location, 'device_id': submission.device_id,
         'device_name': submission.device.name if submission.device else 'Unknown Device',
@@ -2200,6 +2382,125 @@ def requeue_submission(submission_id):
 @login_required
 def retry_submission(submission_id):
     return requeue_submission(submission_id)
+
+
+@app.route('/submissions/<int:submission_id>/keep-extraction', methods=['POST'])
+@login_required
+def keep_submission_extraction(submission_id):
+    """
+    Stops guessing at TRA and keeps what the vision model read off the photograph.
+
+    The button for the case the pipeline handles worst. Layer 2 of _receipt_from_photo
+    rebuilds a portal address out of a code the model transcribed, and on a document
+    that is not an EFD receipt at all - a mobile-money SMS, a delivery note, a till slip
+    from a shop with no EFD - it rebuilds one anyway, because a plausible run of digits
+    is exactly what those documents contain. The address is then never confirmed, the
+    submission spends its whole retry schedule finding that out, and the one usable
+    reading of the document sits unused on the row the entire time.
+
+    This ends that, with no new vision call and no further requests to the portal:
+
+      * The rebuild is declined for this submission for good, so a later retry or an
+        admin pressing "Send to TRA again" cannot resurrect the guessed address.
+      * The address the guess produced is cleared, along with the receipt code taken
+        from it - both are that guess, and leaving them would go on describing this
+        submission as a receipt TRA ought to know about.
+      * The stored transcription becomes the receipt, exactly as layer 3 would have
+        stored it, flagged extraction_source='llm_vision' so it stays distinguishable
+        from figures the portal supplied.
+
+    What it does not do is settle the numbers. They are a model's reading and they are
+    editable from the receipt page the moment this returns - which is the point of
+    landing there rather than leaving them on a submission nobody can correct.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+    if submission.receipt is not None:
+        return jsonify({'error': 'This submission already has a receipt behind it.',
+                        'receipt_id': submission.receipt.id}), 409
+
+    draft = _stored_llm_draft(submission)
+    if not draft:
+        return jsonify({
+            'error': 'Nothing was read off this photograph yet, so there is nothing to keep. '
+                     'That happens when the photo has not reached the vision model - a '
+                     'submission still queued for its first attempt, or one whose QR code '
+                     'decoded and went straight to the portal.',
+        }), 409
+
+    # Declined first and committed with the rest: were this only set after the receipt
+    # stored, a failure in between would leave the guessed address live on a submission
+    # an admin has already ruled on.
+    submission.rebuild_declined = True
+    submission.recovered_url = None
+    # Re-derived from the transcription rather than cleared, so that every branch below
+    # keeps an identity for this document - including the duplicate one, which commits
+    # and returns without ever building a receipt to take the code from.
+    submission.receipt_code = (draft.get('receipt_verification_code') or '').strip() or None
+
+    config = get_instance_config()
+    receipt = _receipt_from_transcription(submission, draft, config)
+    if receipt is None:
+        # _register_duplicate has already committed the submission as a duplicate of a
+        # receipt we hold, which is a real outcome and not a failure.
+        db.session.commit()
+        return jsonify({'submission_id': submission.id, 'status': submission.status,
+                        'message': 'That receipt is already in the ledger, so this '
+                                   'submission was recorded as a duplicate.'}), 200
+
+    submission.next_attempt_at = None
+    submission.claimed_at = None
+    submission.error_message = None
+    submission.failure_reason = None
+    _complete_submission(submission, receipt, config)
+
+    return jsonify({
+        'submission_id': submission.id,
+        'receipt_id': receipt.id,
+        'status': submission.status,
+        'message': 'Kept what was read off the photograph. Correct anything that is wrong '
+                   'from here.',
+    }), 200
+
+
+@app.route('/submissions/<int:submission_id>/rebuild-policy', methods=['POST'])
+@login_required
+def set_submission_rebuild_policy(submission_id):
+    """
+    Turns the address-guessing on or off for one submission, without settling it.
+
+    Separate from keep-extraction because the two answer different questions. That one
+    says "this document is not a TRA receipt, file what we read"; this one says "stop
+    rebuilding the address, but keep trying" - which is what an admin wants when the
+    photograph *is* a receipt and they intend to type the code in by hand, or when the
+    QR is worth another rescan first.
+
+    Declining clears the guessed address so the next attempt starts from the photograph
+    again rather than from the digits that failed. Re-allowing it deliberately does not
+    put the old address back: the guess is cheap to make again and the stale one was
+    wrong often enough to be worth re-deriving.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+
+    declined = (request.form.get('declined') or '').lower() in ('1', 'true', 'on', 'yes')
+    submission.rebuild_declined = declined
+    if declined and submission.recovered_url and not submission.corrected_at:
+        # Only a guessed address is dropped. One an admin typed by hand carries
+        # corrected_at, and throwing that away would delete somebody's work.
+        submission.recovered_url = None
+        submission.receipt_code = None
+    db.session.commit()
+
+    return jsonify({
+        'submission_id': submission.id,
+        'rebuild_declined': submission.rebuild_declined,
+        'message': ('Addresses will no longer be rebuilt from text read off this photo.'
+                    if declined else
+                    'Addresses may be rebuilt from text read off this photo again.'),
+    }), 200
 
 
 @app.route('/submissions/<int:submission_id>/rescan', methods=['POST'])
@@ -2233,10 +2534,14 @@ def rescan_submission_photo(submission_id):
     if submission is None:
         return jsonify({'error': 'No such submission.'}), 404
 
-    if submission.input_type != 'photo':
-        return jsonify({'error': 'This submission is a URL, not a photograph.'}), 409
-
+    # Asked of the photograph, not of the input type. A scan whose QR code the phone
+    # read now files the picture alongside the code, so a URL submission can have one -
+    # and running the decoder over those is the only way to find out what the server
+    # side actually reads on ordinary receipts, rather than only on the ones a phone had
+    # already failed to decode.
     photo_path = submission_photo_path(submission)
+    if not photo_path:
+        return jsonify({'error': 'This submission has no photograph to scan.'}), 409
     if not os.path.exists(photo_path):
         return jsonify({'error': 'The photograph for this submission is no longer on disk.'}), 409
 
@@ -2820,6 +3125,11 @@ def configure_instance():
         # instance wants - so an empty box has to store NULL, not ''.
         config.llm_text_model = optional('llm_text_model')
         config.llm_vision_model = optional('llm_vision_model')
+        # A checkbox posts nothing at all when it is unticked, so the tab it lives on
+        # has to be identified some other way before its absence can mean 'off'. Without
+        # this guard, saving any other tab would silently switch the rebuild off.
+        if 'llm_settings' in request.form:
+            config.rebuild_url_from_text = 'rebuild_url_from_text' in request.form
         config.google_sheet_id = request.form.get('google_sheet_id')
         config.google_service_account_json = request.form.get('google_service_account_json')
         config.post_callback_url = request.form.get('post_callback_url')
@@ -3134,17 +3444,24 @@ def scan_manifest():
 
     `id` is fixed so the browser still recognises every one of these as the same
     installed app, however the start_url differs.
+
+    Everything a person sees comes from the instance's own branding rather than from
+    this file. An installed app is an icon and a caption on somebody's home screen,
+    sitting next to their bank and their WhatsApp, and "Receipts" is the caption of an
+    app that could belong to anyone - which is exactly wrong for a tool a business hands
+    to its drivers and its shop staff. It is that business's app; it says so.
     """
-    config = get_instance_config()
-    name = (config.business_name if config and config.business_name else 'Karani')
+    brand = branding.of(get_instance_config())
 
     token = (request.args.get('t') or '').strip()
     start_url = url_for('scan_home', t=token) if token else '/scan/'
 
     return jsonify({
-        'name': f'{name} Receipts',
-        'short_name': 'Receipts',
-        'description': 'Scan and submit EFD receipts, online or off.',
+        'name': f'{brand.name} Receipts',
+        # What fits under an icon. See Brand.short_name - a long business name is cut at
+        # a word rather than left to the operating system's ellipsis.
+        'short_name': brand.short_name,
+        'description': f'Scan and submit EFD receipts for {brand.name}, online or off.',
         'id': '/scan/',
         'start_url': start_url,
         'scope': '/scan/',
@@ -3273,9 +3590,17 @@ def scan_api_sync_photo():
     """
     Takes one photo. Deliberately not batched: a multi-megabyte blob that fails
     should not take the rest of the queue down with it.
+
+    `receipturl` is optional and is what makes this the endpoint for a scan the phone
+    *did* decode, as well as one it did not. The two used to be different submissions
+    through different doors - a decoded code went up in the JSON batch and the picture
+    it was read from was dropped on the phone - which left every verified receipt with
+    no image behind it. Sending both here files them as one submission: processed as the
+    URL, with the photograph kept beside it.
     """
     photo = request.files.get('receiptphoto')
     client_uuid = (request.form.get('client_uuid') or '').strip()
+    receipt_url = (request.form.get('receipturl') or '').strip() or None
     if not photo:
         return jsonify({'error': '`receiptphoto` is required.'}), 400
     if not client_uuid:
@@ -3284,6 +3609,7 @@ def scan_api_sync_photo():
     submission, created = ingest_submission(
         g.device,
         photo=photo,
+        url=receipt_url,
         description=request.form.get('description'),
         location=request.form.get('location'),
         client_uuid=client_uuid,
@@ -3496,9 +3822,13 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
     Puts one receipt on the queue. Returns (submission, created).
 
     The single place a submission is born, shared by the bot endpoint and the
-    scanner's sync. Photos are stored as an absolute filesystem path for the backend
-    and announced as a public URL for the dashboard - two different strings for two
-    different readers, which is the one subtlety here.
+    scanner's sync. Photos are stored as a bare filename for the backend and announced
+    as a public URL for the dashboard - two different strings for two different readers,
+    which is the one subtlety here.
+
+    `photo` and `url` are not exclusive. A phone that decodes a receipt's QR code is
+    holding a photograph of that receipt at the same instant, and sending both is what
+    keeps the paper behind the verified figures - see Submission.photo_filename.
 
     Idempotent on client_uuid: an offline device retries a scan until it is
     acknowledged, and a response lost on the way back must not leave a second copy
@@ -3519,9 +3849,10 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
     db_input_data = ''
     # This will be the path sent to the frontend via SSE.
     frontend_input_data = ''
+    # The photograph filed beside a URL, when the scan carried both.
+    photo_filename = None
 
     if photo:
-        input_type = 'photo'
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
 
         # Not photo.save(). What arrives can be a 12MP frame straight off a sensor, and
@@ -3532,23 +3863,35 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         #
         # Reassigned, because a re-encode also settles the extension: what is stored is
         # the name of the file that actually exists, not the one that was uploaded.
-        filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
+        photo_filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
 
-        # Only the filename is stored. Writing the absolute path here would tie every
-        # row to wherever the persistence volume happened to be mounted that day, and
-        # moving the volume would orphan every photo already in the database.
-        db_input_data = filename
-        frontend_input_data = url_for('uploaded_file', filename=filename)
-
-    elif url:
+    if url:
+        # A URL wins the input_type even when a photograph came with it, and that
+        # ordering is the whole point of accepting both. The code is the stronger claim
+        # about which receipt this is - it goes to TRA and comes back with the portal's
+        # own figures - so the submission is processed as the URL it is, and the picture
+        # rides along as evidence rather than as a second thing to read. Only when the
+        # code is absent is the photograph the input.
         input_type = 'url'
         # For URLs, the path is the same for both backend and frontend.
         db_input_data = url
         frontend_input_data = url
 
+    elif photo_filename:
+        input_type = 'photo'
+        # Only the filename is stored. Writing the absolute path here would tie every
+        # row to wherever the persistence volume happened to be mounted that day, and
+        # moving the volume would orphan every photo already in the database.
+        db_input_data = photo_filename
+        frontend_input_data = url_for('uploaded_file', filename=photo_filename)
+        # Already the input; a second copy of the name in photo_filename would leave two
+        # columns to keep in step for no gain. submission_photo_name reads both.
+        photo_filename = None
+
     new_submission = Submission(
         device_id=device.id, input_type=input_type,
         input_data=db_input_data, # Save the full filesystem path to the DB
+        photo_filename=photo_filename,
         description=description, location=location,
         client_uuid=client_uuid, captured_at=captured_at,
         # Read before anything is queued. A submission that never verifies still has
@@ -3563,6 +3906,8 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         "received_at": new_submission.received_at.isoformat(),
         "input_type": new_submission.input_type,
         "input_data": frontend_input_data, # Send the public URL to the frontend
+        "photo_url": (url_for('uploaded_file', filename=photo_filename)
+                      if photo_filename else (frontend_input_data if input_type == 'photo' else None)),
         "description": new_submission.description, "location": new_submission.location,
         "device_id": device.id,
     }
@@ -3707,12 +4052,26 @@ def run_tasks():
 @app.route('/uploads/<path:filename>')
 @login_required
 def uploaded_file(filename):
-    """Serves a file from the upload folder."""
-    return send_from_directory(
+    """
+    Serves a receipt photograph from the upload folder.
+
+    Cached hard, and safely: a stored filename carries the timestamp it was written at
+    and the file underneath it is never rewritten, so the only thing that can change at
+    one of these addresses is the file being deleted. Without this the dashboard
+    re-downloads every photograph on every visit - each one up to
+    utils.images.STORED_MAX_EDGE, on a list where a dozen of them are on screen at once.
+
+    `private` because these are one business's receipts behind @login_required: shared
+    caches, including any proxy in front of this app, must not keep a copy that a
+    different session could be handed.
+    """
+    response = send_from_directory(
         app.config['UPLOAD_FOLDER'],
         filename,
         as_attachment=False # Display in browser instead of downloading
     )
+    response.headers['Cache-Control'] = 'private, max-age=31536000, immutable'
+    return response
 
 @app.route('/export/csv')
 @login_required

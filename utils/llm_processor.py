@@ -31,6 +31,7 @@ import re
 # return a category the deterministic classifier has no bucket for.
 from utils.classify import EXPENSE_CATEGORIES
 # The portal address is built in one place for every caller - see reconstructed_receipt_url.
+from utils import images
 from utils.tra import build_receipt_url
 
 JUDGMENT_SYSTEM_PROMPT = """
@@ -219,8 +220,16 @@ class LlmUnavailable(Exception):
 
 
 def encode_image_to_base64(image_path):
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+    """
+    The photograph as base64, bounded to what the model can actually use.
+
+    Not the file on disk. A stored receipt is kept at utils.images.STORED_MAX_EDGE,
+    which is set by the QR decoder rather than by this reader, and every pixel above
+    what the model needs is one encoded a third larger into a data URL, pushed over the
+    line, and charged for as image tokens - on an instance that may be working through
+    a day's backlog. See utils.images.encoded_for_model for the size and why.
+    """
+    return images.encoded_for_model(image_path)
 
 def get_llm_client(config):
     if config.llm_provider == 'groq' and config.llm_api_key:

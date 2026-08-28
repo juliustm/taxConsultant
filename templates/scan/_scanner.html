@@ -184,7 +184,10 @@
         <!-- QR mode: a box, because only the box is read. -->
         <div class="reticle" x-show="mode === 'qr'" :class="{ 'is-hit': flash }"></div>
 
-        <!-- Photo mode: the whole frame, because the whole frame is what gets captured. -->
+        {# Photo mode: the brackets sit at the edge of the picture, not inside it. What
+           the viewfinder shows is what capture() saves - the whole preview, mapped back
+           through `object-fit: cover` onto the sensor - so these mark that boundary
+           rather than describing a second, smaller one. #}
         <div class="photo-frame" x-show="mode === 'photo'" x-cloak>
             <span></span><span></span><span></span><span></span>
         </div>
@@ -196,7 +199,7 @@
         <div class="px-6 pb-3 text-center">
             <template x-if="mode === 'photo'">
                 <p class="text-sm text-white/70">
-                    Fit the <strong>whole receipt</strong> in the frame. The full picture is saved.
+                    Everything you can see is saved. Fill the screen with the receipt.
                 </p>
             </template>
             <template x-if="mode === 'qr' && struggling">
@@ -441,6 +444,12 @@ function scannerApp() {
                     this.setMode('photo');
                 },
             });
+            // Published for the diagnostics screen, which is a different Alpine
+            // component in the same document and has to be able to change the camera on
+            // the one stream that exists. Reaching into another component's state would
+            // be worse; a second scanner over a second stream is not possible on the
+            // phones this runs on.
+            window.__scanner = this.scanner;
 
             // Coming back from a call, a lock screen or another app frequently means
             // coming back to a camera the OS has taken - see Scanner.revive().
@@ -709,8 +718,11 @@ function scannerApp() {
                 location: item.capturedAt ? null : PWA.currentLocation(),
                 captured_at: item.capturedAt || null,
             };
-            if (item.kind === 'photo') fields.photo = item.blob;
-            else fields.receipturl = item.receipt.raw;
+            // Not either/or any more. A scan whose code decoded carries both: the URL
+            // is what the receipt is verified from, the photograph is the paper it was
+            // read off, and the server files them as one submission.
+            if (item.receipt) fields.receipturl = item.receipt.raw;
+            if (item.blob) fields.photo = item.blob;
             return PWA.queueScan(fields);
         },
 
@@ -741,17 +753,24 @@ function scannerApp() {
             try {
                 const shot = await this.scanner.capture();
 
-                // A still at full sensor resolution frequently decodes what the preview
-                // stream could not. When it does, this becomes an ordinary scan and the
-                // photo is thrown away - a verified receipt beats a picture of one.
+                // A still gets all three decode passes where a live frame gets one, so
+                // it frequently reads a code the preview loop could not. When it does
+                // this becomes an ordinary verified scan -
+                // but the photograph goes up with it rather than being discarded.
+                //
+                // It used to be thrown away here, on the reasoning that a verified
+                // receipt beats a picture of one. True, and beside the point: they are
+                // not alternatives. The receipt TRA confirms had no image behind it at
+                // all, so nobody could ever look at the paper again - to check a line
+                // item, to see the state it was in, to settle a dispute about what was
+                // bought. It also meant the server's own QR decoder only ever ran on
+                // photographs this phone had already failed to read, which is a
+                // selection effect that makes its hit rate look like a fault.
                 const receipt = shot.text ? Scanner.parseReceipt(shot.text) : null;
-                if (receipt) {
-                    this.confirm({ kind: 'qr', receipt, label: receipt.code });
-                    return;
-                }
-
                 const previewUrl = URL.createObjectURL(shot.blob);
-                this.confirm({ kind: 'photo', blob: shot.blob, previewUrl, label: 'Photo' });
+                this.confirm(receipt
+                    ? { kind: 'qr', receipt, blob: shot.blob, previewUrl, label: receipt.code }
+                    : { kind: 'photo', blob: shot.blob, previewUrl, label: 'Photo' });
             } catch (e) {
                 this.cameraError = (e && e.message) || 'Could not take a photo.';
             } finally {
@@ -806,13 +825,18 @@ function scannerApp() {
                         continue;
                     }
 
+                    // Both halves are kept whichever way the decode went - see
+                    // takePhoto() for why a read code is not a reason to drop the
+                    // picture it was read from.
                     var receipt = shot.text ? Scanner.parseReceipt(shot.text) : null;
-                    items.push(receipt
-                        ? { kind: 'qr', receipt: receipt, label: receipt.code, capturedAt: this.takenAt(file) }
-                        : {
-                            kind: 'photo', blob: shot.blob, previewUrl: URL.createObjectURL(shot.blob),
-                            label: file.name || 'Photo', capturedAt: this.takenAt(file),
-                        });
+                    items.push({
+                        kind: receipt ? 'qr' : 'photo',
+                        receipt: receipt,
+                        blob: shot.blob,
+                        previewUrl: URL.createObjectURL(shot.blob),
+                        label: receipt ? receipt.code : (file.name || 'Photo'),
+                        capturedAt: this.takenAt(file),
+                    });
                 }
             } finally {
                 this.importing = false;

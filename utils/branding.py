@@ -54,6 +54,32 @@ class Brand:
         """The letter in the square when there is no logo image."""
         return (self.name or PRODUCT_NAME).strip()[:1].upper() or 'K'
 
+    @property
+    def short_name(self):
+        """
+        The name as a home-screen label, where about twelve characters is all there is.
+
+        Both iOS and Android truncate an installed app's caption hard - "Another J's
+        Bar & Rest…" is what a long business name actually looks like under the icon,
+        and the ellipsis is the part nobody wants. So a long name is cut at a word
+        boundary rather than mid-syllable, and a name short enough is left alone.
+
+        Words rather than characters because the first word of a business name is
+        almost always the part that identifies it; the rest is what kind of business it
+        is, which the owner of the phone already knows.
+        """
+        name = (self.name or PRODUCT_NAME).strip()
+        if len(name) <= 12:
+            return name
+
+        label = ''
+        for word in name.split():
+            candidate = f'{label} {word}'.strip()
+            if label and len(candidate) > 12:
+                break
+            label = candidate
+        return (label or name)[:12].strip()
+
 
 def of(config):
     """The brand for an instance. Safe on a config that has never been near Settings."""

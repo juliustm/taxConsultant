@@ -126,6 +126,52 @@ def test_the_icons_the_manifest_promises_exist(client):
         assert client.get(icon['src']).status_code == 200
 
 
+def test_the_installed_app_carries_the_business_name_and_not_the_products(app, client):
+    """
+    An installed PWA is an icon and a caption on somebody's home screen, next to their
+    bank and their WhatsApp. "Receipts" is the caption of an app that could belong to
+    anyone - and this one belongs to the business whose drivers and shop staff were
+    handed it, which is the only reason they trust it with a photograph of a receipt.
+
+    Three places have to agree, because a name that changes between them reads as a
+    different app: the manifest (Android), the apple-mobile-web-app-title meta (iOS),
+    and the document title.
+    """
+    from models.user import db, InstanceConfig
+
+    db.session.add(InstanceConfig(admin_email='admin@example.com', totp_secret='S',
+                                  business_name="Another J's Bar & Restaurant"))
+    db.session.commit()
+
+    manifest = client.get('/scan/manifest.json').get_json()
+    assert manifest['name'] == "Another J's Bar & Restaurant Receipts"
+    assert "Another J's Bar & Restaurant" in manifest['description']
+    # Cut at a word, because both platforms truncate the caption under an icon at about
+    # twelve characters and an ellipsis mid-word is what that looks like otherwise.
+    assert manifest['short_name'] == "Another J's"
+
+    page = client.get('/scan/').get_data(as_text=True)
+    assert '<title>Another J&#39;s Bar &amp; Restaurant Receipts</title>' in page
+    assert 'name="apple-mobile-web-app-title" content="Another J&#39;s"' in page
+
+    # And the identity of the installed app is unchanged by any of it: a rename must
+    # not turn one installed app into a second one on the same phone.
+    assert manifest['id'] == '/scan/'
+    assert manifest['scope'] == '/scan/'
+
+
+def test_an_instance_with_no_name_yet_still_has_an_installable_app(client):
+    """
+    Branding is configured after setup, and often not at all. The manifest is fetched
+    long before that and must never come back with an empty name - which is an app that
+    installs as a blank caption, or does not install.
+    """
+    manifest = client.get('/scan/manifest.json').get_json()
+
+    assert manifest['name'] == 'Karani Receipts'
+    assert manifest['short_name'] == 'Karani'
+
+
 def test_the_service_worker_is_served_uncacheable(client):
     """
     A worker pinned in an HTTP cache is an app that can never be fixed - the version
@@ -262,6 +308,17 @@ def test_the_viewfinder_shows_what_will_actually_be_captured():
     # The small box is bound to QR mode only.
     assert '''class="reticle" x-show="mode === 'qr'"''' in page
     assert '''class="photo-frame" x-show="mode === 'photo'"''' in page
+    # The shutter keeps the preview, whole. It briefly cropped to the brackets instead,
+    # which is the more confusing way to get this wrong: a receipt that was entirely
+    # visible on screen came back with its top line or its total cut off, and nothing on
+    # screen said which strip had gone.
+    assert 'capture()' in page and 'capture(this.$refs.photoFrame)' not in page
+    # So the brackets are pulled out to the edge of the glass rather than sitting a
+    # thumb's width inside it and standing for a boundary that is no longer there.
+    frame = re.search(r'\.photo-frame \{(.*?)\}', css, re.S)
+    assert frame, '.photo-frame has moved; this asserts where its edges are'
+    assert '3.5rem' not in frame.group(1) and '8.5rem' not in frame.group(1), \
+        'the brackets are inset from the screen again, which is not where the crop is'
     # And the shutter only exists where a manual capture makes sense.
     assert '''class="shutter" x-show="mode === 'photo'"''' in page
 
@@ -691,7 +748,7 @@ def test_decoding_happens_off_the_main_thread():
     assert "importScripts('/static/js/vendor/zxing-reader.js')" in worker
     assert 'readBarcodesFromImageData' in worker
 
-    decode = scanner.split('async function decodeWithZXing(canvas)')[1].split('\n    /*')[0]
+    decode = scanner.split('async function decodeWithZXing(canvas, options)')[1].split('\n    /*')[0]
     assert 'askWorker(' in decode
     # Transferred, not structured-cloned: a 1920x1080 frame is an eight-megabyte
     # buffer, and copying one per frame is its own performance problem.
@@ -1242,129 +1299,145 @@ def test_a_photo_the_phone_could_not_decode_is_uploaded_bigger_than_one_it_could
     default = int(re.search(r'maxEdge = maxEdge \|\| (\d+);', scanner).group(1))
     assert undecoded > default, 'an unread code is the one case that needs the pixels'
 
-    conditional = re.findall(r'toJpeg\(full, text \? null : UNDECODED_MAX_EDGE\)', scanner)
+    # Two different canvases by name: the shutter uploads the frame cropped to what the
+    # viewfinder was showing, the gallery import uploads the file as it was given. The
+    # rule is the same for both and is what this asserts.
+    conditional = re.findall(
+        r'toJpeg\((?:full|framed), text \? null : UNDECODED_MAX_EDGE\)', scanner)
     assert len(conditional) == 2, 'both the shutter and the gallery import must do this'
 
 
-CAPTURE_HARNESS = r"""
-// Runs Scanner.grabAtFullResolution against a fake camera, and reports what it asked
-// the track for, in order, and what it ended up drawing.
+TUNE_HARNESS = r"""
+// Runs Scanner.tuneCamera against a fake camera and reports what it asked the track
+// for, in order. What it must never ask for is a format it does not need: changing
+// format is what resets a multi-lens phone back to its widest lens.
 const fs = require('fs'), vm = require('vm');
-
-function fakeContext() {
-    return { drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }), putImageData() {} };
-}
 
 const sandbox = {
     console, setTimeout, clearTimeout, Promise,
     requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 0),
-    document: { createElement: () => ({ width: 0, height: 0, getContext: fakeContext }) },
+    document: { createElement: () => ({ width: 0, height: 0, getContext: () => ({}) }) },
     navigator: {},
 };
 sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
-// The whole point of the path under test: no ImageCapture, as on every iPhone.
-delete sandbox.ImageCapture;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
 
+const settings = JSON.parse(process.argv[3]);
+const caps = JSON.parse(process.argv[4]);
+
 const asked = [];
-// A camera streaming a 720x1280 preview from a sensor that can do 2160x3840 - the
-// arrangement that produced the unreadable uploads.
-const video = { videoWidth: 720, videoHeight: 1280 };
 const track = {
-    getCapabilities: () => ({ width: { max: 2160 }, height: { max: 3840 } }),
-    getSettings: () => ({ width: video.videoWidth, height: video.videoHeight }),
-    async applyConstraints(c) {
-        asked.push(JSON.parse(JSON.stringify(c)));
-        // A real camera does not deliver the new size the instant the promise settles -
-        // it is reconfiguring hardware. Frames keep arriving at the old resolution for
-        // a while, which is the whole reason grabAtFullResolution waits rather than
-        // drawing as soon as applyConstraints resolves.
-        const edge = (c.height && c.height.ideal) || (c.width && c.width.ideal);
-        let framesLate = 4;
-        const tick = () => {
-            if (--framesLate > 0) return setTimeout(tick, 0);
-            video.videoHeight = edge;
-            video.videoWidth = Math.round(edge * 720 / 1280);
-        };
-        setTimeout(tick, 0);
-    },
+    getCapabilities: () => caps,
+    getSettings: () => settings,
+    async applyConstraints(c) { asked.push(JSON.parse(JSON.stringify(c))); },
 };
 
-const canvas = { width: 0, height: 0, getContext: fakeContext };
-
 (async () => {
-    const drew = await sandbox.Scanner.grabAtFullResolution(track, video, canvas);
-    console.log(JSON.stringify({
-        drew,
-        asked,
-        captured: canvas.width + 'x' + canvas.height,
-    }));
+    await sandbox.Scanner.tuneCamera(track);
+    console.log(JSON.stringify({ asked }));
 })().catch((e) => console.log(JSON.stringify({ error: e.message, stack: e.stack })));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
-def test_the_still_is_taken_at_the_sensors_resolution_not_the_viewfinders(tmp_path):
-    """
-    The bug that made every server-side decode fail, run rather than grepped for.
-
-    `ImageCapture.takePhoto` is how a still is supposed to be taken at full sensor
-    resolution, and WebKit has never shipped it - so on every iPhone `capture()` fell
-    through to drawing the viewfinder instead. A viewfinder is a preview stream sized
-    for smooth playback, routinely 720x1280, and a receipt's QR code in one is about
-    sixty pixels across: under two pixels a module, which no decoder on either side of
-    the wire can read. That is the whole reason a server-side scan had never once
-    succeeded, and no amount of preprocessing in utils/qr.py could have changed it.
-
-    So the track is raised to its maximum for the shutter and put back afterwards, and
-    all three of those halves matter: raised, or the upload is unreadable; drawn after
-    the camera has actually switched, or the frame is the old size anyway; restored, or
-    the preview decode loop runs at full sensor resolution and cooks the phone.
-    """
-    harness = tmp_path / 'capture.js'
-    harness.write_text(CAPTURE_HARNESS)
-
+def _tune(tmp_path, settings, caps):
+    harness = tmp_path / 'tune.js'
+    harness.write_text(TUNE_HARNESS)
     result = subprocess.run(
-        ['node', str(harness), str(STATIC / 'js' / 'scanner.js')],
+        ['node', str(harness), str(STATIC / 'js' / 'scanner.js'),
+         json.dumps(settings), json.dumps(caps)],
         capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout.strip().splitlines()[-1])
-
     assert 'error' not in report, report
-    assert report['drew'] is True
-
-    # Raised to the sensor's own maximum, then put back to what the preview was on.
-    assert len(report['asked']) == 2, report['asked']
-    assert report['asked'][0] == {'height': {'ideal': 3840}}
-    assert report['asked'][1] == {'height': {'ideal': 1280}}
-
-    # And the frame was taken after the camera had switched, not before.
-    assert report['captured'] == '2160x3840'
+    return report['asked']
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
-def test_a_camera_that_will_not_change_mode_still_yields_a_photograph(tmp_path):
+def test_the_camera_is_configured_once_and_not_again(tmp_path):
     """
-    Every step of the raise is allowed to fail into the old behaviour.
+    Focus and resolution in one call, because applyConstraints is not a patch.
 
-    A camera that reports no capabilities, or refuses the constraint, must still produce
-    the viewfinder frame - which is exactly what this used to do unconditionally, and is
-    worth having over an error in front of someone holding a receipt.
+    Per spec it replaces a track's entire constraint set. The old code made two calls -
+    focus hints, then resolution - so the second silently discarded the first, and
+    continuous autofocus was requested on every camera open and taken away again a
+    moment later, every time. On a phone being held over a small printed code that is
+    most of the difference between a scanner that reads and one that hunts.
     """
-    harness = tmp_path / 'capture-refuses.js'
-    harness.write_text(CAPTURE_HARNESS.replace(
-        'getCapabilities: () => ({ width: { max: 2160 }, height: { max: 3840 } }),',
-        'getCapabilities: () => { throw new Error("not supported"); },'))
+    asked = _tune(
+        tmp_path,
+        {'width': 720, 'height': 1280},
+        {'width': {'max': 2160}, 'height': {'max': 3840}, 'focusMode': ['continuous', 'manual']},
+    )
+    assert len(asked) == 1, asked
+    # The long edge only, so the camera keeps its own aspect ratio rather than being
+    # asked for a mode it does not have - and the focus hint rides along rather than
+    # being wiped by it.
+    assert asked[0] == {'height': {'ideal': 1920}, 'advanced': [{'focusMode': 'continuous'}]}
 
-    result = subprocess.run(
-        ['node', str(harness), str(STATIC / 'js' / 'scanner.js')],
-        capture_output=True, text=True, timeout=30)
-    report = json.loads(result.stdout.strip().splitlines()[-1])
 
-    assert 'error' not in report, report
-    assert report['drew'] is True
-    assert report['asked'] == [], 'a camera that reports nothing must not be reconfigured'
-    assert report['captured'] == '720x1280'
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_stream_already_near_the_target_is_left_alone(tmp_path):
+    """
+    The reason the photograph stopped matching the viewfinder.
+
+    A phone's rear camera is one virtual device in front of three lenses, and
+    reconfiguring its format resets the zoom factor - which is another way of saying it
+    picks a different lens. So a stream that came back at 1600 when 1920 was asked for
+    must not be corrected: the extra pixels decide no receipt, and the price of asking
+    is a viewfinder that jumps to the ultra-wide.
+
+    Only the focus hint goes, and it carries the current size with it so that the call
+    itself cannot trigger the reconfiguration it exists to avoid.
+    """
+    asked = _tune(
+        tmp_path,
+        {'width': 1200, 'height': 1600},
+        {'width': {'max': 3024}, 'height': {'max': 4032}, 'focusMode': ['continuous']},
+    )
+    assert asked == [{'height': {'ideal': 1600}, 'advanced': [{'focusMode': 'continuous'}]}]
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_camera_that_reports_nothing_is_not_reconfigured(tmp_path):
+    """
+    Every step is allowed to fail into leaving the stream alone.
+
+    A camera with no capabilities to report, or no focus modes worth asking for and a
+    resolution already good enough, still streams at whatever it negotiated - which is
+    a working scanner, and is worth more than an error in front of someone holding a
+    receipt.
+    """
+    assert _tune(tmp_path, {'width': 1080, 'height': 1920},
+                 {'width': {'max': 1080}, 'height': {'max': 1920}}) == []
+
+
+def test_the_shutter_does_not_reconfigure_the_camera():
+    """
+    Why the capture stopped being wider than the preview.
+
+    capture() used to raise the track to the sensor's maximum for the duration of the
+    shutter and put it back afterwards. On a phone with three rear lenses that is not a
+    resolution change, it is a reconfiguration, and the camera comes back at its default
+    zoom - the ultra-wide. The preview showed a receipt filling the frame; the
+    photograph came out with the same receipt small in the middle of a table, and the
+    crop could not save it because by then the viewfinder was showing something else.
+
+    ImageCapture.takePhoto is gone for the same reason: it takes from the sensor rather
+    than from the preview stream, so where it exists at all it has its own field of view
+    and its own idea of the framing.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    capture = re.search(r'async capture\(\) \{(.*?)\n            \},', scanner, re.S)
+    assert capture, 'capture() has moved; this asserts what it does not do'
+    body = capture.group(1)
+
+    assert 'applyConstraints' not in body, 'the shutter must not change the camera mode'
+    assert 'ImageCapture' not in body, 'a sensor still has its own field of view'
+    assert 'drawFull(video' in body, 'the still is the frame the viewfinder was showing'
+    # And the frame after the tap, not the one already sitting in the element from
+    # before the finger landed and the phone dipped.
+    assert body.index('nextFrame(video)') < body.index('drawFull(video')
 
 
 def test_the_camera_is_asked_for_a_long_edge_rather_than_a_landscape_frame():
@@ -1376,6 +1449,11 @@ def test_the_camera_is_asked_for_a_long_edge_rather_than_a_landscape_frame():
     back the nearest mode it has - routinely 720p - from a camera holding twelve
     megapixels. And because `ideal` obliges nobody, the request has to be made a second
     time once the track's real capabilities can be read.
+
+    Asserted of the <head> script as well as of scanner.js, and that is the half that
+    was missing: the stream scanner.js uses is the one <head> opened, so its own
+    carefully-worded constraints never run on a normal launch. The landscape pair lived
+    on there, unread, doing the damage this test was written to prevent.
     """
     scanner = (STATIC / 'js' / 'scanner.js').read_text()
     constraints = re.search(r'var CAMERA_CONSTRAINTS = \{(.*?)\n    \};', scanner, re.S).group(1)
@@ -1383,8 +1461,18 @@ def test_the_camera_is_asked_for_a_long_edge_rather_than_a_landscape_frame():
     assert 'width:' not in constraints, 'a width pins the frame to landscape'
     assert 'aspectRatio' in constraints and 'height:' in constraints
 
-    # And asked again with the answer in hand, on every path that starts a camera.
-    assert len(re.findall(r'await raiseResolution\(track\)', scanner)) == 2
+    shell = (TEMPLATES / 'scan' / 'shell.html').read_text()
+    head = re.search(r'var constraints = \{(.*?)\n        \};', shell, re.S).group(1)
+    assert 'width:' not in head, 'the request that is actually made pins the frame to landscape'
+    assert head.count('aspectRatio') == 2 and head.count('height: { ideal: 1920 }') == 2, \
+        'both branches - a chosen camera and the default one - make the same request'
+
+    # And asked again with the answer in hand, on every path that starts a camera:
+    # start(), revive() after the platform took it back, and switchCamera() when somebody
+    # picks a different lens on the diagnostics screen. A path that opens a stream
+    # without this runs the whole session at whatever the browser first felt like
+    # giving, which is where the 720p uploads came from.
+    assert len(re.findall(r'await tuneCamera\(track\)', scanner)) == 3
 
 
 # --- A deploy reaching a phone that already has the app ----------------------
@@ -1576,6 +1664,21 @@ def test_the_worker_was_reversioned_for_the_scripts_that_changed_with_it():
         'CACHE_VERSION is still v7, so every already-installed phone keeps the build '
         'whose history screen stays empty for as long as one receipt cannot be sent.'
     )
+    assert "const CACHE_VERSION = 'v8'" not in source, (
+        'scanner.js, pwa.js, scan.css and the scan shell all changed together - a '
+        'choosable camera, a capture cropped to what the viewfinder showed, and the '
+        'photograph kept alongside a decoded code. CACHE_VERSION is still v8, so every '
+        'already-installed phone keeps the build that discards the picture and files '
+        'photos full of the margins nobody framed.'
+    )
+    assert "const CACHE_VERSION = 'v10'" not in source, (
+        'the scan shell, scanner.js, pwa.js and scan.css changed together again - the '
+        'capture is the whole preview, a photo the server refuses as too large is '
+        'shrunk and re-sent instead of being parked, and the sent list no longer '
+        'renders as nothing when two receipts share a date. CACHE_VERSION is still '
+        'v10, so every already-installed phone keeps the build with the empty history '
+        'screen.'
+    )
 
 
 # --- The history that stopped arriving ----------------------------------------
@@ -1748,3 +1851,528 @@ def test_a_receipt_that_cannot_be_sent_does_not_hide_the_ones_that_were(tmp_path
 
     # And the read half keeps running on every tick, not just the one that sent something.
     assert out['pulledAgain']
+
+
+GROUPING_DRIVER = """
+const page = historyPage();
+
+// The order the list actually arrives in: by id, which is the order the server
+// received them - while the heading comes from captured_at, which is when somebody
+// stood in front of the receipt. A gallery import carries the photograph's own date,
+// so a June receipt sent today has a today-sized id and a June heading, and the same
+// day turns up in more than one place in the list.
+page.submissions = [
+    { id: 60, captured_at: '2026-08-27T09:00:00', received_at: '2026-08-27T09:00:00' },
+    { id: 59, captured_at: '2026-06-28T11:04:00', received_at: '2026-08-27T08:59:00' },
+    { id: 58, captured_at: '2026-08-27T08:00:00', received_at: '2026-08-27T08:00:00' },
+    { id: 57, captured_at: '2026-06-28T09:15:00', received_at: '2026-08-27T07:00:00' },
+    { id: 56, captured_at: null,                  received_at: null },
+    { id: 55, captured_at: '2026-08-03T12:00:00', received_at: '2026-08-03T12:00:00' },
+];
+
+console.log(JSON.stringify({
+    keys: page.groupedSubmissions.map((g) => g.key),
+    labels: page.groupedSubmissions.map((g) => g.label),
+    items: page.groupedSubmissions.map((g) => g.items.map((s) => s.id)),
+}));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_two_receipts_from_the_same_day_never_produce_two_groups(tmp_path):
+    """
+    Thirteen receipts on the server, thirteen in the cache, none on the screen.
+
+    The sent list is an x-for keyed on the group's heading, and the groups used to be
+    runs of consecutive rows sharing one. That is safe only while the list's order and
+    the headings agree, and importing from the gallery is exactly what parts them: an
+    import carries the photograph's own date, so a receipt taken in June arrives with a
+    today-sized id, and the list runs "Today, 28 Jun, Today" - the same heading twice.
+
+    Alpine's keyed x-for reconciles a duplicate key by looking up one that is no longer
+    in its table, throws inside the effect, and never reaches the pass that inserts new
+    elements. Not one row rendered. The screen still had the receipts - the empty state
+    stayed hidden and "You've reached the beginning" was printed underneath the nothing,
+    both of which read `submissions.length` - and the hero above it kept counting them,
+    because the summary comes from its own endpoint. An app saying "13 receipts" over an
+    empty list is the most convincing way it can say a day's work is gone.
+
+    So the key is the calendar day, unique by construction, and a day is one group
+    wherever in the list its receipts turn up.
+    """
+    bundle = tmp_path / 'grouping.js'
+    bundle.write_text(
+        "global.PWA = { MAX_ATTEMPTS: 8 };\n"
+        "global.navigator = { onLine: true };\n"
+        + history_component_source() + GROUPING_DRIVER
+    )
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert len(out['keys']) == len(set(out['keys'])), \
+        f"two groups share a key, which renders the whole list as nothing: {out['keys']}"
+    assert len(out['labels']) == len(set(out['labels'])), \
+        'two headings read the same, which is the same bug one step later'
+
+    # One group per day, newest day first, and the undated row at the bottom rather
+    # than somewhere arbitrary in the middle of the year.
+    assert out['keys'] == ['2026-08-27', '2026-08-03', '2026-06-28', 'unknown']
+    assert out['items'] == [[60, 58], [55], [59, 57], [56]]
+
+
+SHRINK_HARNESS = """
+const fs = require('fs');
+
+/*
+ * A server behind a proxy with a one-megabyte body limit, which is the default that
+ * put "HTTP 413" under receipts in the field. Anything larger never reaches Flask.
+ */
+const LIMIT = 1024 * 1024;
+const posted = [];
+
+function fakeDB() {
+    const stores = { outbox: new Map(), submissions: new Map(), meta: new Map() };
+    const keyOf = (name, value) => name === 'outbox' ? value.client_uuid
+                                 : name === 'meta' ? value.key : value.id;
+    const db = {
+        version: 1,
+        objectStoreNames: { contains: (n) => n in stores },
+        async get(name, key) { return stores[name].get(key); },
+        async getAll(name) { return Array.from(stores[name].values()); },
+        async count(name) { return stores[name].size; },
+        async put(name, value) { stores[name].set(keyOf(name, value), value); },
+        async delete(name, key) { stores[name].delete(key); },
+        transaction(name) {
+            const store = {
+                async put(value) { stores[name].set(keyOf(name, value), value); },
+                async openCursor() { return null; },
+            };
+            return { store, objectStore: () => store, done: Promise.resolve() };
+        },
+        close() {},
+    };
+    db._stores = stores;
+    return db;
+}
+
+const db = fakeDB();
+global.idb = { openDB: async () => db };
+
+global.fetch = async (url, options = {}) => {
+    const respond = (status, body) => ({
+        ok: status >= 200 && status < 300, status,
+        async json() { return body; }, clone() { return this; },
+    });
+    if (String(url).indexOf('/scan/api/sync/photo') === 0) {
+        const photo = options.body.get('receiptphoto');
+        posted.push(photo.size);
+        if (photo.size > LIMIT) return respond(413, {});
+        return respond(200, { client_uuid: 'shrink-me', submission_id: 7, status: 'accepted' });
+    }
+    if (String(url).indexOf('/scan/api/submissions') === 0) {
+        return respond(200, { submissions: [], has_more: false });
+    }
+    return respond(200, {});
+};
+
+global.AbortController = class { constructor() { this.signal = null; } abort() {} };
+
+/*
+ * Enough of a canvas to run the real Scanner.shrinkToFit rather than a stand-in for it.
+ * The encoder is modelled, not performed: JPEG bytes go roughly with area times
+ * quality, and the constant is fitted so a 3000px frame at 0.82 lands where a real one
+ * does - about 1.8MB. What is under test is which rungs of the ladder get tried and
+ * which blob is sent, not libjpeg.
+ */
+const BYTES_PER_PIXEL_QUALITY = 0.244;
+global.window = {
+    navigator: { onLine: true },
+    document: {
+        addEventListener() {}, visibilityState: 'visible',
+        createElement: () => ({
+            width: 0, height: 0,
+            getContext: () => ({ drawImage() {} }),
+            toBlob(callback, type, quality) {
+                const bytes = Math.round(this.width * this.height * quality * BYTES_PER_PIXEL_QUALITY);
+                callback(new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' }));
+            },
+        }),
+    },
+    createImageBitmap: async () => ({ width: 3000, height: 4000, close() {} }),
+    addEventListener() {},
+    localStorage: {
+        getItem: () => JSON.stringify({ token: 'session-token', device: { name: 'Test Phone' } }),
+        setItem() {}, removeItem() {},
+    },
+    setTimeout: setTimeout,
+    crypto: { randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) },
+    fetch: global.fetch,
+    AbortController: global.AbortController,
+};
+eval(fs.readFileSync(process.argv[2], 'utf8'));   // scanner.js
+eval(fs.readFileSync(process.argv[3], 'utf8'));   // pwa.js
+const PWA = global.window.PWA;
+
+(async () => {
+    const out = {};
+    // A gallery import: a twelve-megapixel original, which is what a phone's camera
+    // roll actually holds and what the shutter path never produces.
+    const original = 1800 * 1024;
+    await db.put('outbox', {
+        client_uuid: 'shrink-me', kind: 'photo',
+        photo: new Blob([new Uint8Array(original)], { type: 'image/jpeg' }),
+        captured_at: '2026-06-28T11:04:00', attempts: 0, last_error: null,
+    });
+
+    const result = await PWA.sync();
+    out.sync = result;
+    out.posted = posted.slice();
+    out.limit = LIMIT;
+    out.stillQueued = (await PWA.outboxAll()).length;
+    const ceiling = db._stores.meta.get('uploadCeilingBytes');
+    out.ceiling = ceiling ? ceiling.value.bytes : null;
+
+    // A second photo, queued after the wall was found: it must not have to discover it
+    // again. Same size, same server - and this time it should fit on the first request.
+    posted.length = 0;
+    await db.put('outbox', {
+        client_uuid: 'second-photo', kind: 'photo',
+        photo: new Blob([new Uint8Array(original)], { type: 'image/jpeg' }),
+        captured_at: '2026-06-28T11:20:00', attempts: 0, last_error: null,
+    });
+    await PWA.sync({ force: true });
+    out.secondPosted = posted.slice();
+
+    console.log(JSON.stringify(out));
+})().catch((e) => console.log(JSON.stringify({ error: String(e && e.stack || e) })));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_a_photo_too_large_to_send_is_shrunk_rather_than_given_up_on(tmp_path):
+    """
+    The one failure in this app a field user could do nothing at all about.
+
+    A photograph larger than the body limit of the proxy in front of the app is refused
+    with a 413 before Flask is ever reached. The app marked the receipt permanently
+    failed and left it in the outbox reading "Not sending. This photo is too large for
+    the server to accept (HTTP 413)" - true, and useless: nobody standing in a shop
+    knows what an ingress body limit is, no phone offers to resize a photograph, and
+    the only person who could act on it was not holding the phone.
+
+    Importing from the gallery made it routine rather than rare. The shutter's own
+    output is a preview frame, already bounded; a picked file is a twelve-megapixel
+    original, and a camera roll full of them lost every single one.
+
+    So a refusal is now an instruction to re-encode. What this pins is that the second
+    request carries fewer bytes than the first, that the receipt actually goes, and that
+    the next photo up does not have to discover the same wall for itself.
+    """
+    harness = tmp_path / 'shrink.js'
+    harness.write_text(SHRINK_HARNESS)
+    result = subprocess.run(
+        ['node', str(harness), str(STATIC / 'js' / 'scanner.js'), str(STATIC / 'js' / 'pwa.js')],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert 'error' not in out, out['error']
+
+    # Refused once, then sent smaller - not marked failed and parked.
+    assert len(out['posted']) >= 2, 'a 413 ended the receipt instead of shrinking it'
+    assert out['posted'][0] > out['limit'], 'the first attempt was already inside the limit'
+    assert out['posted'][-1] <= out['limit']
+    assert out['posted'][-1] < out['posted'][0]
+
+    # And it went. The receipt is off the phone rather than sitting in the outbox
+    # under a number nobody can act on.
+    assert out['sync']['sent'] == 1
+    assert out['stillQueued'] == 0
+
+    # The wall is remembered, so the next photo is shrunk before it is sent rather than
+    # spending a failed multi-megabyte upload to find the same limit again.
+    assert out['ceiling'] and out['ceiling'] < out['posted'][0]
+    assert len(out['secondPosted']) == 1, 'the second photo rediscovered the body limit'
+    assert out['secondPosted'][0] <= out['limit']
+
+
+# --- Which camera, and what the shutter actually keeps ------------------------
+
+
+def test_the_saved_camera_is_read_by_the_head_script_under_the_same_key():
+    """
+    Two files, one localStorage key, and no import between them.
+
+    The preference is written by scanner.js and read by an inline <script> in the page
+    <head>, which runs before scanner.js has parsed - that is the whole reason it is in
+    localStorage rather than in the IndexedDB store with everything else, and it means
+    the key is a string duplicated across two files with nothing to keep them in step.
+    Drift here is silent in the worst way: choosing a camera appears to work, and every
+    launch afterwards opens the default one.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    shell = (TEMPLATES / 'scan' / 'shell.html').read_text()
+
+    key = re.search(r"var CAMERA_PREF_KEY = '([^']+)';", scanner)
+    assert key, 'CAMERA_PREF_KEY is no longer a literal; the head script reads it by hand.'
+    assert f"getItem('{key.group(1)}')" in shell, \
+        'the head script is reading a different localStorage key than scanner.js writes'
+
+
+def test_a_named_camera_is_asked_for_exactly_and_never_alongside_facingmode():
+    """
+    `ideal` is a suggestion, and facingMode competes with a deviceId.
+
+    Both mistakes have the same symptom - the choice appears to save and the same
+    camera keeps opening - and neither throws, so nothing but this notices.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    shell = (TEMPLATES / 'scan' / 'shell.html').read_text()
+
+    constraints = re.search(r'function constraintsFor\(deviceId\) \{(.*?)\n    \}', scanner, re.S)
+    assert constraints, 'constraintsFor is where a chosen camera is turned into constraints'
+    body = constraints.group(1)
+    assert 'video.deviceId = { exact: deviceId }' in body, 'an ideal deviceId may be ignored'
+    assert 'delete video.facingMode' in body, \
+        'facingMode left beside a deviceId is how a browser answers with the wrong camera'
+
+    # And the same on the head-script path, which opens the camera first.
+    assert 'deviceId: { exact: chosen }' in shell
+
+
+def test_a_camera_that_will_not_open_falls_back_instead_of_breaking_the_scanner():
+    """
+    A remembered camera is never allowed to be the reason this app cannot scan.
+
+    Ids go stale - a cleaned-up device, a USB camera unplugged, a browser that rotates
+    them - and an app that will not open its viewfinder because of a setting is worse
+    than one that opens the wrong lens.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    request = re.search(r'function requestCamera\(deviceId\) \{(.*?)\n    \}\n', scanner, re.S)
+    assert request, 'requestCamera is where a stale preference has to be survived'
+    body = request.group(1)
+
+    assert '.catch(' in body, 'an exact deviceId that fails has no fallback'
+    assert 'getUserMedia(CAMERA_CONSTRAINTS)' in body
+    # A refusal is not a stale id, and retrying it just asks the person twice.
+    assert "NotAllowedError" in body
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_photograph_matches_what_the_viewfinder_was_showing(tmp_path):
+    """
+    The crop, evaluated - this is pure arithmetic and worth actually running.
+
+    The viewfinder is `object-fit: cover`: the video is scaled until it fills the
+    screen and everything past the edges is cut off, in the preview only. `capture()`
+    drew the whole video, so the photograph contained a wide band down each side that
+    nobody had seen - a third of a 3:4 sensor on a tall phone screen. That band is not
+    just untidy: it is pixels inside the upload budget, so the receipt itself arrived
+    smaller than it needed to be, and its QR code with it.
+    """
+    bundle = tmp_path / 'crop.js'
+    bundle.write_text(
+        # Enough of a DOM for a canvas to be created and measured. drawImage is
+        # recorded rather than performed; the numbers it is called with are the test.
+        "const drawn = [];\n"
+        "global.window = {\n"
+        "  innerWidth: 390, innerHeight: 844,\n"
+        "  document: { createElement: () => ({\n"
+        "    width: 0, height: 0,\n"
+        "    getContext: () => ({ drawImage: (...a) => drawn.push(a.slice(1)) }),\n"
+        "  }) },\n"
+        "  navigator: {},\n"
+        "};\n"
+        + (STATIC / 'js' / 'scanner.js').read_text() + "\n"
+        "const crop = window.Scanner.cropToViewfinder;\n"
+        "const canvas = (w, h) => ({ width: w, height: h,\n"
+        "  getContext: () => ({ drawImage: () => {} }) });\n"
+        "const out = {};\n"
+        "// A 3:4 sensor behind a 390x844 screen: the sides are what the person could\n"
+        "// not see, so the sides are what goes.\n"
+        "const tall = crop(canvas(3000, 4000), { clientWidth: 390, clientHeight: 844 });\n"
+        "out.tall = [tall.width, tall.height];\n"
+        "out.tallDraw = drawn[drawn.length - 1];\n"
+        "// Already the shape of the screen: nothing to give up, and no re-encode.\n"
+        "const exact = canvas(390, 844);\n"
+        "out.untouched = crop(exact, { clientWidth: 390, clientHeight: 844 }) === exact;\n"
+        "// A landscape still behind a portrait screen crops hard, and stays centred.\n"
+        "const wide = crop(canvas(4000, 3000), { clientWidth: 390, clientHeight: 844 });\n"
+        "out.wide = [wide.width, wide.height];\n"
+        "out.wideDraw = drawn[drawn.length - 1];\n"
+        "// No element to measure: fall back to the window rather than to nothing.\n"
+        "out.fallback = (() => { const c = crop(canvas(3000, 4000), null); return [c.width, c.height]; })();\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # 390/844 is taller than 3000/4000, so the height is kept and the width is trimmed
+    # to 4000 * (390/844) = 1848.
+    assert out['tall'] == [1848, 4000]
+    # Centred: (3000 - 1848) / 2 = 576 off each side, full height taken.
+    assert out['tallDraw'][:4] == [576, 0, 1848, 4000]
+
+    assert out['untouched'], 'a frame already at the screen ratio was re-encoded for nothing'
+
+    # 4000x3000 behind a portrait screen: the width is kept and the height collapses to
+    # 4000 / (390/844) = 8656 - more than there is - so the width gives instead.
+    assert out['wide'] == [1386, 3000]
+    assert out['wideDraw'][:4] == [1307, 0, 1386, 3000]
+
+    assert out['fallback'] == [1848, 4000], 'the window is the fallback measurement'
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_photograph_is_the_whole_preview_and_nothing_narrower(tmp_path):
+    """
+    The other half of "the capture does not match what I framed".
+
+    Photo mode draws corner brackets, and for one version those brackets were the crop:
+    they sat inset from the screen edges - a strip above them, a much taller strip below
+    where the mode switch and the shutter sit - and the photograph was cut down to what
+    was between them. A receipt that filled the preview came back with its top line or
+    its total gone, and nothing on screen said which.
+
+    A viewfinder that keeps less than it shows is not a viewfinder. The crop is the
+    preview: everything `object-fit: cover` puts on the glass, and everything it hangs
+    over the edges is what goes. Measured on a real geometry - a 390x844 screen over a
+    1080x1920 stream - because this is arithmetic and worth running rather than reading.
+    """
+    bundle = tmp_path / 'framecrop.js'
+    bundle.write_text(
+        "const drawn = [];\n"
+        "global.window = {\n"
+        "  innerWidth: 390, innerHeight: 844,\n"
+        "  document: { createElement: () => ({\n"
+        "    width: 0, height: 0,\n"
+        "    getContext: () => ({ drawImage: (...a) => drawn.push(a.slice(1)) }),\n"
+        "  }) },\n"
+        "  navigator: {},\n"
+        "};\n"
+        + (STATIC / 'js' / 'scanner.js').read_text() + "\n"
+        "const crop = window.Scanner.cropToViewfinder;\n"
+        "const canvas = (w, h) => ({ width: w, height: h,\n"
+        "  getContext: () => ({ drawImage: () => {} }) });\n"
+        "const el = (left, top, width, height) => ({\n"
+        "  getBoundingClientRect: () => ({ left, top, width, height }) });\n"
+        "const out = {};\n"
+        "const video = el(0, 0, 390, 844);\n"
+        "const shot = crop(canvas(1080, 1920), video);\n"
+        "out.whole = [shot.width, shot.height];\n"
+        "out.wholeDraw = drawn[drawn.length - 1];\n"
+        "// The brackets are no longer an argument. Handing one over anyway - a stale\n"
+        "// caller, a merge - must not quietly shrink the photograph again.\n"
+        "const withFrame = crop(canvas(1080, 1920), video, el(16, 56, 358, 652));\n"
+        "out.withFrame = [withFrame.width, withFrame.height];\n"
+        "// A stream already the shape of the screen gives up nothing, and is not\n"
+        "// re-encoded for a rounding difference.\n"
+        "const exact = canvas(390, 844);\n"
+        "out.untouched = crop(exact, video) === exact;\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # `cover` scales 1080x1920 by max(390/1080, 844/1920) = 0.4396 and centres it, so
+    # the stream is drawn 475x844 and 42.5px of it hangs off each side. The full height
+    # is kept and the sides go: 1920 * (390/844) = 887, centred, (1080 - 887) / 2 in.
+    assert out['whole'] == [887, 1920]
+    assert out['wholeDraw'][:4] == [96, 0, 887, 1920]
+
+    assert out['withFrame'] == out['whole'], \
+        'something is still narrowing the capture to an element inside the screen'
+    assert out['untouched'], 'a frame already at the screen ratio was re-encoded for nothing'
+
+
+def test_a_camera_switch_that_did_not_happen_is_not_saved_as_one():
+    """
+    "I picked a different camera and nothing changed."
+
+    requestCamera answers an exact deviceId it cannot open by reopening with no
+    preference at all - deliberately, so a stale id costs one extra call rather than a
+    scanner that will not start. But switchCamera then saved the preference anyway and
+    the screen said "Saved. This camera opens from now on." So the tick moved, the
+    viewfinder did not, and every launch afterwards paid for a getUserMedia that fell
+    back to the same camera as before.
+
+    What is streaming is the only honest answer, and a browser that will not report a
+    deviceId counts as honoured - "cannot tell" is not "wrong", and refusing to save on
+    it would make the preference unusable on the phones that need it most.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    switch = re.search(r'async switchCamera\(deviceId\) \{(.*?)\n            \},', scanner, re.S)
+    assert switch, 'switchCamera has moved; this asserts what it saves and when'
+    body = switch.group(1)
+
+    assert 'rememberCamera(honoured ? deviceId : null)' in body, \
+        'a preference is only worth saving for a camera that actually opened'
+    assert body.count('rememberCamera(') == 1, 'one place decides, or the two disagree'
+    assert 'honoured = !deviceId || !got || got === deviceId' in body
+
+    diagnostics = (TEMPLATES / 'scan' / '_diagnostics.html').read_text()
+    assert 'result.honoured === false' in diagnostics, \
+        'the screen has to be able to say the switch did not take'
+
+
+def test_the_shutter_crops_before_it_decodes():
+    """
+    Order matters, and this is the one that is easy to get backwards.
+
+    Decoding the wider frame first would occasionally read a QR code from outside the
+    viewfinder - a poster behind the counter, the next receipt in the pile - and queue
+    it against a photograph that visibly does not contain it. That is a worse answer
+    than not reading it at all, because it looks right.
+    """
+    scanner = (STATIC / 'js' / 'scanner.js').read_text()
+    capture = re.search(r'async capture\(\) \{(.*?)\n            \},', scanner, re.S)
+    assert capture, 'capture() has moved; this asserts what it does in what order'
+    body = capture.group(1)
+
+    assert body.index('cropToViewfinder') < body.index('decodeStill'), \
+        'the frame is decoded before it is cropped, so a code outside the view can win'
+    assert 'decodeStill(framed)' in body and 'toJpeg(framed' in body, \
+        'the decode and the upload must be of the same pixels'
+
+
+def test_a_decoded_code_no_longer_costs_the_photograph_it_was_read_from():
+    """
+    The half of a scan that used to be thrown away.
+
+    Both capture paths held a photograph and a decoded URL at the same moment, and
+    dropped the photograph on the reasoning that a verified receipt beats a picture of
+    one. They are not alternatives: the receipt TRA confirmed then had no image behind
+    it at all, and the server's own QR decoder only ever saw photographs this phone had
+    already failed to read - a selection effect that makes its hit rate look like a
+    fault.
+    """
+    scanner_view = (TEMPLATES / 'scan' / '_scanner.html').read_text()
+
+    # The shutter keeps the blob on both branches, not just the undecoded one.
+    take = re.search(r'async takePhoto\(\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert take, 'takePhoto has moved'
+    assert "kind: 'qr'" in take.group(1) and 'blob: shot.blob' in take.group(1), \
+        'a decoded capture is still discarding its photograph'
+
+    # And the gallery import builds one shape for both outcomes rather than two.
+    imported = re.search(r'async importFromGallery\(event\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert imported, 'importFromGallery has moved'
+    assert 'blob: shot.blob' in imported.group(1)
+
+    # Which is only worth anything if the outbox sends both up.
+    queue_one = re.search(r'queueOne\(item, note\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert queue_one, 'queueOne has moved'
+    body = queue_one.group(1)
+    assert 'if (item.receipt) fields.receipturl' in body
+    assert 'if (item.blob) fields.photo' in body
+
+    pwa = (STATIC / 'js' / 'pwa.js').read_text()
+    assert "form.append('receipturl', entry.receipturl)" in pwa, \
+        'the photo upload is not carrying the code the phone read'

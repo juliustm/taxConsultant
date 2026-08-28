@@ -48,6 +48,26 @@
     // stays in the outbox and stays visible; it just stops consuming the sync loop.
     var MAX_ATTEMPTS = 8;
 
+    // How many times one photo may be re-encoded smaller and sent again inside a single
+    // sync, when the server refuses it as too large. Two is enough to cross any real
+    // body limit from any real phone photograph - each round is a substantial step down
+    // the ladder in Scanner.shrinkToFit - and it bounds what a stuck receipt can cost
+    // the queue behind it.
+    var PHOTO_SHRINK_ROUNDS = 2;
+
+    // What the server has been found to refuse, and when. See shrinkAfterRefusal.
+    var UPLOAD_CEILING_KEY = 'uploadCeilingBytes';
+    // A week. The ceiling is a guess about somebody else's proxy configuration, and the
+    // real fix for a 413 is raising that limit - so the guess has to be able to expire,
+    // or every phone in the field would go on shrinking for a wall that is no longer
+    // there.
+    var UPLOAD_CEILING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    // The smallest a receipt photograph is worth sending. Under about a quarter of a
+    // megabyte the printed verification code stops being legible to the vision model,
+    // and an unreadable upload is not a rescue - see the ladder's floor in
+    // Scanner.shrinkToFit.
+    var UPLOAD_FLOOR_BYTES = 240 * 1024;
+
     // How long to wait for indexedDB.open() before treating storage as unavailable.
     // Generous for a local database, but it is a deadline rather than an expectation:
     // the case it exists for is an open that never answers at all.
@@ -412,6 +432,10 @@
     async function queueScan(fields) {
         var entry = {
             client_uuid: newUuid(),
+            // Which door it goes through, not what it is. An entry carrying a photograph
+            // goes up as multipart whether or not it also carries a decoded URL - the
+            // JSON batch has no way to send bytes - and the server works out from the
+            // pair that the URL is the input and the picture is evidence.
             kind: fields.photo ? 'photo' : 'url',
             receipturl: fields.receipturl || null,
             photo: fields.photo || null,
@@ -492,8 +516,12 @@
                 is_duplicate: result.status === 'duplicate',
                 received_at: new Date().toISOString(),
                 captured_at: entry.captured_at || null,
-                input_type: entry.kind === 'photo' ? 'photo' : 'url',
-                input_data: entry.kind === 'photo' ? null : entry.receipturl,
+                // Mirrors what ingest_submission decides on the server: a URL alongside
+                // a photograph is still a URL submission. Getting this wrong would show
+                // the row as a photo for the few seconds before the server's own version
+                // of it arrives and replaces this one.
+                input_type: entry.receipturl ? 'url' : 'photo',
+                input_data: entry.receipturl || null,
                 description: entry.description || null,
                 location: entry.location || null,
                 receipt: null,
@@ -540,9 +568,11 @@
      *
      * 5xx is the server having a bad minute and 429 is it asking for a slower one; both
      * are worth coming back to. A 4xx is a verdict on what was sent, and sending it
-     * again unchanged asks the same question. 413 is the one that actually bites here -
-     * a photo larger than the ingress body limit is refused before Flask ever sees it,
-     * and no amount of patience shrinks it.
+     * again unchanged asks the same question.
+     *
+     * 413 is the exception that proves it, and syncPhoto answers it before this is ever
+     * consulted: patience does not shrink a photo, but re-encoding it does. Only a photo
+     * that cannot be made any smaller and is still refused arrives here as terminal.
      *
      * 401 is not in here deliberately: it is handled before this is reached, and it is
      * a verdict on the session rather than on the receipt. The queue survives it.
@@ -567,7 +597,10 @@
             400: 'The server could not read this receipt',
             403: 'This device is not allowed to send',
             404: 'The server has no address for this',
-            413: 'This photo is too large for the server to accept',
+            // Only ever reached after the ladder in Scanner.shrinkToFit has been walked
+            // to the bottom, so it says what was tried. The number stays on the end for
+            // whoever runs the server: they are the one who can raise the body limit.
+            413: 'This photo is still too large for the server, even shrunk',
         };
         var reason = reasons[status];
         if (!reason) return status >= 500 ? 'The server had a problem (HTTP ' + status + ')'
@@ -727,44 +760,175 @@
         return { sent: sent, failed: failed, stop: false };
     }
 
+    /*
+     * One photo, at whatever size this server turns out to accept.
+     *
+     * The loop is the whole point. A photograph larger than the body limit of the proxy
+     * in front of the app is refused with a 413 before Flask sees it, and this used to
+     * be the end of that receipt: the entry was marked permanently failed and sat in the
+     * outbox reading "Not sending. This photo is too large for the server to accept
+     * (HTTP 413)" - a sentence that is both true and useless to the person holding the
+     * phone, who cannot resize a photograph and should never have been asked to. The
+     * gallery made it routine: an import is a twelve-megapixel original, not a preview
+     * frame, and a phone full of them lost every one.
+     *
+     * A refusal is now an instruction. The photo is re-encoded smaller (see
+     * Scanner.shrinkToFit) and sent again, at most PHOTO_SHRINK_ROUNDS times, and what
+     * the server refused is remembered so the next photo goes up already fitting rather
+     * than discovering the same wall. A shrink does not spend an attempt: nothing was
+     * wrong with the receipt, only with its file size, and burning the retry budget on
+     * that is how a receipt that would have fitted on the second try gets parked.
+     *
+     * Only a photo that has been through the whole ladder and is still refused is
+     * terminal - and by then the message can honestly say so.
+     */
     async function syncPhoto(entry) {
         if (!entry.photo) {
             await discard(entry.client_uuid);
             return { sent: 0, failed: 0 };
         }
 
+        // What this phone already knows the server will take, applied before the first
+        // request rather than after the first refusal.
+        entry = await fitKnownCeiling(entry);
+
+        for (var round = 0; round <= PHOTO_SHRINK_ROUNDS; round++) {
+            var response;
+            try {
+                response = await postPhoto(entry);
+            } catch (e) {
+                await noteAttempt(entry, e.message);
+                return { sent: 0, failed: 1, stop: true };
+            }
+
+            if (response.status === 401) {
+                await handleAuthFailure(response);
+                return { sent: 0, failed: 1, stop: true };
+            }
+
+            if (response.status === 413) {
+                // Not on the last round: a re-encode nobody is going to send is a
+                // decode, a resize and a write to storage spent on a photograph that is
+                // about to be parked either way.
+                var smaller = round < PHOTO_SHRINK_ROUNDS ? await shrinkAfterRefusal(entry) : null;
+                if (smaller) {
+                    entry = smaller;
+                    continue;
+                }
+                break;
+            }
+
+            if (!response.ok) {
+                await noteAttempt(entry, httpReason(response.status),
+                                  { terminal: terminalStatus(response.status) });
+                return { sent: 0, failed: 1, stop: response.status >= 500 };
+            }
+
+            // Same order as the URL batch, for the same reason: the photo lands in
+            // history before it leaves the outbox, so it is never in neither place.
+            await cacheAccepted(entry, await response.json().catch(function () { return null; }));
+            await discard(entry.client_uuid);
+            emit();
+            return { sent: 1, failed: 0, stop: false };
+        }
+
+        // Out of room: either the picture cannot be made smaller on this phone, or it
+        // was made as small as it can usefully be and is still refused. That is a server
+        // to fix, not a receipt to keep re-sending.
+        await noteAttempt(entry, httpReason(413), { terminal: true });
+        return { sent: 0, failed: 1, stop: false };
+    }
+
+    function postPhoto(entry) {
         var form = new FormData();
         form.append('receiptphoto', entry.photo, (entry.client_uuid || 'receipt') + '.jpg');
         form.append('client_uuid', entry.client_uuid);
         form.append('captured_at', entry.captured_at || '');
         if (entry.description) form.append('description', entry.description);
         if (entry.location) form.append('location', entry.location);
+        // A scan whose QR code the phone read, sent with the photograph it was read
+        // from. The server files one submission carrying both: verified from the code,
+        // with the paper kept beside it. Multipart rather than the JSON batch because a
+        // photograph cannot go in the batch, and splitting the pair across two requests
+        // is how they end up as two submissions when the second one fails.
+        if (entry.receipturl) form.append('receipturl', entry.receipturl);
 
-        var response;
+        return apiFetch('/scan/api/sync/photo', { method: 'POST', body: form },
+                        { timeout: SYNC_TIMEOUT_MS });
+    }
+
+    /*
+     * Shrinks a photo the server has just refused, and remembers the refusal.
+     *
+     * Returns the entry to send next, or null when there is nothing left to try - a
+     * phone that cannot re-encode at all (no canvas, an image it cannot decode), or a
+     * photograph already at the floor, where making it smaller would cost the printed
+     * verification code the vision model reads.
+     *
+     * The remembered ceiling only ever ratchets downwards, and it expires, because it is
+     * a guess about somebody else's configuration: the true limit is somewhere below
+     * what was just refused, and if it is raised - which is the actual fix, and the one
+     * this message asks for - no phone should go on shrinking for a limit that is gone.
+     */
+    async function shrinkAfterRefusal(entry) {
+        var size = (entry.photo && entry.photo.size) || 0;
+        if (size <= UPLOAD_FLOOR_BYTES) return null;
+
+        var ceiling = Math.max(UPLOAD_FLOOR_BYTES, Math.floor(size * 0.6));
+        var smaller = await shrinkPhoto(entry.photo, ceiling);
+        if (!smaller || smaller.size >= size) return null;
+
         try {
-            response = await apiFetch('/scan/api/sync/photo', { method: 'POST', body: form },
-                                      { timeout: SYNC_TIMEOUT_MS });
+            var known = await metaGet(UPLOAD_CEILING_KEY, null);
+            if (!known || !known.bytes || known.bytes > ceiling) {
+                await metaSet(UPLOAD_CEILING_KEY, { bytes: ceiling, at: Date.now() });
+            }
+        } catch (e) { /* storage is down; the shrink still stands for this attempt */ }
+
+        return await replacePhoto(entry, smaller);
+    }
+
+    /* The ceiling this phone has learned, applied to a photo that is over it. */
+    async function fitKnownCeiling(entry) {
+        var known;
+        try {
+            known = await metaGet(UPLOAD_CEILING_KEY, null);
         } catch (e) {
-            await noteAttempt(entry, e.message);
-            return { sent: 0, failed: 1, stop: true };
+            return entry;
         }
+        if (!known || !known.bytes) return entry;
+        if (known.at && Date.now() - known.at > UPLOAD_CEILING_TTL_MS) return entry;
+        if (entry.photo.size <= known.bytes) return entry;
 
-        if (response.status === 401) {
-            await handleAuthFailure(response);
-            return { sent: 0, failed: 1, stop: true };
-        }
-        if (!response.ok) {
-            await noteAttempt(entry, httpReason(response.status),
-                              { terminal: terminalStatus(response.status) });
-            return { sent: 0, failed: 1, stop: response.status >= 500 };
-        }
+        var smaller = await shrinkPhoto(entry.photo, known.bytes);
+        if (!smaller || smaller.size >= entry.photo.size) return entry;
+        return await replacePhoto(entry, smaller);
+    }
 
-        // Same order as the URL batch, for the same reason: the photo lands in history
-        // before it leaves the outbox, so it is never in neither place.
-        await cacheAccepted(entry, await response.json().catch(function () { return null; }));
-        await discard(entry.client_uuid);
-        emit();
-        return { sent: 1, failed: 0, stop: false };
+    function shrinkPhoto(blob, maxBytes) {
+        var scanner = global.Scanner;
+        if (!scanner || typeof scanner.shrinkToFit !== 'function') return Promise.resolve(null);
+        return scanner.shrinkToFit(blob, maxBytes).catch(function () { return null; });
+    }
+
+    /*
+     * Swaps in the smaller photograph, in the outbox as well as in hand.
+     *
+     * Written back so the work survives: a phone that shrinks a twelve-megapixel import
+     * and then loses its connection should not decode and re-encode it again on the next
+     * tick, and a relaunch should not start the whole discovery over.
+     */
+    async function replacePhoto(entry, blob) {
+        entry.photo = blob;
+        try {
+            var db = await getDB();
+            var current = await db.get('outbox', entry.client_uuid);
+            if (current) {
+                current.photo = blob;
+                await db.put('outbox', current);
+            }
+        } catch (e) { /* the smaller copy is still what this attempt sends */ }
+        return entry;
     }
 
     // ---------------------------------------------------------------- history
@@ -1118,12 +1282,14 @@
         // from empty.
         var pending = null;
         var signOutReason = null;
+        var uploadCeiling = null;
         var storageOk = true;
         var storageError = null;
 
         try {
             pending = await outboxCount();
             signOutReason = await metaGet('signOutReason', null);
+            uploadCeiling = await metaGet(UPLOAD_CEILING_KEY, null);
         } catch (e) {
             storageOk = false;
             storageError = (e && e.message) || 'storage-unavailable';
@@ -1149,6 +1315,11 @@
             // A copy: the sync pill's expanded view must not be able to mutate the
             // internal feed by holding a reference to it.
             recentEvents: recentEvents.slice(),
+            // Set only once this phone has had a photo refused for its size. Nobody in
+            // the field needs to see it - the app deals with it silently now - but the
+            // diagnostics screen is read down a phone line to whoever runs the server,
+            // and they are the one person who can raise the limit.
+            uploadCeiling: uploadCeiling,
         };
     }
 

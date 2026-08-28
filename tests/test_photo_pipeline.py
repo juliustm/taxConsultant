@@ -59,6 +59,16 @@ def configured(app):
 
 
 @pytest.fixture
+def client(app):
+    """A browser for the admin pages, signed in.
+
+    The buttons these exercise are on the submission page, and that page is behind
+    login_required - so an anonymous client would test the redirect and nothing else.
+    """
+    return app.test_client()
+
+
+@pytest.fixture
 def photo(app, device):
     """
     Queues a photo submission with a real image file behind it.
@@ -893,6 +903,88 @@ def test_a_sensor_sized_photograph_is_stored_at_a_size_something_can_use(app, de
     assert os.path.getsize(path) < len(original)
 
 
+def test_the_vision_model_is_not_sent_the_qr_decoders_copy(app, device):
+    """
+    Two readers, two sizes, and only one of them was being served.
+
+    A stored photograph is bounded to STORED_MAX_EDGE, and that number belongs to the QR
+    decoder: 3000px is where a small code still has enough pixels a module to come back.
+    The vision model is reading printed words, needs far less, and was handed the
+    decoder's copy anyway - base64-encoded into a data URL, so a third larger again on
+    the wire, and charged for as image tokens, on every photographed receipt.
+
+    Bounded for the model instead. The picture it gets is still a legible receipt - the
+    verification code printed in plain type is the recovery route when no QR code
+    decodes, so this is not a size to be casual about - and it is half the payload.
+    """
+    import base64
+    import io
+
+    from utils import images
+
+    path = _upload(app, device, _jpeg_bytes((4032, 3024)))
+
+    encoded = images.encoded_for_model(path)
+    with Image.open(io.BytesIO(base64.b64decode(encoded))) as sent:
+        assert max(sent.size) == images.MODEL_MAX_EDGE
+        assert sent.format == 'JPEG'
+        # The data URL says image/jpeg unconditionally (llm_processor), so it had
+        # better be one.
+        assert abs(sent.width / sent.height - 4032 / 3024) < 0.01
+
+    import os
+    assert len(base64.b64decode(encoded)) < os.path.getsize(path), \
+        'the model is being sent the file on disk, whatever the cap says'
+
+
+def test_a_photograph_the_model_cannot_be_bounded_is_still_sent(app, device):
+    """
+    A vision call on a larger image than necessary costs money. A vision call that does
+    not happen costs a receipt - so anything Pillow cannot open goes to the model
+    exactly as it sits on disk rather than raising on the way.
+    """
+    import base64
+    import os
+
+    from utils import images
+
+    path = os.path.join(app.config['UPLOAD_FOLDER'], 'not-an-image.jpg')
+    with open(path, 'wb') as handle:
+        handle.write(b'this is not a JPEG')
+
+    assert base64.b64decode(images.encoded_for_model(path)) == b'this is not a JPEG'
+
+
+def test_a_receipt_photograph_is_only_downloaded_once(app, device):
+    """
+    A stored filename carries the timestamp it was written at and the file underneath it
+    is never rewritten, so the only thing that can change at one of these addresses is
+    the file being deleted. Without a cache header the dashboard re-downloads every
+    photograph on every visit - a dozen of them on screen at a time, each up to
+    STORED_MAX_EDGE - which on a metered line is the largest thing this app does for no
+    reason at all.
+
+    `private`, because these are one business's receipts behind a login: no shared cache
+    in front of the app may keep a copy for somebody else's session.
+    """
+    import os
+
+    path = _upload(app, device, _jpeg_bytes((1200, 900)))
+
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session['admin_logged_in'] = True
+
+    response = client.get('/uploads/' + os.path.basename(path))
+    assert response.status_code == 200
+
+    cache_control = response.headers['Cache-Control']
+    assert 'private' in cache_control
+    assert 'immutable' in cache_control
+    assert 'max-age=31536000' in cache_control
+    assert 'public' not in cache_control
+
+
 def test_a_photo_the_scanner_already_bounded_is_stored_byte_for_byte(app, device):
     """
     The common path must not be re-encoded.
@@ -1028,3 +1120,270 @@ def test_a_re_encoded_upload_is_stored_under_a_name_that_matches_its_bytes(app, 
     assert os.path.exists(path)
     with Image.open(path) as stored:
         assert stored.format == 'JPEG'
+
+
+# --- Opting out of the rebuilt address --------------------------------------
+#
+# Layer 2 turns a transcribed verification code back into a portal address, which is
+# the most valuable thing the photo pipeline does when the document really is an EFD
+# receipt and actively harmful when it is not. A mobile-money SMS, a delivery note or a
+# handwritten chit all contain a plausible run of digits, so an address gets built that
+# the portal will never confirm - and the submission then spends its entire retry
+# schedule finding that out, with the one usable reading of the document unused on the
+# row the whole time.
+#
+# These cover the three ways out: the transcription being kept rather than discarded,
+# the instance switch, and the per-submission one.
+
+
+def _not_uploaded(portal, vision, monkeypatch):
+    """A photo whose rebuilt address the portal will not confirm - the stuck case."""
+    qr_finds(monkeypatch, None)
+    portal(error=TraReceiptNotUploaded('not uploaded'))
+    return vision(receipt_verification_code='58E41A514', receipt_time='09:20:22')
+
+
+def test_what_the_model_read_is_kept_even_while_the_portal_is_still_being_retried(
+        app, configured, photo, portal, vision, judgment, monkeypatch):
+    """
+    The transcription outlives the retry it lost to.
+
+    This is the failure the whole opt-out exists for. The model reads the photograph,
+    layer 2 rebuilds an address out of what it read, the portal declines, a retry is
+    booked - and the reading was thrown away at that point. For up to two days the
+    submission showed an admin a code and a countdown and nothing about what the
+    document actually says, on a receipt that had already been read and paid for.
+    """
+    import main
+    import json
+
+    _not_uploaded(portal, vision, monkeypatch)
+
+    submission = photo()
+    main.process_submission(submission)
+
+    # Still queued behind a retry, exactly as before - that half is unchanged.
+    assert submission.status == 'queued'
+    assert Receipt.query.count() == 0
+
+    draft = json.loads(submission.llm_draft)
+    assert draft['vendor_name'] == 'PLASCO LIMITED'
+    assert draft['total_amount'] == 118000
+
+
+def test_an_instance_can_switch_off_rebuilding_an_address_from_transcribed_text(
+        app, configured, photo, portal, vision, judgment, monkeypatch):
+    """
+    With the setting off, the portal is never asked about a code nobody could scan.
+
+    The receipt is stored as what it is - a reading of a photograph - instead of
+    occupying a retry schedule to establish that TRA has never heard of it.
+    """
+    import main
+
+    qr_finds(monkeypatch, None)
+    fetched = portal()
+    vision(receipt_verification_code='58E41A514', receipt_time='09:20:22')
+
+    configured.rebuild_url_from_text = False
+    db.session.commit()
+
+    submission = photo()
+    main.process_submission(submission)
+
+    assert fetched == [], 'the portal was asked despite the rebuild being switched off'
+    receipt = Receipt.query.one()
+    assert receipt.extraction_source == 'llm_vision'
+    assert receipt.vendor_name == 'PLASCO LIMITED'
+    assert submission.status == 'completed'
+    assert submission.recovered_url is None
+
+
+def test_the_default_is_still_to_rebuild_the_address(
+        app, configured, photo, portal, vision, judgment, monkeypatch):
+    """
+    A column added to a running instance defaults to NULL, and NULL has to mean on.
+
+    Every instance in existence has been rebuilding addresses all along, and a
+    migration cannot know which of them wanted to stop.
+    """
+    import main
+
+    # NULL is what an ALTER TABLE leaves on every row that already existed, so that is
+    # the value the accessor has to read as 'on'. A freshly created config gets True
+    # from the column default; both have to answer the same way.
+    configured.rebuild_url_from_text = None
+    db.session.commit()
+    assert configured.rebuilds_urls_from_text() is True
+
+    qr_finds(monkeypatch, None)
+    fetched = portal()
+    vision(receipt_verification_code='58E41A514', receipt_time='09:20:22')
+
+    main.process_submission(photo())
+    assert fetched == [RECEIPT_URL]
+
+
+def test_declining_the_rebuild_for_one_submission_outranks_the_instance_setting(
+        app, configured, photo, portal, vision, judgment, monkeypatch):
+    """
+    An admin who has read the picture knows something the pipeline does not.
+
+    Their verdict has to survive every later attempt, including the retry that is
+    already booked and the 'Send to TRA again' button - otherwise declining is a
+    decision that quietly un-makes itself.
+    """
+    import main
+
+    qr_finds(monkeypatch, None)
+    fetched = portal()
+    vision(receipt_verification_code='58E41A514', receipt_time='09:20:22')
+
+    submission = photo()
+    submission.rebuild_declined = True
+    # As it would be after a first attempt that guessed one, to prove the guess is not
+    # picked back up by layer 0.
+    submission.recovered_url = RECEIPT_URL
+    db.session.commit()
+
+    main.process_submission(submission)
+
+    assert fetched == []
+    assert Receipt.query.one().extraction_source == 'llm_vision'
+
+
+def test_keeping_the_extraction_files_it_as_a_receipt_and_stops_the_retries(
+        app, configured, photo, portal, vision, judgment, monkeypatch, client):
+    """
+    The button on the submission page: no second vision call, no further requests.
+
+    It lands on the receipt page deliberately, because that is where these numbers
+    become editable - which is the half of "keep them" that matters. They are a model's
+    reading of a photograph and some of them will be wrong.
+    """
+    import main
+    from flask import session
+
+    _not_uploaded(portal, vision, monkeypatch)
+
+    submission = photo()
+    main.process_submission(submission)
+    assert Receipt.query.count() == 0
+
+    with client.session_transaction() as browser:
+        browser['admin_logged_in'] = True
+
+    # Nothing below may ask the model or the portal again.
+    monkeypatch.setattr(main, 'extract_receipt_details', lambda *a, **k: pytest.fail(
+        'the vision model was asked again'))
+    monkeypatch.setattr(main, 'fetch_receipt_html', lambda *a, **k: pytest.fail(
+        'the portal was asked again'))
+
+    response = client.post(f'/submissions/{submission.id}/keep-extraction')
+    assert response.status_code == 200
+
+    receipt = Receipt.query.one()
+    assert receipt.extraction_source == 'llm_vision'
+    assert receipt.vendor_name == 'PLASCO LIMITED'
+    assert response.get_json()['receipt_id'] == receipt.id
+
+    assert submission.status == 'completed'
+    assert submission.rebuild_declined is True
+    assert submission.next_attempt_at is None
+    # The guessed address goes: it describes this submission as a receipt TRA ought to
+    # know about, which is exactly what has just been ruled out. The code does not - it
+    # is re-derived from the transcription, so the submission and the receipt it now
+    # carries name the same document rather than disagreeing about it.
+    assert submission.recovered_url is None
+    assert submission.receipt_code == receipt.receipt_verification_code
+
+
+def test_keeping_the_extraction_is_refused_when_nothing_has_been_read_yet(
+        app, configured, photo, client):
+    """A submission still queued for its first attempt has nothing to keep."""
+    with client.session_transaction() as browser:
+        browser['admin_logged_in'] = True
+
+    response = client.post(f'/submissions/{photo().id}/keep-extraction')
+    assert response.status_code == 409
+    assert 'nothing to keep' in response.get_json()['error']
+
+
+def test_the_kept_numbers_are_editable_afterwards(
+        app, configured, photo, portal, vision, judgment, monkeypatch, client):
+    """
+    The whole point of keeping them rather than leaving them on a stuck submission.
+
+    A receipt read off a photograph is correctable field by field; one parsed from
+    TRA's own page is not. Keeping the transcription has to produce the first kind.
+    """
+    import main
+
+    _not_uploaded(portal, vision, monkeypatch)
+    submission = photo()
+    main.process_submission(submission)
+
+    with client.session_transaction() as browser:
+        browser['admin_logged_in'] = True
+
+    receipt_id = client.post(f'/submissions/{submission.id}/keep-extraction').get_json()['receipt_id']
+    corrected = client.post(f'/receipts/{receipt_id}/correct', data={
+        'vendor_name': 'PLASCO LIMITED (TZ)', 'total_incl_tax_cents': '119,000',
+    })
+
+    assert corrected.status_code == 200
+    receipt = db.session.get(Receipt, receipt_id)
+    assert receipt.vendor_name == 'PLASCO LIMITED (TZ)'
+    assert receipt.total_incl_tax_cents == 11900000
+
+
+def test_declining_the_rebuild_from_the_page_clears_the_guessed_address(
+        app, configured, photo, portal, vision, judgment, monkeypatch, client):
+    """
+    The lighter of the two buttons: stop guessing, but keep trying.
+
+    What an admin wants when the photograph really is a receipt and they intend to
+    rescan the code or type it in - so the address goes, and the submission does not.
+    """
+    import main
+
+    _not_uploaded(portal, vision, monkeypatch)
+    submission = photo()
+    main.process_submission(submission)
+    assert submission.recovered_url == RECEIPT_URL
+
+    with client.session_transaction() as browser:
+        browser['admin_logged_in'] = True
+
+    response = client.post(f'/submissions/{submission.id}/rebuild-policy',
+                           data={'declined': '1'})
+
+    assert response.status_code == 200
+    assert submission.rebuild_declined is True
+    assert submission.recovered_url is None
+    assert Receipt.query.count() == 0, 'declining must not settle the submission'
+
+
+def test_declining_never_throws_away_an_address_typed_by_a_human(
+        app, configured, photo, client):
+    """
+    corrected_at is the difference between a guess and somebody's work.
+
+    Clearing a hand-typed address because the guessing was switched off would delete
+    the one thing on the row that was not a guess.
+    """
+    import main
+    from datetime import datetime
+
+    submission = photo()
+    submission.recovered_url = RECEIPT_URL
+    submission.corrected_at = datetime.utcnow()
+    db.session.commit()
+
+    with client.session_transaction() as browser:
+        browser['admin_logged_in'] = True
+
+    client.post(f'/submissions/{submission.id}/rebuild-policy', data={'declined': '1'})
+
+    assert submission.rebuild_declined is True
+    assert submission.recovered_url == RECEIPT_URL

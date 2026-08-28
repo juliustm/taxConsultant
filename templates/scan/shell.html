@@ -13,7 +13,6 @@
   the same one - so a deep link to History works offline without the worker having had
   to guess in advance that anyone would follow it.
 #}
-{% block title %}Scan Receipts{% endblock %}
 {% block body_class %}scan-camera{% endblock %}
 
 {% block head %}
@@ -48,12 +47,49 @@
      * for 'camera' at all, so it takes the immediate branch and simply asks.
      */
     window.__cameraNeedsGate = new Promise(function (resolve) {
+        /*
+         * The camera a person chose on the diagnostics screen, read straight out of
+         * localStorage because this runs before any other script on the page.
+         *
+         * This is the whole reason that preference is not in the IndexedDB store with
+         * everything else. The stream opened here is the one scanner.js picks up and
+         * keeps (Scanner.acquireStream), so a preference read a moment later would mean
+         * every launch opening the default camera, noticing, and reopening - a second
+         * getUserMedia and a visible flicker, every time.
+         *
+         * `exact`, matching Scanner.constraintsFor: a deviceId the browser is free to
+         * ignore is how a choice appears to be saved and never takes effect. If it
+         * throws - a camera that has gone away - scanner.js opens one without a
+         * preference when it finds no usable stream here.
+         */
+        var chosen = null;
+        try { chosen = window.localStorage.getItem('karani.camera.deviceId'); } catch (e) { /* private mode */ }
+
+        /*
+         * A long edge and an aspect ratio, matching Scanner.CAMERA_CONSTRAINTS - and
+         * the two must stay matched, because this is the request that actually gets
+         * made. scanner.js picks the stream up rather than opening its own, so its
+         * carefully-worded constraints never run on a normal launch; this object is
+         * what the camera is really asked for, every time.
+         *
+         * `width: 1920, height: 1080` - what used to be here - describes a landscape
+         * stream. A phone held upright produces a portrait one, and browsers resolve
+         * that pair by aspect ratio first and hand back the nearest mode they have,
+         * which on a portrait device is routinely 720x1280: a megapixel, from a camera
+         * holding twelve, with a receipt's QR code in it too small for any decoder on
+         * either side of the wire.
+         */
         var constraints = {
             audio: false,
-            video: {
+            video: chosen ? {
+                deviceId: { exact: chosen },
+                height: { ideal: 1920 },
+                aspectRatio: { ideal: 9 / 16 },
+                frameRate: { ideal: 30 },
+            } : {
                 facingMode: { ideal: 'environment' },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
+                height: { ideal: 1920 },
+                aspectRatio: { ideal: 9 / 16 },
                 frameRate: { ideal: 30 },
             },
         };
