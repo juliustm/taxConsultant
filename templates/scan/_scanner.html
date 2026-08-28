@@ -192,6 +192,69 @@
             <span></span><span></span><span></span><span></span>
         </div>
 
+        {# ---- UPLOAD ----------------------------------------------------------
+
+           The third mode, and the one that is not about the camera at all.
+
+           Plenty of what an organisation spends never stands in front of a lens. A LUKU
+           purchase comes back as an SMS; a receipt arrives over WhatsApp as a picture
+           somebody else took; a payment confirmation is on screen right now and the only
+           way to get it in here used to be to screenshot it, find the screenshot in the
+           gallery, and upload that. Each of those is a real expense with real evidence
+           attached, and each of them was being asked to become a photograph first.
+
+           So: pick from the gallery, or paste - a picture on the clipboard, or the text
+           itself. Text is filed as a record in its own right (input_type 'text' on the
+           server), not as a note attached to nothing. #}
+        <div class="upload-pane" x-show="mode === 'upload'" x-cloak
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0 translate-y-2"
+             x-transition:enter-end="opacity-100 translate-y-0">
+
+            <div class="upload-actions">
+                <button type="button" class="upload-tile" :disabled="importing"
+                        @click="$refs.gallery.click()">
+                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.6" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+                    </svg>
+                    <span>From gallery</span>
+                </button>
+
+                {# Reads the clipboard directly where the browser allows it, which is
+                   most Android browsers and, for text, Safari behind its own paste
+                   prompt. Where it does not, this falls back to focusing the box below
+                   and saying so - never to a dead button, because a person holding a
+                   copied SMS has no other move to try. #}
+                <button type="button" class="upload-tile" :disabled="importing"
+                        @click="pasteFromClipboard()">
+                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.6" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"/>
+                    </svg>
+                    <span>Paste</span>
+                </button>
+            </div>
+
+            <label for="paste-text" class="upload-label">Or type the reference itself</label>
+            {# Five rows, because a LUKU SMS is five lines - meter, token, units, amount
+               and the word LUKU itself - and a box that cuts the amount off is a box
+               nobody can check their paste in. #}
+            <textarea id="paste-text" x-ref="pasteBox" x-model="pastedText" rows="5"
+                      :maxlength="textMaxChars"
+                      placeholder="e.g. the LUKU SMS: token, units, meter number and amount"
+                      class="upload-textarea"></textarea>
+
+            <div class="upload-foot">
+                <span class="text-xs text-white/40"
+                      x-text="pastedText.length ? `${pastedText.length} / ${textMaxChars}` : 'Electricity, water, mobile money — anything with no receipt behind it.'"></span>
+                <button type="button" class="control control-primary upload-save"
+                        @click="saveText()" :disabled="!pastedText.trim()">Save record</button>
+            </div>
+
+            <template x-if="pasteHint">
+                <p class="mt-2 text-xs text-amber-300" x-text="pasteHint"></p>
+            </template>
+        </div>
+
         <div class="flex-1"></div>
 
         <!-- Hint. What just got saved is the confirmation sheet's job now, not this
@@ -222,56 +285,111 @@
             </template>
         </div>
 
-        <!-- Mode switch -->
+        {# Mode switch. Photo first and Photo by default: it is the one that always
+           works. Scanning a QR code is faster when it lands, but it is the mode that
+           fails on a creased receipt, in bad light, on a fading thermal print - and a
+           default that sometimes cannot do the job is a default that teaches people the
+           app is unreliable. A photograph is never refused, and the server reads the
+           code off it afterwards anyway. #}
         <div class="flex justify-center pb-3">
             <div class="mode-switch">
-                <button type="button" :class="{ 'is-active': mode === 'qr' }" @click="setMode('qr')">Scan QR</button>
                 <button type="button" :class="{ 'is-active': mode === 'photo' }" @click="setMode('photo')">Photo</button>
+                <button type="button" :class="{ 'is-active': mode === 'qr' }" @click="setMode('qr')">Scan QR</button>
+                <button type="button" :class="{ 'is-active': mode === 'upload' }" @click="setMode('upload')">Upload</button>
             </div>
         </div>
 
-        <!-- Controls -->
-        <div class="safe-bottom flex items-center justify-between px-6 pb-5">
-            <a href="{{ url_for('scan_history') }}" @click.prevent="ScanRouter.go('history')" class="control control-round" aria-label="History">
-                <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        {# Controls.
+
+           A three-column grid rather than a flex row with space-between, and that is the
+           whole of the fix for the shutter: in a flex row the button sat wherever the
+           widths on either side of it happened to leave it, so it moved when the torch
+           appeared and it was never actually in the middle of the screen. Each column
+           here is a third of the width, so the middle one's centre is the screen's
+           centre - permanently, whatever is beside it. #}
+        <div class="safe-bottom grid grid-cols-3 items-center px-5 pb-5">
+
+            {# History, promoted from an unlabelled circle to the second real button on
+               this screen. It is where a person checks that what they scanned actually
+               went - the question the whole app exists to answer - and it had been
+               reduced to a clock glyph indistinguishable from the gallery icon next to
+               it. The badge is the outbox: a number here is the only thing on the camera
+               screen that says receipts are still sitting on this phone. #}
+            <a href="{{ url_for('scan_history') }}" @click.prevent="ScanRouter.go('history')"
+               class="dash-link justify-self-start" aria-label="My receipts">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12"/>
                 </svg>
+                <span>Receipts</span>
+                <template x-if="pending > 0">
+                    <span class="dash-link-badge" x-text="pending > 99 ? '99+' : pending"></span>
+                </template>
             </a>
 
             {# Receipts that were photographed before this app was involved - by a
                colleague, on a phone that was offline for a week, or simply days ago -
                are the same receipts. `multiple` because that backlog is never one
                photo, and no `capture` attribute because that is precisely what tells a
-               phone to open the camera instead of the library. #}
+               phone to open the camera instead of the library.
+
+               The button that opens it lives in the Upload pane now; the input itself
+               stays here, unattached to any layout, because it is only ever click()ed. #}
             <input type="file" x-ref="gallery" accept="image/*" multiple class="hidden"
                    @change="importFromGallery($event)">
-            <button type="button" class="control control-round" :disabled="importing"
-                    @click="$refs.gallery.click()" aria-label="Add photos from the gallery">
-                <template x-if="!importing">
-                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
-                    </svg>
-                </template>
-                <template x-if="importing">
-                    <span class="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>
-                </template>
-            </button>
 
-            <!-- In QR mode scanning is automatic, so a shutter would invite pointless
-                 taps; the slot keeps the row from shifting when modes change. -->
-            <button type="button" class="shutter" x-show="mode === 'photo'"
-                    @click="takePhoto()" :disabled="capturing" aria-label="Take photo"></button>
-            <div x-show="mode === 'qr'" class="h-[4.5rem] w-[4.5rem] flex items-center justify-center">
-                <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-white/70"></span>
+            <div class="justify-self-center">
+                <button type="button" class="shutter" x-show="mode === 'photo'"
+                        @click="takePhoto()" :disabled="capturing" aria-label="Take photo"></button>
+
+                <!-- In QR mode scanning is automatic, so a shutter would invite pointless
+                     taps; the slot keeps the row from shifting when modes change. -->
+                <div x-show="mode === 'qr'" class="flex h-[4.5rem] w-[4.5rem] items-center justify-center">
+                    <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-white/70"></span>
+                </div>
+
+                <!-- Upload mode's primary action, in the position the thumb is already
+                     resting on. Pasting is the point of this mode; the tile above is the
+                     same call for anyone who reached the pane a different way. -->
+                <button type="button" class="shutter shutter-action" x-show="mode === 'upload'" x-cloak
+                        @click="pasteFromClipboard()" :disabled="importing" aria-label="Paste from the clipboard">
+                    <template x-if="!importing">
+                        <svg class="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"/>
+                        </svg>
+                    </template>
+                    <template x-if="importing">
+                        <span class="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+                    </template>
+                </button>
             </div>
 
-            <button type="button" class="control control-round" :class="{ 'is-on': torchOn }"
-                    x-show="torchAvailable" @click="toggleTorch()" aria-label="Torch">
-                <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88"/>
-                </svg>
+            {# Torch.
+
+               The icon it replaces was Heroicons' eye-slash - a crossed-out eye, which
+               on a camera screen reads as "hide the preview" or "privacy", and which is
+               the same crossed-out shape whether the light is on or off. It was the one
+               control on here that nobody could name.
+
+               A bolt is the phone-camera convention for this and nothing else, and the
+               two states are now genuinely two icons: struck through for off, plain and
+               filled for on, on top of the amber the button already turned. #}
+            <button type="button" class="control control-round justify-self-end"
+                    :class="{ 'is-on': torchOn }"
+                    x-show="torchAvailable" @click="toggleTorch()"
+                    :aria-pressed="torchOn ? 'true' : 'false'"
+                    :aria-label="torchOn ? 'Turn the light off' : 'Turn the light on'">
+                <template x-if="torchOn">
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M14.615 1.595a.75.75 0 01.359.852L12.982 9.75h7.268a.75.75 0 01.548 1.262l-10.5 11.25a.75.75 0 01-1.272-.71l1.992-7.302H3.75a.75.75 0 01-.548-1.262l10.5-11.25a.75.75 0 01.913-.143z"/>
+                    </svg>
+                </template>
+                <template x-if="!torchOn">
+                    <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11.412 15.655L9.75 21.75l3.745-4.012M9.257 13.5H3.75l2.659-2.849m2.048-2.194L14.25 2.25 12 10.5h8.25l-4.707 5.043M8.457 8.457L3 3m5.457 5.457l7.086 7.086m0 0L21 21"/>
+                    </svg>
+                </template>
             </button>
-            <div x-show="!torchAvailable" class="h-13 w-13"></div>
+            <div x-show="!torchAvailable" class="h-13 w-13 justify-self-end"></div>
         </div>
 
         <!-- ================= CONFIRM ================= -->
@@ -298,6 +416,17 @@
                     <img :src="confirming.previewUrl" alt="" class="mb-4 max-h-64 w-full rounded-xl object-cover">
                 </template>
 
+                {# A pasted record gets the same look-before-you-send treatment a photo
+                   does, and needs it more: the clipboard is the one source here whose
+                   contents nobody has actually seen at the moment they submit it. Shown
+                   as it was pasted - line breaks intact - because that is how a LUKU
+                   SMS is read, and because a wrong paste is only obvious in its own
+                   shape. #}
+                <template x-if="confirming && confirming.kind === 'text'">
+                    <pre class="mb-4 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white/5 p-3 font-mono text-xs leading-relaxed text-white/80"
+                         x-text="confirming.text"></pre>
+                </template>
+
                 {# A batch is shown as the strip it is, so an accidental extra photo -
                    the screenshot, the picture of the car - is caught here rather than
                    after it has been queued. #}
@@ -322,7 +451,9 @@
                         <p class="text-base font-semibold text-white"
                            x-text="confirming && confirming.kind === 'batch'
                                    ? `${confirming.items.length} receipts saved on this phone`
-                                   : 'Receipt saved on this phone'"></p>
+                                   : (confirming && confirming.kind === 'text'
+                                      ? 'Record saved on this phone'
+                                      : 'Receipt saved on this phone')"></p>
                         <p class="truncate font-mono text-sm text-white/60" x-text="confirming && confirming.label"></p>
                     </div>
                 </div>
@@ -353,12 +484,13 @@
                     <span x-text="submitting ? 'Saving…'
                                   : (confirming && confirming.kind === 'batch'
                                      ? `Submit ${confirming.items.length} receipts`
-                                     : 'Submit receipt')"></span>
+                                     : (confirming && confirming.kind === 'text'
+                                        ? 'Submit record' : 'Submit receipt'))"></span>
                 </button>
                 <button type="button" class="mt-2 w-full py-1 text-center text-xs text-white/40 underline"
-                        @click="discardConfirming()">
-                    Wrong receipt? Discard it
-                </button>
+                        @click="discardConfirming()"
+                        x-text="confirming && confirming.kind === 'text'
+                                ? 'Wrong text? Discard it' : 'Wrong receipt? Discard it'"></button>
             </div>
         </div>
     </div>
@@ -369,11 +501,24 @@ function scannerApp() {
     return {
         session: null,
         scanner: null,
-        // 'qr' reads a small box; 'photo' captures the whole frame. The two show
-        // different guides because they capture different things - a QR box drawn over
-        // a full-frame photo tells the user to fit a receipt inside a crop that is
-        // never applied.
-        mode: 'qr',
+        /*
+         * Which of the three ways in is showing.
+         *
+         * 'photo' captures the whole frame; 'qr' reads a small box and is the only mode
+         * that runs the decoder at all; 'upload' is not a camera mode - it is the
+         * gallery and the clipboard, for evidence that never passes in front of a lens.
+         * Each shows a different guide because each captures a different thing: a QR box
+         * drawn over a full-frame photo tells the user to fit a receipt inside a crop
+         * that is never applied.
+         *
+         * Photo is the default. See the note on the mode switch above for why.
+         */
+        mode: 'photo',
+        // The paste box's contents, and the one-line explanation shown when the browser
+        // will not hand over the clipboard by itself.
+        pastedText: '',
+        pasteHint: null,
+        textMaxChars: (window.PWA && window.PWA.TEXT_MAX_CHARS) || 1000,
         cameraError: null,
         cameraGate: false,
         engineError: null,
@@ -457,6 +602,20 @@ function scannerApp() {
                 if (document.visibilityState === 'visible' && this.active) this.reviveCamera();
             });
 
+            /*
+             * A paste anywhere on this screen, not only into the box.
+             *
+             * On a laptop or a tablet with a keyboard, Ctrl/Cmd-V is what somebody
+             * holding a copied payment SMS or a screenshot will try first, and having
+             * that do nothing unless they had already found the Upload tab and tapped
+             * into a textarea is a feature that exists but cannot be found. This routes
+             * the paste to the right place instead: a picture is imported, text opens
+             * Upload with the text already in it.
+             *
+             * Pastes aimed at a real field are left alone - see handlePaste.
+             */
+            document.addEventListener('paste', (event) => this.handlePaste(event));
+
             ScanRouter.watch('scan', (active) => this.setActive(active));
 
             PWA.start();
@@ -502,9 +661,9 @@ function scannerApp() {
 
         async resumeCamera() {
             await this.reviveCamera();
-            // Not while the confirmation sheet is up: it paused the scanner on purpose,
-            // so that the receipt still sitting in frame is not read a second time.
-            if (this.scanner && !this.confirming) this.scanner.resume();
+            // syncDecoder rather than a bare resume: the sheet being up is one of
+            // several reasons not to be decoding, and Photo mode is now another.
+            this.syncDecoder();
         },
 
         async reviveCamera() {
@@ -539,6 +698,10 @@ function scannerApp() {
             this.cameraError = null;
             try {
                 await this.scanner.start();
+                // start() begins decoding unconditionally. Whether it should still be
+                // decoding a moment later depends on the mode and on whether this
+                // device is activated yet, which is what syncDecoder knows.
+                this.syncDecoder();
                 this.torchAvailable = this.scanner.torchAvailable;
                 // Started here rather than at PWA.start(): geolocation is its own
                 // permission prompt, and stacking it on top of the camera one at the
@@ -612,6 +775,10 @@ function scannerApp() {
             this.storageOk = status.storageOk;
             this.signOutMessage = status.signOutReason ? status.signOutReason.message : null;
             this.recentEvents = status.recentEvents;
+            // Activation reads a QR code whatever the mode switch says, so a session
+            // appearing - or being lost - is exactly when the decoder should be
+            // reconsidered. See the `decoding` getter.
+            this.syncDecoder();
         },
 
         /*
@@ -711,11 +878,17 @@ function scannerApp() {
          * the phone is standing when it was imported would put a Mwanza fuel stop in
          * Dar es Salaam - a wrong answer is worse than no answer on a field that exists
          * to corroborate a receipt.
+         *
+         * A pasted record is excluded by the same rule and not by accident. The LUKU
+         * token in somebody's messages was bought at a meter that is not here, at a
+         * time that is not now; where the phone happens to be when it was pasted
+         * corroborates nothing at all.
          */
         queueOne(item, note) {
+            var here = !item.capturedAt && item.kind !== 'text';
             var fields = {
                 description: note || null,
-                location: item.capturedAt ? null : PWA.currentLocation(),
+                location: here ? PWA.currentLocation() : null,
                 captured_at: item.capturedAt || null,
             };
             // Not either/or any more. A scan whose code decoded carries both: the URL
@@ -723,6 +896,7 @@ function scannerApp() {
             // read off, and the server files them as one submission.
             if (item.receipt) fields.receipturl = item.receipt.raw;
             if (item.blob) fields.photo = item.blob;
+            if (item.text) fields.text = item.text;
             return PWA.queueScan(fields);
         },
 
@@ -744,33 +918,31 @@ function scannerApp() {
             this.confirming = null;
             this.noteText = '';
             this.confirmError = null;
-            if (this.scanner) this.scanner.resume();
+            this.syncDecoder();
         },
 
         async takePhoto() {
             if (!this.scanner || this.capturing) return;
             this.capturing = true;
             try {
-                const shot = await this.scanner.capture();
+                /*
+                 * `decode: false`, because this button is Photo and Photo means photo.
+                 *
+                 * A still used to be run through all three decoders on the way past, and
+                 * a hit turned the capture into a verified TRA scan labelled with a
+                 * receipt code. Better data, and the wrong behaviour: somebody who has
+                 * just chosen Photo over Scan QR is told the app read a QR code anyway.
+                 *
+                 * The receipt still gets verified. The photograph goes up at the larger
+                 * of the two upload sizes and utils/qr.py decodes it server-side with a
+                 * ladder this phone cannot match - contrast stretching, overlapping
+                 * tiles, each one tripled - and from there it takes the ordinary
+                 * verified path. The reading moved; it did not disappear.
+                 */
+                const shot = await this.scanner.capture({ decode: false });
 
-                // A still gets all three decode passes where a live frame gets one, so
-                // it frequently reads a code the preview loop could not. When it does
-                // this becomes an ordinary verified scan -
-                // but the photograph goes up with it rather than being discarded.
-                //
-                // It used to be thrown away here, on the reasoning that a verified
-                // receipt beats a picture of one. True, and beside the point: they are
-                // not alternatives. The receipt TRA confirms had no image behind it at
-                // all, so nobody could ever look at the paper again - to check a line
-                // item, to see the state it was in, to settle a dispute about what was
-                // bought. It also meant the server's own QR decoder only ever ran on
-                // photographs this phone had already failed to read, which is a
-                // selection effect that makes its hit rate look like a fault.
-                const receipt = shot.text ? Scanner.parseReceipt(shot.text) : null;
                 const previewUrl = URL.createObjectURL(shot.blob);
-                this.confirm(receipt
-                    ? { kind: 'qr', receipt, blob: shot.blob, previewUrl, label: receipt.code }
-                    : { kind: 'photo', blob: shot.blob, previewUrl, label: 'Photo' });
+                this.confirm({ kind: 'photo', blob: shot.blob, previewUrl, label: 'Photo' });
             } catch (e) {
                 this.cameraError = (e && e.message) || 'Could not take a photo.';
             } finally {
@@ -801,6 +973,19 @@ function scannerApp() {
             // Cleared immediately so picking the very same file again still fires a
             // change event - otherwise a retry after an error appears to do nothing.
             event.target.value = '';
+            await this.importFiles(files);
+        },
+
+        /*
+         * The same read, for files from anywhere.
+         *
+         * Split out of importFromGallery when the clipboard became a second source of
+         * pictures. A screenshot on the clipboard and a photo in the gallery are the
+         * same thing arriving by different doors, and neither of them is worth a second
+         * copy of the decode-count-confirm loop below.
+         */
+        async importFiles(files) {
+            files = Array.from(files || []);
             if (!files.length || this.importing) return;
 
             this.importing = true;
@@ -865,6 +1050,166 @@ function scannerApp() {
         },
 
         /*
+         * The clipboard, asked for directly.
+         *
+         * Two shapes come off it and both are wanted. A screenshot of a payment
+         * confirmation is a picture and goes through the same decode-and-queue path a
+         * gallery photo does. An SMS someone copied is text, and becomes a record in its
+         * own right - which is the whole reason this exists, because the alternative
+         * being practised in the field is to screenshot the text, save the screenshot,
+         * and upload a photograph of words we could have had exactly.
+         *
+         * Images are tried before text on purpose: a copied image often carries a text
+         * flavour alongside it (a filename, a URL), and filing that string as the
+         * expense record instead of the picture would be a quiet, wrong answer.
+         *
+         * Permission is not assumed anywhere. `clipboard.read` does not exist on some
+         * browsers and is refused on others, and Safari puts its own paste confirmation
+         * in front of both - so every failure ends at the same place: the box, focused,
+         * with one line saying to use the keyboard's own paste. Never a dead button.
+         */
+        async pasteFromClipboard() {
+            this.pasteHint = null;
+            this.importError = null;
+
+            if (navigator.clipboard && navigator.clipboard.read) {
+                try {
+                    var items = await navigator.clipboard.read();
+                    var files = [];
+                    for (var i = 0; i < items.length; i++) {
+                        var type = (items[i].types || []).find(function (t) {
+                            return t.indexOf('image/') === 0;
+                        });
+                        if (!type) continue;
+                        var blob = await items[i].getType(type);
+                        files.push(new File([blob], 'pasted-' + (files.length + 1) + '.png',
+                                            { type: blob.type || 'image/png' }));
+                    }
+                    if (files.length) {
+                        await this.importFiles(files);
+                        return;
+                    }
+                } catch (e) { /* no image, or no permission; text is still worth a try */ }
+            }
+
+            if (navigator.clipboard && navigator.clipboard.readText) {
+                try {
+                    var text = await navigator.clipboard.readText();
+                    if (text && text.trim()) {
+                        this.acceptPastedText(text);
+                        return;
+                    }
+                } catch (e) { /* falls through to the manual instruction below */ }
+            }
+
+            this.setMode('upload');
+            this.pasteHint = 'This browser won\u2019t hand over the clipboard on its own. '
+                + 'Tap the box below, then long-press and choose Paste.';
+            this.focusPasteBox();
+        },
+
+        /*
+         * A paste event that was not aimed at a text field.
+         *
+         * Left strictly alone when it was: a person pasting into the box below, or into
+         * the note on the confirmation sheet, or into the manual activation field means
+         * that field and nothing else, and hijacking it would make those fields
+         * unusable - which is a far worse bug than the convenience this adds.
+         */
+        handlePaste(event) {
+            if (!this.active || !this.session) return;
+
+            var target = event.target;
+            var tag = target && target.tagName;
+            if (tag === 'TEXTAREA' || tag === 'INPUT' || (target && target.isContentEditable)) return;
+
+            var data = event.clipboardData;
+            if (!data) return;
+
+            var files = Array.from(data.files || []).filter(function (file) {
+                return file.type && file.type.indexOf('image/') === 0;
+            });
+            if (files.length) {
+                event.preventDefault();
+                this.importFiles(files);
+                return;
+            }
+
+            var text = data.getData ? data.getData('text/plain') : '';
+            if (text && text.trim()) {
+                event.preventDefault();
+                this.acceptPastedText(text);
+            }
+        },
+
+        /*
+         * Pasted text, sorted into the two things it can be.
+         *
+         * A TRA verification link is a receipt - the strongest kind this app handles,
+         * because the portal will answer for it - so it skips the box entirely and goes
+         * straight to the confirmation sheet as an ordinary scan. Copying the link out
+         * of a vendor's SMS is a perfectly good way to submit a receipt and there is no
+         * reason to make somebody photograph a screen showing it.
+         *
+         * Anything else is the record itself, and goes into the box to be looked at
+         * before it is sent. Not straight to the sheet: unlike a URL there is nothing
+         * here to validate against, so the only check available is a person reading it.
+         */
+        acceptPastedText(text) {
+            var trimmed = (text || '').trim();
+            if (!trimmed) return;
+
+            var receipt = Scanner.parseReceipt(trimmed);
+            if (receipt) {
+                this.confirm({ kind: 'qr', receipt: receipt, label: receipt.code });
+                return;
+            }
+
+            this.setMode('upload');
+            this.pastedText = trimmed.slice(0, this.textMaxChars);
+            this.pasteHint = null;
+            this.focusPasteBox();
+        },
+
+        /* Queues what is in the box. Re-checks for a TRA link because the text may have
+           been typed or pasted straight into the field, which never went past
+           acceptPastedText. */
+        saveText() {
+            var text = this.pastedText.trim();
+            if (!text) return;
+
+            var receipt = Scanner.parseReceipt(text);
+            if (receipt) {
+                this.pastedText = '';
+                this.confirm({ kind: 'qr', receipt: receipt, label: receipt.code });
+                return;
+            }
+
+            var record = text.slice(0, this.textMaxChars);
+            this.pastedText = '';
+            this.confirm({ kind: 'text', text: record, label: this.firstLine(record) });
+        },
+
+        /* What a pasted record is called in a list: its own first line, which for every
+           real example - a LUKU token, an M-Pesa confirmation - is the line that says
+           what it is. */
+        firstLine(text) {
+            var lines = (text || '').split('\n');
+            var line = '';
+            for (var i = 0; i < lines.length; i++) {
+                if (lines[i].trim()) { line = lines[i].trim(); break; }
+            }
+            if (!line) return 'Pasted record';
+            return line.length > 48 ? line.slice(0, 48) + '\u2026' : line;
+        },
+
+        focusPasteBox() {
+            this.$nextTick(() => {
+                if (this.$refs.pasteBox) this.$refs.pasteBox.focus();
+            });
+        },
+
+        /*
          * When the picture was taken, as far as the file knows.
          *
          * An imported receipt is not a receipt scanned today, and dating it today puts
@@ -884,15 +1229,50 @@ function scannerApp() {
         },
 
         /*
-         * Switching modes changes what is framed, not what is decoded.
+         * Switching modes changes what is framed *and* what is decoded.
          *
-         * Automatic QR detection keeps running in photo mode: it costs nothing extra,
-         * and if the code happens to be readable the user gets a verified receipt
-         * instead of a picture of one without having to think about it.
+         * It used to change only the first: the decode loop ran in every mode on the
+         * reasoning that a free verified receipt is better than a picture of one. What
+         * that felt like in the hand was the app refusing to take the photograph you
+         * asked for - line up a receipt in Photo, and the confirmation sheet fires on
+         * its QR code before the shutter has been touched, holding a scan nobody
+         * requested. Only Scan QR looks for codes now, and the server reads the code off
+         * the photograph afterwards regardless (see takePhoto).
+         *
+         * Upload has no viewfinder behaviour at all, so it decodes nothing either.
          */
         setMode(mode) {
             this.mode = mode;
             this.struggling = false;
+            this.importError = null;
+            if (mode !== 'upload') this.pasteHint = null;
+            this.syncDecoder();
+        },
+
+        /*
+         * Whether the QR decoder should be running right now.
+         *
+         * Every reason not to be, in one place, because they arrive from four different
+         * directions - the router, the confirmation sheet, the permission gate and the
+         * mode switch - and each of them used to resume or pause on its own reasoning.
+         * That is how a sheet dismissed in Photo mode restarted a decoder that Photo
+         * mode had just turned off.
+         *
+         * The one that is not about the mode: a device with no session yet is on the
+         * activation screen, and the only way through it is to read an activation QR
+         * code. The mode switch is not even on screen there, so it gets no vote.
+         */
+        get decoding() {
+            if (!this.scanner || !this.active || this.cameraGate) return false;
+            if (this.confirming) return false;
+            if (!this.session) return true;
+            return this.mode === 'qr';
+        },
+
+        syncDecoder() {
+            if (!this.scanner) return;
+            if (this.decoding) this.scanner.resume();
+            else this.scanner.pause();
         },
 
         async toggleTorch() {

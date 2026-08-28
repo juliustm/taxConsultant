@@ -1578,17 +1578,96 @@ def _receipt_from_photo(submission, config):
     return _receipt_from_transcription(submission, data, config)
 
 
-def _receipt_from_transcription(submission, data, config):
+def _receipt_from_text(submission, config):
     """
-    A Receipt built out of what the vision model read, or None if it is a duplicate.
+    Builds a Receipt from a written record of a purchase - the SMS, not the paper.
+
+    A large share of what an organisation actually spends never produces a receipt at
+    all. Electricity bought as a LUKU token, a water bill, a government control number,
+    a mobile money transfer: what the payer is left holding is a few lines of text on a
+    phone, and no EFD receipt is ever going to be issued for it. Until this path existed
+    the only way to file one of those was to screenshot it, save the screenshot, and
+    upload the screenshot - a photograph of a screen, read back by a vision model that
+    was being asked to do OCR on text we already had perfectly.
+
+    So the text is read as text. Structurally this is the photo path with its first two
+    layers mostly gone, because they have nothing to work on:
+
+      * There is no QR code to decode - the whole point is that there is no receipt.
+      * The address rebuild survives, but only for the one case it fits: somebody
+        pasting the verification code and time off an EFD receipt they are holding. The
+        model is told plainly (TEXT_RECORD_SYSTEM_PROMPT) that a LUKU token or an
+        M-Pesa reference is not a verification code, because the failure to avoid here
+        is a plausible run of digits becoming a portal address that nobody will ever
+        confirm and two days of retries behind it.
+      * What the model read is what gets stored, as extraction_source='llm_text' - a
+        weaker claim than a photograph, and marked as one everywhere it is shown.
+
+    A pasted TRA link never reaches here: the scanner recognises one and queues it as a
+    URL submission, which is the strongest path of the three.
+    """
+    if not config.is_configured():
+        raise ValueError("Instance is not configured with LLM provider and API key.")
+
+    # Layer 0, exactly as on the photo path: an earlier attempt already worked out
+    # which receipt this is and only the portal was unwilling. Re-reading the text
+    # would arrive back at the same address having paid for another model call.
+    if submission.recovered_url and not submission.rebuild_declined:
+        print(f"[Text] Retrying the code recovered earlier: {submission.recovered_url}")
+        receipt, settled = _verify_photo_against_tra(
+            submission, config, submission.recovered_url,
+            source='the code recovered from it', label='Text')
+        if settled:
+            return receipt
+
+    data = extract_receipt_details(submission.input_data, False, config)
+
+    # Stored before anything acts on it, for the reason spelled out in
+    # _receipt_from_photo: everything below can end in a retry booked for tomorrow, and
+    # a submission sitting in that schedule should still show an admin a vendor, a
+    # total and a date they can accept in one click.
+    _store_llm_draft(submission, data)
+
+    document_type = (data.get('document_type') or '').strip() or 'other_receipt'
+    if (document_type == 'tra_efd_receipt' and not submission.recovered_url
+            and _may_rebuild_url(submission, config)):
+        rebuilt = reconstructed_receipt_url(data)
+        if rebuilt:
+            print(f"[Text] Rebuilt a verification URL from the pasted text: {rebuilt}")
+            receipt, settled = _verify_photo_against_tra(
+                submission, config, rebuilt, source='the code in the pasted text', label='Text')
+            if settled:
+                return receipt
+            print("[Text] Portal would not confirm that code; storing what was read.")
+
+    return _receipt_from_transcription(
+        submission, data, config, source='llm_text', default_document_type='other_receipt')
+
+
+def _receipt_from_transcription(submission, data, config, source='llm_vision',
+                                default_document_type='tra_efd_receipt'):
+    """
+    A Receipt built out of what a model read, or None if it is a duplicate.
 
     Split out of _receipt_from_photo so the admin page can build the same receipt from
     the same stored transcription (see accept_submission_extraction). One reader of one
     shape of data: a receipt an admin accepts by hand has to be indistinguishable from
     one the pipeline stored on its own, or the two paths drift and only one of them
-    keeps getting the fixes.
+    keeps getting the fixes. A pasted record (_receipt_from_text) fills in the same
+    schema and so lands here too.
+
+    The two parameters are what the callers disagree about, and only that:
+
+      * `source` becomes extraction_source, which every reader of a receipt uses to say
+        where its numbers came from. 'llm_vision' is a model reading paper; 'llm_text'
+        is a model reading somebody's paste. Neither is 'tra_html', which is the only
+        value that means the revenue authority itself supplied the figures.
+      * `default_document_type` is what an answer with the field missing is taken to
+        mean. A photograph with nothing said about it is overwhelmingly an EFD receipt.
+        A pasted LUKU SMS never is, and defaulting it to one would put a made-up EFD
+        receipt in the ledger every time the model forgot to fill the field in.
     """
-    document_type = (data.get('document_type') or '').strip() or 'tra_efd_receipt'
+    document_type = (data.get('document_type') or '').strip() or default_document_type
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
     if _register_duplicate(submission, verification_code, config):
         return None
@@ -1623,7 +1702,7 @@ def _receipt_from_transcription(submission, data, config):
         receipt_date=_parse_iso_date(data.get('receipt_date')),
         receipt_time=_parse_iso_time(data.get('receipt_time')),
         is_cancelled=bool(data.get('is_cancelled')),
-        extraction_source='llm_vision', llm_status='ok',
+        extraction_source=source, llm_status='ok',
         document_type=document_type,
         category=category, raw_llm_response=json.dumps(judgment),
         device_id=submission.device_id, submission_id=submission.id,
@@ -1646,9 +1725,13 @@ def _receipt_from_transcription(submission, data, config):
     return receipt
 
 
-def _verify_photo_against_tra(submission, config, url, source):
+def _verify_photo_against_tra(submission, config, url, source, label='Photo'):
     """
     Tries to turn a photograph into a verified receipt using a URL recovered from it.
+
+    `label` is only ever the log prefix. Pasted records take this same path (see
+    _receipt_from_text) and a line reading '[Photo] Verified against TRA' on a
+    submission that has no photograph is the kind of log that costs an afternoon.
 
     Returns (receipt, settled). `settled` is the important half: True means this
     submission's outcome is decided and the caller must stop - it verified, or it is a
@@ -1678,14 +1761,14 @@ def _verify_photo_against_tra(submission, config, url, source):
         # A URL submission fails here on purpose - guessing at numbers is what this
         # pipeline exists to avoid. A photograph is different: nobody is guessing,
         # there is a picture of the receipt and a model that can read it.
-        print(f"[Photo] The verified page did not parse ({e}); reading the photo instead.")
+        print(f"[{label}] The verified page did not parse ({e}); reading it here instead.")
         return None, False
 
     if receipt is not None:
         # The photograph is still the submission's input, and is still worth looking at,
         # but the numbers on this receipt came from the portal - which is what
         # extraction_source='tra_html', set by the URL path, already records.
-        print(f"[Photo] Verified against TRA via {source}: {submission.receipt_code}")
+        print(f"[{label}] Verified against TRA via {source}: {submission.receipt_code}")
 
     return receipt, not exhausted
 
@@ -1805,6 +1888,8 @@ def process_submission(submission):
     never inferred: see utils/tra_parser. The LLM is asked only to categorise the
     purchase and comment on it, so an LLM outage costs the analysis and nothing else.
     Photographed receipts have no machine-readable source and still go through vision.
+    A pasted record - the SMS that a LUKU or water payment produces instead of a
+    receipt - has no source either, and goes through the text model for the same reason.
     """
     print(f"[TaskStart] Processing submission {submission.id} (Type: {submission.input_type})")
     try:
@@ -1816,6 +1901,8 @@ def process_submission(submission):
             receipt = _receipt_from_tra_url(submission, config)
         elif submission.input_type == 'photo':
             receipt = _receipt_from_photo(submission, config)
+        elif submission.input_type == 'text':
+            receipt = _receipt_from_text(submission, config)
         else:
             raise ValueError(f"Unsupported submission type '{submission.input_type}'.")
 
@@ -3744,6 +3831,16 @@ def delete_device(device_id):
 
 SCAN_HISTORY_PAGE_SIZE = 50
 
+# The longest pasted purchase record a submission will carry.
+#
+# Submission.input_data is a VARCHAR(1024) and this has to fit inside it, which on
+# SQLite means nothing and on Postgres means a failed insert. Every real example of
+# this - a LUKU token SMS, an M-Pesa confirmation, a bank alert - is comfortably under
+# two hundred characters, so the cap is only ever reached by somebody pasting the wrong
+# thing: an email thread, a copied web page. They get the first thousand characters of
+# it filed rather than an error, which is the better of the two failures.
+TEXT_SUBMISSION_MAX_CHARS = 1000
+
 
 # All three scan routes render the same document.
 #
@@ -3902,11 +3999,17 @@ def _parse_captured_at(value):
 @device_required
 def scan_api_sync():
     """
-    Takes a batch of scanned receipt URLs from a device's outbox.
+    Takes a batch of scanned receipt URLs - and pasted purchase records - from a
+    device's outbox.
 
     Every item carries the client_uuid the phone minted for it, and the response maps
     each one to its submission so the phone knows exactly what to clear. Items are
     handled independently: one malformed row does not cost the other twenty-nine.
+
+    `text` rides in this batch rather than getting a door of its own because it is the
+    same shape of request: a few hundred bytes of JSON with no blob in it. Photos are
+    the ones that need /scan/api/sync/photo, and they need it because a multi-megabyte
+    upload that fails must not take twenty-nine small ones down with it.
     """
     payload = request.get_json(silent=True) or {}
     items = payload.get('items')
@@ -3922,14 +4025,16 @@ def scan_api_sync():
             continue
         client_uuid = (item.get('client_uuid') or '').strip()
         receipt_url = (item.get('receipturl') or '').strip()
-        if not client_uuid or not receipt_url:
+        text = (item.get('text') or '').strip()
+        if not client_uuid or not (receipt_url or text):
             results.append({'client_uuid': client_uuid or None, 'status': 'rejected',
-                            'error': 'client_uuid and receipturl are both required.'})
+                            'error': 'client_uuid and one of receipturl or text are required.'})
             continue
 
         submission, created = ingest_submission(
             g.device,
-            url=receipt_url,
+            url=receipt_url or None,
+            text=text or None,
             description=item.get('description'),
             location=item.get('location'),
             client_uuid=client_uuid,
@@ -4184,8 +4289,8 @@ def scan_api_stream():
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
 
-def ingest_submission(device, photo=None, url=None, description=None, location=None,
-                      client_uuid=None, captured_at=None):
+def ingest_submission(device, photo=None, url=None, text=None, description=None,
+                      location=None, client_uuid=None, captured_at=None):
     """
     Puts one receipt on the queue. Returns (submission, created).
 
@@ -4197,6 +4302,13 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
     `photo` and `url` are not exclusive. A phone that decodes a receipt's QR code is
     holding a photograph of that receipt at the same instant, and sending both is what
     keeps the paper behind the verified figures - see Submission.photo_filename.
+
+    `text` is the third kind of evidence, and the one this app spent a long time having
+    no answer for: the expenses that never produce a document at all. A LUKU token, a
+    water bill, a mobile money transfer - what the payer is left holding is an SMS, and
+    photographing a screen to submit it is a workaround, not a feature. It ranks below
+    both of the others: text is somebody's paste, a URL is a code TRA will confirm, and
+    a photograph is at least a picture of the paper.
 
     Idempotent on client_uuid: an offline device retries a scan until it is
     acknowledged, and a response lost on the way back must not leave a second copy
@@ -4255,6 +4367,17 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         # Already the input; a second copy of the name in photo_filename would leave two
         # columns to keep in step for no gain. submission_photo_name reads both.
         photo_filename = None
+
+    elif text:
+        # Below `photo` as well as below `url`: a submission that carries both a
+        # picture and a pasted note is a photographed receipt with a note on it, and
+        # the picture is the better evidence of the two.
+        input_type = 'text'
+        # Bounded to the column. The scanner caps the paste at the same length before
+        # it is ever queued, so this only ever catches a caller that did not - and a
+        # silently truncated record beats a 500 on a receipt somebody is trying to file.
+        db_input_data = text.strip()[:TEXT_SUBMISSION_MAX_CHARS]
+        frontend_input_data = db_input_data
 
     new_submission = Submission(
         device_id=device.id, input_type=input_type,

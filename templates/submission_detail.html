@@ -184,6 +184,21 @@
                         </div>
                     </div>
 
+                    {# The paste, reproduced exactly.
+
+                       For a submission whose evidence is text there is nothing else to
+                       look at - no paper, no portal page - so this is the whole of what
+                       an admin is checking the model's reading against. Shown verbatim,
+                       whitespace and line breaks intact, because a LUKU SMS is read
+                       line by line and reflowing it into a paragraph is what makes a
+                       meter number stop looking like a meter number. #}
+                    {% if submission.input_type == 'text' %}
+                    <div class="mt-4">
+                        <p class="mb-2 text-sm text-gray-500">What was pasted</p>
+                        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ submission.input_data }}</pre>
+                    </div>
+                    {% endif %}
+
                     {% if photo_url %}
                     <div class="mt-4">
                         <p class="mb-2 text-sm text-gray-500">Photograph</p>

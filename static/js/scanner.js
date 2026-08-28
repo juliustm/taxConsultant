@@ -1125,8 +1125,26 @@
              * photograph that does not match what was on screen is not a better
              * photograph.
              */
-            async capture() {
+            /*
+             * One still off the live preview.
+             *
+             * `options.decode` is false when the person chose Photo rather than Scan
+             * QR, and it is false because the modes are supposed to mean what they say.
+             * A Photo that quietly decoded came back labelled with a receipt code
+             * nobody had asked it to read, which is the app overruling a choice that
+             * had just been made explicitly on screen.
+             *
+             * Nothing is lost by not reading it here. The photograph goes up at
+             * UNDECODED_MAX_EDGE - the larger of the two sizes, chosen precisely so the
+             * server can decode it - and utils/qr.py then works it over with contrast
+             * stretching and overlapping tiles, which is a better decoder than this one
+             * has any way to be on a phone. A receipt photographed with its QR code in
+             * shot still ends up verified against TRA; it just is not this screen's job
+             * to announce that before the picture has even been submitted.
+             */
+            async capture(options) {
                 if (!track) throw new Error('Camera is not running.');
+                var decode = !options || options.decode !== false;
 
                 // The frame after the tap, not the one before it.
                 await nextFrame(video);
@@ -1142,7 +1160,7 @@
                 // it, which is a worse answer than not reading it at all.
                 var framed = cropToViewfinder(full, video);
 
-                var text = await decodeStill(framed);
+                var text = decode ? await decodeStill(framed) : null;
                 return { text: text, blob: await toJpeg(framed, text ? null : UNDECODED_MAX_EDGE) };
             },
         };

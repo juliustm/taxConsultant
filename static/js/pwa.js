@@ -44,6 +44,12 @@
     var SYNC_INTERVAL_MS = 60000;
     var URL_BATCH_SIZE = 50;        // Matches SCAN_HISTORY_PAGE_SIZE on the server.
 
+    // The longest pasted purchase record this phone will queue. Matches
+    // TEXT_SUBMISSION_MAX_CHARS on the server, which is what the database column can
+    // actually hold - cutting it here as well means what someone sees in the box is
+    // what gets filed, rather than the server quietly trimming it afterwards.
+    var TEXT_MAX_CHARS = 1000;
+
     // A scan that has failed this many times is parked rather than retried forever. It
     // stays in the outbox and stays visible; it just stops consuming the sync loop.
     var MAX_ATTEMPTS = 8;
@@ -435,10 +441,16 @@
             // Which door it goes through, not what it is. An entry carrying a photograph
             // goes up as multipart whether or not it also carries a decoded URL - the
             // JSON batch has no way to send bytes - and the server works out from the
-            // pair that the URL is the input and the picture is evidence.
+            // pair that the URL is the input and the picture is evidence. A pasted
+            // record is text and nothing else, so it rides in the JSON batch too.
             kind: fields.photo ? 'photo' : 'url',
             receipturl: fields.receipturl || null,
             photo: fields.photo || null,
+            // The written record somebody was given instead of a receipt - a LUKU token
+            // SMS, a mobile money confirmation. Capped here rather than only on the
+            // server so an accidental paste of something enormous is not carried around
+            // in this phone's IndexedDB until it syncs.
+            text: (fields.text || '').slice(0, TEXT_MAX_CHARS) || null,
             description: fields.description || null,
             location: fields.location || null,
             // Normally now, because normally the receipt is in front of the camera. A
@@ -516,12 +528,13 @@
                 is_duplicate: result.status === 'duplicate',
                 received_at: new Date().toISOString(),
                 captured_at: entry.captured_at || null,
-                // Mirrors what ingest_submission decides on the server: a URL alongside
-                // a photograph is still a URL submission. Getting this wrong would show
-                // the row as a photo for the few seconds before the server's own version
-                // of it arrives and replaces this one.
-                input_type: entry.receipturl ? 'url' : 'photo',
-                input_data: entry.receipturl || null,
+                // Mirrors what ingest_submission decides on the server, in the same
+                // order it decides it: a URL beats a photograph, a photograph beats a
+                // paste. Getting this wrong would show the row as the wrong kind of
+                // thing for the few seconds before the server's own version of it
+                // arrives and replaces this one.
+                input_type: entry.receipturl ? 'url' : (entry.photo ? 'photo' : 'text'),
+                input_data: entry.receipturl || entry.text || null,
                 description: entry.description || null,
                 location: entry.location || null,
                 receipt: null,
@@ -703,6 +716,7 @@
                 return {
                     client_uuid: e.client_uuid,
                     receipturl: e.receipturl,
+                    text: e.text || null,
                     description: e.description,
                     location: e.location,
                     captured_at: e.captured_at,
@@ -1715,6 +1729,9 @@
         sessionToken: sessionToken, activate: activate, activationTokenFrom: activationTokenFrom,
         // queue
         queueScan: queueScan, outboxAll: outboxAll, outboxCount: outboxCount, discard: discard,
+        // The scanner's paste box counts down against this, so the limit is stated in
+        // one place rather than two that can drift.
+        TEXT_MAX_CHARS: TEXT_MAX_CHARS,
         // sync
         sync: sync, pullHistory: pullHistory, loadOlderHistory: loadOlderHistory,
         cachedHistory: cachedHistory, retrySubmission: retrySubmission, apiFetch: apiFetch,

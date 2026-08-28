@@ -136,12 +136,49 @@ still a business document worth recording, but it is not an EFD receipt and must
 be described as one - say which it is in `document_type`.
 """
 
+TEXT_RECORD_SYSTEM_PROMPT = """
+You are an expert in Tanzanian tax compliance (Income Tax Act / VAT Act) reading a
+written record of a purchase - not a receipt, but the text somebody was given instead
+of one.
+
+This is what a great many real expenses look like here. A LUKU electricity purchase
+comes back as an SMS carrying a meter number, a token and an amount. Water, DAWASCO
+bills, mobile money transfers, bank alerts, airtime top-ups and government payment
+confirmations all arrive the same way: a few lines of text, and nothing else will ever
+be issued for them.
+
+Record what the text actually says using `save_extracted_receipt_data`, then give a
+brief tax analysis. Transcribe only what is written: leave a field out rather than
+guessing at it, and never round or reconstruct an amount. Amounts are in TZS unless
+the text names another currency.
+
+Reading notes for the formats this sees most:
+
+  * The vendor is whoever was paid - TANESCO for a LUKU token, DAWASA for water, the
+    merchant named in a mobile money confirmation. The sender ID of an SMS is often the
+    best name available; use it rather than leaving the vendor blank.
+  * A LUKU token, a mobile money transaction ID, a bank reference or a control number
+    is the identifier for this payment. Put it in `receipt_number`.
+  * Do not put any of those in `receipt_verification_code`. That field means one thing
+    only: the code TRA prints beside the QR square on an EFD receipt. A transaction
+    reference is not one, and offering it as one sends us to look up a receipt that
+    does not exist.
+  * If the text is a pasted TRA verification code and time - and only then - transcribe
+    them into `receipt_verification_code` and `receipt_time` exactly as written.
+  * Units bought (kWh on a LUKU token), the meter or account number, and any service
+    charge or VAT line are worth recording as items.
+
+`document_type` is almost always 'other_receipt' here: a real proof of purchase, just
+not an EFD receipt. Use 'tra_efd_receipt' only if the text is a transcription of one,
+and 'not_a_receipt' if it records no purchase at all.
+"""
+
 VISION_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "save_extracted_receipt_data",
-            "description": "Saves the fields transcribed from a photographed receipt.",
+            "description": "Saves the fields transcribed from a receipt - photographed, or written out as text.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -966,36 +1003,63 @@ def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
     print(f"[LLM] Judgment received: category={judgment.get('category')}")
     return judgment
 
+# How much pasted text is worth sending to the model.
+#
+# Everything this path is for - a LUKU SMS, a mobile money confirmation, a bank alert -
+# is a few hundred characters. A cap exists because the box it arrives in accepts a
+# paste of any size, and a whole email thread or a copied web page would otherwise be
+# billed as input tokens on every retry. Generous enough that nothing real is cut.
+TEXT_RECORD_MAX_CHARS = 4000
+
+
 def extract_receipt_details(content, is_image, config):
     """
-    Reads a photographed receipt with the vision model.
+    Reads a receipt the only way left: by having a model transcribe it.
 
-    Only for photos. Receipts submitted as a TRA URL are parsed from the verified page
-    and never go through here.
+    Two inputs, one shape of answer. `is_image` True means `content` is a path to a
+    photograph and the vision model reads it. False means `content` is the text
+    somebody was given instead of a receipt - the LUKU SMS, the mobile money
+    confirmation - and the ordinary text model reads that. Both fill in the same tool
+    schema, so everything downstream (_store_llm_draft, _receipt_from_transcription,
+    the admin's field-by-field correction) has exactly one shape to handle.
+
+    Receipts submitted as a TRA URL never come through here at all: their facts are
+    parsed from the verified page. See utils/tra_parser.parse_receipt_html.
     """
     if not config or not config.llm_api_key:
         raise ValueError("LLM API key is not configured.")
 
-    if not is_image:
-        raise ValueError(
-            "Text receipts are parsed from the TRA verified page, not by the LLM. "
-            "See utils/tra_parser.parse_receipt_html."
-        )
+    if is_image:
+        messages = [
+            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please transcribe this receipt image and provide a tax analysis."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_to_base64(content)}"}},
+                ],
+            },
+        ]
+        kind = 'vision'
+        print("[LLM] Reading a photographed receipt with the vision model...")
+    else:
+        record = (content or '').strip()
+        if not record:
+            raise ValueError("There is no text to read.")
+        record = record[:TEXT_RECORD_MAX_CHARS]
+        messages = [
+            {"role": "system", "content": TEXT_RECORD_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": ("Record this purchase and provide a tax analysis. The text is "
+                            f"reproduced exactly as it was received:\n\n{record}"),
+            },
+        ]
+        kind = 'text'
+        print(f"[LLM] Reading a written purchase record ({len(record)} chars)...")
 
-    messages = [
-        {"role": "system", "content": VISION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Please transcribe this receipt image and provide a tax analysis."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_to_base64(content)}"}},
-            ],
-        },
-    ]
-
-    print("[LLM] Reading a photographed receipt with the vision model...")
     extracted_data = _call_with_fallback(
-        get_llm_client(config), config, 'vision', messages,
+        get_llm_client(config), config, kind, messages,
         tools=VISION_TOOLS, expected_name='save_extracted_receipt_data',
     )
     print(f"[LLM] Successfully parsed arguments: {json.dumps(extracted_data, indent=2)}")

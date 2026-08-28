@@ -412,6 +412,8 @@ def code_card(key, business, today):
         card.badge('verified by TRA', GOOD)
     elif receipt.extraction_source == 'llm_vision':
         card.badge('read from a photo', WARN)
+    elif receipt.extraction_source == 'llm_text':
+        card.badge('read from pasted text', WARN)
     if receipt.is_cancelled:
         card.badge('cancelled', BAD)
     if receipt.is_test:

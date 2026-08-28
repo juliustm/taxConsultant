@@ -138,8 +138,13 @@
                             x-transition:leave-end="opacity-0 scale-95">
                             <div class="flex items-start justify-between gap-3">
                                 <div class="min-w-0">
+                                    {# Three kinds of thing wait here now, and a row
+                                       that calls a pasted LUKU SMS 'Receipt' is a row
+                                       nobody can pick out of a queue of twenty. Text
+                                       shows its own first line, which is the only
+                                       thing that identifies it. #}
                                     <p class="font-mono text-sm font-semibold text-gray-900"
-                                       x-text="item.kind === 'photo' ? 'Photo' : (codeOf(item.receipturl) || 'Receipt')"></p>
+                                       x-text="outboxLabel(item)"></p>
                                     <p class="mt-0.5 text-xs text-gray-500" x-text="when(item.captured_at)"></p>
                                     <template x-if="item.attempts >= maxAttempts">
                                         <p class="mt-1 text-xs text-red-700">
@@ -709,7 +714,9 @@ function historyPage() {
             return amount.toLocaleString();
         },
 
-        outboxText(item) { return [item.receipturl, item.description].join(' '); },
+        // The pasted record is searchable too: 'LUKU' or a meter number is exactly
+        // how somebody looks for one of these in a queue.
+        outboxText(item) { return [item.receipturl, item.text, item.description].join(' '); },
 
         matches(text) {
             const q = this.query.trim().toLowerCase();
@@ -720,6 +727,25 @@ function historyPage() {
         codeOf(url) {
             const parsed = url ? Scanner.parseReceipt(url) : null;
             return parsed ? parsed.code : null;
+        },
+
+        /*
+         * What one waiting item is called, in the outbox's own vocabulary.
+         *
+         * Checked in the order the server files them (see ingest_submission): a decoded
+         * code names the row whatever else came with it, then a photograph, then the
+         * pasted record - which is named by its own first line, trimmed, because that
+         * is the only thing distinguishing one LUKU SMS from the next.
+         */
+        outboxLabel(item) {
+            const code = this.codeOf(item.receipturl);
+            if (code) return code;
+            if (item.kind === 'photo') return 'Photo';
+            if (item.text) {
+                const line = item.text.split('\n').find((part) => part.trim()) || item.text;
+                return line.trim().slice(0, 40) + (line.trim().length > 40 ? '…' : '');
+            }
+            return 'Receipt';
         },
 
         async drop(item) {

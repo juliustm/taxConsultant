@@ -1428,7 +1428,7 @@ def test_the_shutter_does_not_reconfigure_the_camera():
     and its own idea of the framing.
     """
     scanner = (STATIC / 'js' / 'scanner.js').read_text()
-    capture = re.search(r'async capture\(\) \{(.*?)\n            \},', scanner, re.S)
+    capture = re.search(r'async capture\(options\) \{(.*?)\n            \},', scanner, re.S)
     assert capture, 'capture() has moved; this asserts what it does not do'
     body = capture.group(1)
 
@@ -2332,7 +2332,7 @@ def test_the_shutter_crops_before_it_decodes():
     than not reading it at all, because it looks right.
     """
     scanner = (STATIC / 'js' / 'scanner.js').read_text()
-    capture = re.search(r'async capture\(\) \{(.*?)\n            \},', scanner, re.S)
+    capture = re.search(r'async capture\(options\) \{(.*?)\n            \},', scanner, re.S)
     assert capture, 'capture() has moved; this asserts what it does in what order'
     body = capture.group(1)
 
@@ -2346,24 +2346,22 @@ def test_a_decoded_code_no_longer_costs_the_photograph_it_was_read_from():
     """
     The half of a scan that used to be thrown away.
 
-    Both capture paths held a photograph and a decoded URL at the same moment, and
-    dropped the photograph on the reasoning that a verified receipt beats a picture of
-    one. They are not alternatives: the receipt TRA confirmed then had no image behind
-    it at all, and the server's own QR decoder only ever saw photographs this phone had
+    The import path holds a photograph and a decoded URL at the same moment, and used to
+    drop the photograph on the reasoning that a verified receipt beats a picture of one.
+    They are not alternatives: the receipt TRA confirmed then had no image behind it at
+    all, and the server's own QR decoder only ever saw photographs this phone had
     already failed to read - a selection effect that makes its hit rate look like a
     fault.
+
+    The shutter is asserted separately now, because it no longer decodes at all - see
+    test_photo_mode_does_not_read_qr_codes. It cannot discard a code it never read, and
+    the code is still recovered, on the server, from the photograph it kept.
     """
     scanner_view = (TEMPLATES / 'scan' / '_scanner.html').read_text()
 
-    # The shutter keeps the blob on both branches, not just the undecoded one.
-    take = re.search(r'async takePhoto\(\) \{(.*?)\n        \},', scanner_view, re.S)
-    assert take, 'takePhoto has moved'
-    assert "kind: 'qr'" in take.group(1) and 'blob: shot.blob' in take.group(1), \
-        'a decoded capture is still discarding its photograph'
-
-    # And the gallery import builds one shape for both outcomes rather than two.
-    imported = re.search(r'async importFromGallery\(event\) \{(.*?)\n        \},', scanner_view, re.S)
-    assert imported, 'importFromGallery has moved'
+    # The import builds one shape for both outcomes rather than two.
+    imported = re.search(r'async importFiles\(files\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert imported, 'importFiles has moved'
     assert 'blob: shot.blob' in imported.group(1)
 
     # Which is only worth anything if the outbox sends both up.
@@ -2376,3 +2374,53 @@ def test_a_decoded_code_no_longer_costs_the_photograph_it_was_read_from():
     pwa = (STATIC / 'js' / 'pwa.js').read_text()
     assert "form.append('receipturl', entry.receipturl)" in pwa, \
         'the photo upload is not carrying the code the phone read'
+
+
+def test_photo_mode_does_not_read_qr_codes():
+    """
+    Photo means photo, and the modes have to mean what they say.
+
+    The decode loop used to run in every mode, so lining a receipt up in Photo fired the
+    confirmation sheet on its QR code before the shutter had been touched - the app
+    overruling a choice the user had just made explicitly on screen. Two halves to the
+    fix and both matter: the live loop is paused outside Scan QR, and the still the
+    shutter takes is not run through the decoders either.
+
+    Nothing is lost. The photograph goes up at the larger of the two sizes and
+    utils/qr.py decodes it server-side, so a receipt photographed with its code in shot
+    still ends up verified against TRA.
+    """
+    scanner_view = (TEMPLATES / 'scan' / '_scanner.html').read_text()
+
+    take = re.search(r'async takePhoto\(\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert take, 'takePhoto has moved'
+    assert 'capture({ decode: false })' in take.group(1), \
+        'the shutter is decoding the still again'
+    assert "kind: 'photo'" in take.group(1) and 'blob: shot.blob' in take.group(1), \
+        'the shutter must still keep the photograph it took'
+
+    # One place decides whether the live loop runs, and the mode is one of its inputs.
+    decoding = re.search(r'get decoding\(\) \{(.*?)\n        \},', scanner_view, re.S)
+    assert decoding, 'the decoding getter has moved'
+    body = decoding.group(1)
+    assert "this.mode === 'qr'" in body, 'the mode no longer gates the decoder'
+    assert 'if (!this.session) return true;' in body, \
+        'activation reads a QR code whatever the mode switch says'
+
+    # And nothing else may resume the scanner behind its back.
+    assert 'this.scanner.resume()' not in scanner_view.replace(
+        'if (this.decoding) this.scanner.resume();', ''), \
+        'something resumes the decoder without consulting the mode'
+
+
+def test_photo_is_the_default_mode():
+    """
+    The default is the mode that always works.
+
+    Scanning a QR code is faster when it lands and is the mode that fails on a creased
+    receipt, in bad light, on a fading thermal print. A default that sometimes cannot do
+    the job teaches people the app is unreliable; a photograph is never refused.
+    """
+    scanner_view = (TEMPLATES / 'scan' / '_scanner.html').read_text()
+    assert re.search(r"^        mode: 'photo',$", scanner_view, re.M), \
+        'the scanner no longer opens in Photo mode'

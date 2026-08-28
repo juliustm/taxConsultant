@@ -235,12 +235,16 @@ def _check_verification(receipt, assessment):
 
     if receipt.receipt_verification_code:
         source = getattr(receipt, 'extraction_source', None)
-        detail = (
-            f'Verification code {receipt.receipt_verification_code}, read from the TRA '
-            'verified page.' if source == 'tra_html'
-            else f'Verification code {receipt.receipt_verification_code}, read from a photograph '
-                 'and not yet confirmed against the portal.'
-        )
+        if source == 'tra_html':
+            detail = (f'Verification code {receipt.receipt_verification_code}, read from '
+                      'the TRA verified page.')
+        else:
+            # Which of the two unverified readings this is matters to whoever has to
+            # chase it: a photograph can be looked at again, a paste cannot be looked
+            # at at all beyond the characters somebody sent.
+            read_from = 'pasted text' if source == 'llm_text' else 'a photograph'
+            detail = (f'Verification code {receipt.receipt_verification_code}, read from '
+                      f'{read_from} and not yet confirmed against the portal.')
         assessment.checks.append(Check(
             'verification', 'TRA verification', PASS if source == 'tra_html' else WARN, detail, weight=20,
         ))
