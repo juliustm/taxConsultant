@@ -49,7 +49,9 @@ def record(app, device):
     def _submit(text=LUKU_SMS, description=None):
         submission = Submission(
             device_id=device.id, input_type='text', input_data=text,
-            description=description,
+            # Both, as main.ingest_submission writes them: the sender's note lands in
+            # each, and only `description` is overwritten once a receipt is stored.
+            description=description, user_note=description,
         )
         db.session.add(submission)
         db.session.commit()
@@ -69,6 +71,10 @@ def reader(monkeypatch):
     import main
 
     calls = []
+    # The sender's note, as the model was given it. Hung off the fixture rather than
+    # returned beside `calls`, so that every test already asserting on what was read
+    # goes on reading the same list.
+    notes = []
 
     def _stub(**fields):
         data = {
@@ -80,11 +86,13 @@ def reader(monkeypatch):
         }
         data.update(fields)
 
-        def _extract(content, is_image, config):
+        def _extract(content, is_image, config, user_note=None):
             calls.append((content, is_image))
+            notes.append(user_note)
             return data
         monkeypatch.setattr(main, 'extract_receipt_details', _extract)
         return calls
+    _stub.notes = notes
     return _stub
 
 
@@ -235,3 +243,31 @@ def test_an_unconfigured_instance_fails_the_submission_rather_than_the_runner(
 
     assert submission.status == 'failed'
     assert Receipt.query.count() == 0
+
+
+def test_the_senders_note_is_read_alongside_the_pasted_record(
+        app, configured, record, reader, portal, judgment):
+    """
+    The note goes to the model with the paste.
+
+    A mobile money confirmation says who was paid and how much, and nothing whatever
+    about what for. 'Deposit for the Mwanza site fence' is the entire difference between
+    a repair and a capital asset, and it is typed by the person sending it - which is
+    the only moment anybody knows it.
+    """
+    import main
+
+    reader()
+    main.process_submission(record(description='Deposit for the Mwanza site fence'))
+
+    assert reader.notes == ['Deposit for the Mwanza site fence']
+
+
+def test_a_pasted_record_with_no_note_sends_none(app, configured, record, reader, portal, judgment):
+    """The absence of a note is not an empty note; nothing is added to the prompt."""
+    import main
+
+    reader()
+    main.process_submission(record())
+
+    assert reader.notes == [None]

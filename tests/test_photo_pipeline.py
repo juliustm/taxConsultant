@@ -86,7 +86,9 @@ def photo(app, device):
 
         submission = Submission(
             device_id=device.id, input_type='photo', input_data=filename,
-            description=description,
+            # Both, as main.ingest_submission writes them: the sender's note lands in
+            # each, and only `description` is overwritten once a receipt is stored.
+            description=description, user_note=description,
         )
         db.session.add(submission)
         db.session.commit()
@@ -100,6 +102,10 @@ def vision(monkeypatch):
     import main
 
     calls = []
+    # The sender's note, as the model was given it. Hung off the fixture rather than
+    # returned beside `calls`, so that every test already asserting on what was read
+    # goes on reading the same list.
+    notes = []
 
     def _stub(**fields):
         data = {
@@ -110,11 +116,13 @@ def vision(monkeypatch):
         }
         data.update(fields)
 
-        def _extract(content, is_image, config):
+        def _extract(content, is_image, config, user_note=None):
             calls.append(content)
+            notes.append(user_note)
             return data
         monkeypatch.setattr(main, 'extract_receipt_details', _extract)
         return calls
+    _stub.notes = notes
     return _stub
 
 
@@ -1387,3 +1395,68 @@ def test_declining_never_throws_away_an_address_typed_by_a_human(
 
     assert submission.rebuild_declined is True
     assert submission.recovered_url == RECEIPT_URL
+
+
+# --- The note that came with the photograph ---------------------------------------
+
+def test_the_senders_note_is_read_alongside_the_photograph(
+        app, configured, photo, vision, portal, judgment, monkeypatch):
+    """
+    The note goes to the model with the picture.
+
+    It is the one thing on a submission no amount of looking at the paper can produce.
+    'Diesel for the site generator' and 'diesel for the van' print identically and are
+    two different categories - one is fuel for plant, the other vehicle running - and
+    for a long while the box the phone offered for exactly that was collected, stored
+    and never sent anywhere.
+    """
+    import main
+
+    qr_finds(monkeypatch, None)
+    vision()
+    portal(error=TraReceiptNotUploaded('not uploaded'))
+    submission = photo(description='Diesel for the site generator, not the van')
+
+    main.process_submission(submission)
+
+    assert vision.notes == ['Diesel for the site generator, not the van']
+
+
+def test_a_photograph_with_no_note_sends_none(
+        app, configured, photo, vision, portal, judgment, monkeypatch):
+    """The absence of a note is not an empty note; nothing is added to the prompt."""
+    import main
+
+    qr_finds(monkeypatch, None)
+    vision()
+    portal(error=TraReceiptNotUploaded('not uploaded'))
+
+    main.process_submission(photo())
+
+    assert vision.notes == [None]
+
+
+def test_the_note_survives_the_model_writing_its_own_description(
+        app, configured, photo, vision, portal, judgment, monkeypatch):
+    """
+    What the sender typed is still there after the receipt lands.
+
+    `description` becomes the model's one-sentence summary the moment a receipt is
+    stored, which is what the dashboard row and the CSV export show. That used to be
+    the only copy, so the note was destroyed by the very run it was supposed to inform
+    - and the next re-analysis fed the model its own previous summary back under the
+    heading 'the person who submitted it added this note'.
+    """
+    import main
+
+    qr_finds(monkeypatch, None)
+    vision()
+    portal(error=TraReceiptNotUploaded('not uploaded'))
+    submission = photo(description='Client lunch - Mwanza tender')
+
+    main.process_submission(submission)
+
+    assert submission.status == 'completed'
+    assert submission.description == 'Plastic sheeting for the workshop.'
+    assert submission.user_note == 'Client lunch - Mwanza tender'
+    assert main._sender_note(submission) == 'Client lunch - Mwanza tender'

@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 
 from config import Config
 from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
-from utils import analytics, branding, compliance, geo, peek, qr
+from utils import analytics, branding, classify, compliance, geo, peek, qr
 from utils.images import store_photo
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
@@ -95,6 +95,7 @@ PENDING_COLUMNS = {
         ('photo_filename', 'VARCHAR(255)'),
         ('llm_draft', 'TEXT'),
         ('rebuild_declined', 'BOOLEAN NOT NULL DEFAULT 0'),
+        ('user_note', 'TEXT'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -124,6 +125,7 @@ PENDING_COLUMNS = {
         ('document_type', 'VARCHAR(30)'),
         ('source_html', 'TEXT'),
         ('category', 'VARCHAR(50)'),
+        ('category_corrected_at', 'DATETIME'),
         ('llm_status', 'VARCHAR(20)'),
         ('corrected_at', 'DATETIME'),
         ('corrected_fields', 'TEXT'),
@@ -188,6 +190,7 @@ def apply_pending_migrations():
     _backfill_vendors()
     _backfill_device_tokens()
     _backfill_photo_paths()
+    _backfill_user_notes()
 
 def _backfill_money(receipt_columns):
     """
@@ -291,6 +294,25 @@ def _backfill_photo_paths():
 
     db.session.commit()
     print(f"[Migration] Reduced {len(absolute)} photo path(s) to filenames.")
+
+def _backfill_user_notes():
+    """
+    Recovers the sender's own note from the column that used to hold it.
+
+    `description` was two things at once: what the person submitting typed, until a
+    receipt landed, and then the model's one-sentence summary written on top of it. A
+    submission that has not completed still holds the first of those, so it can be moved
+    where it belongs. One that has completed does not - those notes were overwritten
+    before this column existed and are simply gone.
+    """
+    result = db.session.execute(sa_text(
+        "UPDATE submission SET user_note = description "
+        "WHERE user_note IS NULL AND description IS NOT NULL AND description != '' "
+        "AND status != 'completed'"
+    ))
+    if result.rowcount:
+        print(f"[Migration] Moved {result.rowcount} sender note(s) to submission.user_note.")
+    db.session.commit()
 
 # Create database tables and seed with dummy data for demo
 with app.app_context():
@@ -565,6 +587,30 @@ TOP_VENDOR_LIMIT = 6
 # 'other' row. Past this the bars are too short to compare and the list is a legend.
 BREAKDOWN_LIMIT = 8
 
+# What the category filter is given to select the receipts that have no category.
+#
+# A filter value rather than a tab, because that is what makes it usable: 'uncategorised
+# receipts from that phone, last month' is the question somebody tidying up actually
+# asks, and it is one selection alongside the two they already had. Reserved as a
+# category name in utils.classify, so nothing can ever be filed under it for real.
+UNCATEGORISED = 'uncategorised'
+
+
+def _uncategorised():
+    """
+    The conditions that select a receipt somebody still has to categorise.
+
+    Three of them, and the two that are not about the category are what stop this from
+    being a backlog nobody can ever finish. A cancelled or test receipt is *meant* to
+    have no category - see _judge_receipt, which does not ask the model about one at
+    all - so counting those as work outstanding would leave a number on the categories
+    page that never reaches zero however much filing gets done.
+    """
+    return (
+        Receipt.id.isnot(None), Receipt.category.is_(None),
+        Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False),
+    )
+
 
 def _read_list(args, key, cast=None):
     """
@@ -687,7 +733,17 @@ def _filtered_submissions(filters, ordered=True):
 
     categories = _selection(filters, 'category')
     if categories:
-        query = query.filter(Receipt.category.in_(categories))
+        conditions = []
+        named = [category for category in categories if category != UNCATEGORISED]
+        if named:
+            conditions.append(Receipt.category.in_(named))
+        if UNCATEGORISED in categories:
+            # A stored receipt that nothing could categorise - not a submission that has
+            # no receipt yet, which the outer join also gives a null category. The two
+            # are opposite states: one has been looked at and come back blank, the other
+            # has not been looked at.
+            conditions.append(db.and_(*_uncategorised()))
+        query = query.filter(db.or_(*conditions))
 
     devices = _selection(filters, 'device')
     if devices:
@@ -950,11 +1006,21 @@ def _filter_facets(filters):
                     'key': key, 'label': key.split(':', 1)[-1], 'tin': None, 'count': 0,
                 })
 
+    # Offered whenever there is one to find, and whenever it is already applied - a
+    # selection that vanished from the picker the moment it emptied the table would
+    # leave no way to take it off again.
+    uncategorised = base.filter(*_uncategorised()).count()
+    categories_offered = [
+        {'key': category, 'label': classify.category_label(category), 'count': category_count}
+        for category, category_count in categories
+    ]
+    if uncategorised or UNCATEGORISED in _selection(filters, 'category'):
+        categories_offered.append({
+            'key': UNCATEGORISED, 'label': 'Uncategorised', 'count': uncategorised,
+        })
+
     return {
-        'categories': [
-            {'key': category, 'label': category.replace('_', ' '), 'count': category_count}
-            for category, category_count in categories
-        ],
+        'categories': categories_offered,
         # Every device, including the ones with nothing in range: an admin looking for
         # what a particular phone collected needs to see that the answer is none,
         # which a list that quietly omits it cannot say.
@@ -1456,6 +1522,21 @@ def _store_llm_draft(submission, data):
         print(f'[Photo] Could not store the transcription for submission {submission.id}: {e}')
 
 
+def _sender_note(submission):
+    """
+    What the person who submitted this receipt said about it, or None.
+
+    Read from `user_note` and never from `description`, which stops being their words
+    the moment a receipt lands on the submission (see _complete_submission). Reading the
+    wrong one is not merely stale: it hands the model its own previous summary back
+    under the heading 'the person who submitted it added this note', which is the shape
+    of mistake that makes a wrong category look independently confirmed.
+    """
+    if submission is None:
+        return None
+    return (submission.user_note or '').strip() or None
+
+
 def _stored_llm_draft(submission):
     """
     The stored transcription for a submission, or None.
@@ -1550,7 +1631,7 @@ def _receipt_from_photo(submission, config):
             return receipt
         print("[Photo] Portal would not confirm the decoded code; reading the photo instead.")
 
-    data = extract_receipt_details(photo_path, True, config)
+    data = extract_receipt_details(photo_path, True, config, user_note=_sender_note(submission))
 
     # Written before anything is done with it. Everything below this line can end in a
     # retry booked for tomorrow, and until this was stored that outcome took the whole
@@ -1620,7 +1701,8 @@ def _receipt_from_text(submission, config):
         if settled:
             return receipt
 
-    data = extract_receipt_details(submission.input_data, False, config)
+    data = extract_receipt_details(
+        submission.input_data, False, config, user_note=_sender_note(submission))
 
     # Stored before anything acts on it, for the reason spelled out in
     # _receipt_from_photo: everything below can end in a retry booked for tomorrow, and
@@ -1795,7 +1877,7 @@ def _judge_receipt(parsed, submission, config):
         return _unanalysed(parsed, 'no LLM provider is configured'), 'skipped'
 
     try:
-        return analyse_receipt(parsed.as_llm_facts(), config, user_note=submission.description), 'ok'
+        return analyse_receipt(parsed.as_llm_facts(), config, user_note=_sender_note(submission)), 'ok'
     except LlmUnavailable as e:
         print(f"[LLM] Storing submission {submission.id} without analysis: {e}")
         return _unanalysed(parsed, f'the analysis step was unavailable ({e})'), 'unavailable'
@@ -2056,6 +2138,66 @@ def api_submissions():
         _read_filters(request.args), _read_page(request.args), _read_page_size(request.args),
     ))
 
+
+# How many suppliers the correction form offers at once. Long enough that a name typed
+# two letters at a time narrows to the right one, short enough to be read rather than
+# scrolled.
+VENDOR_SUGGESTION_LIMIT = 8
+
+
+@app.route('/api/vendors/suggest')
+@login_required
+def api_vendor_suggest():
+    """
+    Suppliers we already hold, for the field an admin is typing a supplier into.
+
+    The point is not the typing saved. A supplier already in this database has a TIN we
+    fetched from TRA, a VRN, a tax office and thirty receipts grouped under them, and the
+    cost of typing their name in slightly differently is that the receipt in front of you
+    starts a second supplier with one receipt and no TIN - which then splits every total
+    that supplier appears in, silently, for good. Choosing the existing one instead is a
+    correction that files the receipt where it belongs and fills in the details off the
+    same row.
+
+    Matched on name and on TIN together, because both are printed on the paper and
+    whichever one is legible is the one that gets typed.
+    """
+    query = (request.args.get('q') or '').strip()
+    vendors = Vendor.query
+    if query:
+        pattern = f'%{query}%'
+        vendors = vendors.filter(db.or_(
+            Vendor.name.ilike(pattern), Vendor.tin.ilike(pattern), Vendor.vrn.ilike(pattern),
+        ))
+
+    # Ordered by how much of the book each supplier accounts for, so an empty box opens
+    # on the ones a receipt is most likely to be from rather than on the alphabet.
+    rows = (
+        db.session.query(Vendor, db.func.count(Receipt.id))
+        .outerjoin(Receipt, Receipt.vendor_id == Vendor.id)
+        .filter(Vendor.id.in_(vendors.with_entities(Vendor.id)))
+        .group_by(Vendor.id)
+        .order_by(db.func.count(Receipt.id).desc(), Vendor.name.asc())
+        .limit(VENDOR_SUGGESTION_LIMIT).all()
+    )
+
+    return jsonify({
+        'vendors': [
+            {
+                'key': vendor.lookup_key,
+                'name': vendor.name or '',
+                'tin': vendor.tin or '',
+                'vrn': vendor.vrn or '',
+                'phone': vendor.phone or '',
+                'tax_office': vendor.tax_office or '',
+                'count': count,
+                'href': url_for('vendor_detail', key=vendor.lookup_key),
+            }
+            for vendor, count in rows
+        ],
+    })
+
+
 @app.route('/api/peek/<kind>/<path:key>')
 @login_required
 def api_peek(kind, key):
@@ -2127,6 +2269,15 @@ def receipt_detail(receipt_id):
         correctable=CORRECTABLE_FIELDS,
         correction_values=correction_form_values(receipt),
         corrected_fields=json.loads(receipt.corrected_fields or '[]'),
+        # Every category that exists, so re-filing this receipt is a choice from what is
+        # already in use rather than a free-text box that invents a synonym per receipt.
+        # See the CATEGORIES section: naming a new one from here is still allowed, it is
+        # just resolved against these first.
+        categories=category_options(),
+        # What the sender typed in the box beside the camera. Shown because it is now
+        # part of how this receipt was categorised, and a reader who cannot see it has
+        # no way to tell why the model concluded what it did.
+        sender_note=_sender_note(receipt.submission),
     )
 
 # Windows the insights page can be run over. Kept only as an inbound alias now: the
@@ -3431,17 +3582,276 @@ def reanalyse_receipt(receipt_id):
     try:
         judgment = analyse_receipt(
             parsed.as_llm_facts(), config,
-            user_note=receipt.submission.description if receipt.submission else None,
+            user_note=_sender_note(receipt.submission),
         )
     except LlmUnavailable as e:
         return jsonify({'error': f'The analysis step is unavailable: {e}'}), 503
 
-    receipt.category = judgment.get('category')
+    # A category an admin set by hand is the one thing here the model does not get to
+    # revise. Re-analysis is for a prompt change or an outage, and neither is a reason to
+    # replace a person's decision with a fresh guess - the analysis beside it is rewritten
+    # either way, which is what was actually being asked for.
+    kept = receipt.category_corrected_at is not None
+    if not kept:
+        receipt.category = judgment.get('category')
     receipt.llm_status = 'ok'
     receipt.raw_llm_response = json.dumps(judgment)
     db.session.commit()
 
-    return jsonify({'receipt_id': receipt.id, 'receipt': receipt_to_dict(receipt, config)}), 200
+    return jsonify({
+        'receipt_id': receipt.id,
+        'receipt': receipt_to_dict(receipt, config),
+        'category_kept': kept,
+        'message': ('Re-analysed. The category you set by hand was kept.' if kept
+                    else 'Re-analysed.'),
+    }), 200
+
+
+# --- CATEGORIES ---
+#
+# A category is a judgment, and unlike the facts beside it there is no portal to settle
+# it. Two things produce one - the deterministic classifier in utils/classify and the
+# model - and both are sometimes wrong and sometimes silent: a receipt whose every line
+# reads 'SUMMARIZED SALE' comes back with no category at all, which is honest and
+# useless in equal measure. So an admin can set it, on any receipt, including the ones
+# TRA verified - the portal supplied those numbers, never the reason for them.
+#
+# The whole difficulty is doing that without ending the quarter with 'fuel', 'Fuel',
+# 'fuel costs' and 'diesel' as four lines in one report. Two rules keep that from
+# happening, and between them there is nothing left for an admin to be careful about:
+#
+#   * Nothing is stored as it was typed. utils.classify.resolve_category reduces the
+#     text to a slug and matches it against the categories that already exist, so the
+#     ordinary outcome of naming a category is landing on the one already there.
+#   * The list of categories is read off the receipts rather than kept in a table beside
+#     them. A category no receipt carries is not a category - it is a name somebody has
+#     already moved away from - and a list derived from use cannot accumulate those.
+#
+# Renaming is the same edit applied to every receipt at once, which is also how two
+# categories become one: rename either onto the other's name and there is one left.
+
+
+def categories_in_use():
+    """How many receipts carry each category, as {category: count}."""
+    return dict(
+        db.session.query(Receipt.category, db.func.count(Receipt.id))
+        .filter(Receipt.category.isnot(None), Receipt.category != '')
+        .group_by(Receipt.category).all()
+    )
+
+
+def category_options(in_use=None):
+    """
+    Every category that may be chosen, ordered as somebody picking one wants them.
+
+    The fixed set plus whatever an admin has since named, most-used first: the category
+    you are about to want is nearly always one you have used a lot of, and the rest of
+    the fixed set is a short tail underneath rather than a list to read through.
+    """
+    in_use = categories_in_use() if in_use is None else in_use
+    canonical = classify.EXPENSE_CATEGORIES
+    names = list(canonical) + sorted(set(in_use) - set(canonical))
+    return sorted(
+        (
+            {
+                'key': name, 'label': classify.category_label(name),
+                'count': in_use.get(name, 0),
+                # Named on this instance rather than shipped with it. Shown as such,
+                # because a category the classifier will never produce on its own is one
+                # somebody has to keep applying by hand.
+                'custom': name not in classify.EXPENSE_CATEGORIES,
+            }
+            for name in names
+        ),
+        key=lambda option: (-option['count'], option['label']),
+    )
+
+
+def _set_category(receipt, category):
+    """Writes a hand-chosen category onto a receipt. Returns whether it changed."""
+    changed = receipt.category != category
+    receipt.category = category
+    # Stamped even when the value did not change: an admin confirming the model's
+    # category is still a person having decided it, and it is that - not the string -
+    # which re-analysis is told to leave alone.
+    receipt.category_corrected_at = datetime.utcnow()
+    return changed
+
+
+def _resolve_typed_category(typed, in_use):
+    """
+    One reading of a category name somebody typed, as (category, existed, refusal).
+
+    Shared by the two routes below so that they accept and refuse exactly the same
+    things: a name that will not do on a receipt must not be renameable onto the whole
+    book, and an admin who has just been told why should not get different wording in
+    the other place.
+    """
+    category, existed = classify.resolve_category(typed, in_use)
+    if category is not None:
+        return category, existed, None
+
+    if classify.normalise_category(typed) in classify.RESERVED_CATEGORIES:
+        return None, False, (
+            f"'{typed}' is this app's word for a receipt that has no category, so nothing "
+            'can be filed under it. Clear the category instead.'
+        )
+    return None, False, (
+        f"'{typed}' cannot be used as a category name. Try a word or two describing "
+        'the expense.'
+    )
+
+
+@app.route('/receipts/<int:receipt_id>/category', methods=['POST'])
+@login_required
+def set_receipt_category(receipt_id):
+    """
+    Files one receipt under the category a human chose.
+
+    Takes the category as text rather than as a fixed choice, because the two things
+    being asked for here are one request: 'the one I already use for this' and 'a new
+    one, now, without leaving the page'. Which of them happened is decided by
+    resolve_category and reported back, so the answer to 'have I just invented a
+    duplicate' is on screen rather than in next quarter's report.
+
+    Sending nothing clears the category, and clears the hand-set mark with it - which is
+    how a receipt is handed back to the model to categorise on the next re-analysis.
+    """
+    receipt = db.session.get(Receipt, receipt_id)
+    if receipt is None:
+        return jsonify({'error': 'No such receipt.'}), 404
+
+    typed = (request.form.get('category') or '').strip()
+    if not typed:
+        receipt.category = None
+        receipt.category_corrected_at = None
+        db.session.commit()
+        return jsonify({
+            'receipt_id': receipt.id, 'category': None, 'label': 'Uncategorised',
+            'existed': False, 'changed': True,
+            'message': 'Category cleared. The model may fill it in on the next re-analysis.',
+        }), 200
+
+    category, existed, refusal = _resolve_typed_category(typed, categories_in_use())
+    if refusal:
+        return jsonify({'error': refusal}), 400
+
+    changed = _set_category(receipt, category)
+    db.session.commit()
+    print(f"[Category] Receipt {receipt.id} filed under '{category}' by hand.")
+
+    label = classify.category_label(category)
+    return jsonify({
+        'receipt_id': receipt.id, 'category': category, 'label': label,
+        'existed': existed, 'changed': changed,
+        'message': (f'Filed under {label}.' if existed else
+                    f'Filed under {label}, which is new - it is offered on every receipt '
+                    'from now on.'),
+    }), 200
+
+
+@app.route('/categories')
+@login_required
+def manage_categories():
+    """
+    Every category in the book, what it is worth, and the two repairs it needs.
+
+    The repairs are the point of the page. One is the receipts nothing could categorise,
+    which are invisible everywhere else - they carry no chip, so on the dashboard they
+    look exactly like the receipts that were categorised correctly. The other is two
+    categories that mean one thing, which is what a free-text field would produce daily
+    and this one still produces occasionally.
+    """
+    in_use = categories_in_use()
+    spend = dict(
+        db.session.query(Receipt.category, db.func.sum(Receipt.total_incl_tax_cents))
+        .filter(Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False))
+        .group_by(Receipt.category).all()
+    )
+    hand_set = dict(
+        db.session.query(Receipt.category, db.func.count(Receipt.id))
+        .filter(Receipt.category_corrected_at.isnot(None))
+        .group_by(Receipt.category).all()
+    )
+
+    rows = [
+        {**option, 'total_cents': spend.get(option['key']) or 0,
+         'hand_set': hand_set.get(option['key'], 0)}
+        for option in category_options(in_use)
+    ]
+    total_cents = sum(row['total_cents'] for row in rows)
+    for row in rows:
+        row['share'] = _share(row['total_cents'], total_cents)
+
+    return render_template(
+        'categories.html',
+        # Split rather than sorted into one list: a category with nothing in it is not a
+        # small category, it is an offer, and mixing the two makes the book read as if it
+        # were mostly empty.
+        rows=[row for row in rows if row['count']],
+        unused=[row for row in rows if not row['count']],
+        uncategorised=Receipt.query.filter(*_uncategorised()).count(),
+        uncategorised_cents=spend.get(None) or 0,
+        total_cents=total_cents,
+    )
+
+
+@app.route('/categories/rename', methods=['POST'])
+@login_required
+def rename_category():
+    """
+    Renames a category across every receipt carrying it - which is also how two of them
+    are merged into one.
+
+    There is deliberately no separate merge. Renaming onto a name already in use *is*
+    the merge, and an admin who has just noticed two spellings of one category should not
+    have to work out which of two operations this app files that under. The response says
+    which of them happened and how many receipts moved, because those are the two things
+    that cannot be seen afterwards.
+    """
+    source, _ = classify.resolve_category(request.form.get('from'), categories_in_use())
+    if source is None:
+        return jsonify({'error': 'Say which category is being renamed.'}), 400
+
+    typed = (request.form.get('to') or '').strip()
+    if not typed:
+        return jsonify({
+            'error': 'Give the new name. To empty a category instead, rename it onto '
+                     'another one - clearing it would leave those receipts with nothing.',
+        }), 400
+
+    in_use = categories_in_use()
+    target, existed, refusal = _resolve_typed_category(typed, in_use)
+    if refusal:
+        return jsonify({'error': refusal}), 400
+
+    if target == source:
+        return jsonify({
+            'error': f'{classify.category_label(source)} already has that name.',
+        }), 409
+
+    receipts = Receipt.query.filter(Receipt.category == source).all()
+    if not receipts:
+        return jsonify({'error': 'No receipts carry that category.'}), 409
+
+    for receipt in receipts:
+        _set_category(receipt, target)
+    db.session.commit()
+
+    moved = len(receipts)
+    merged = in_use.get(target, 0) if existed else 0
+    print(f"[Category] Renamed '{source}' to '{target}' on {moved} receipt(s).")
+
+    return jsonify({
+        'from': source, 'to': target, 'label': classify.category_label(target),
+        'moved': moved, 'merged': bool(merged),
+        'message': (
+            f"{moved} receipt{'' if moved == 1 else 's'} moved into "
+            f'{classify.category_label(target)}'
+            + (f', which already held {merged}. There is one category now.'
+               if merged else '.')
+        ),
+    }), 200
 
 @app.route('/admin/setup', methods=['GET', 'POST'])
 def setup():
@@ -3609,6 +4019,10 @@ def configure_instance():
         # Photographed receipts degrade quietly without it - they are read by the model
         # instead of verified against TRA - so the one place it can be noticed is here.
         qr_decoder_problem=qr.unavailable_reason(),
+        # Two numbers, not a list: the Categories tab hands over to its own page, and
+        # what it owes a reader here is whether that page is worth opening.
+        category_count=len(categories_in_use()),
+        uncategorised=Receipt.query.filter(*_uncategorised()).count(),
     )
 
 # --- DEVICE MANAGEMENT ---
@@ -4383,7 +4797,9 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
         device_id=device.id, input_type=input_type,
         input_data=db_input_data, # Save the full filesystem path to the DB
         photo_filename=photo_filename,
-        description=description, location=location,
+        # Both, and they diverge from here: `description` is overwritten with the
+        # model's summary once a receipt lands, `user_note` stays what was typed.
+        description=description, user_note=description, location=location,
         client_uuid=client_uuid, captured_at=captured_at,
         # Read before anything is queued. A submission that never verifies still has
         # its receipt's identity on it, which is what the admin needs to chase it.

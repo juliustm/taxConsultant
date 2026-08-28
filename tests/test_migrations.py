@@ -120,9 +120,9 @@ def test_migration_adds_the_new_schema(legacy_database):
     receipt_columns = main._table_columns('receipt')
     assert {'total_incl_tax_cents', 'is_cancelled', 'source_html', 'vendor_id',
             'efd_serial', 'z_number', 'tax_office', 'receipt_time',
-            'corrected_at', 'corrected_fields'} <= receipt_columns
+            'corrected_at', 'corrected_fields', 'category_corrected_at'} <= receipt_columns
     assert {'next_attempt_at', 'claimed_at', 'client_uuid', 'captured_at',
-            'corrected_at'} <= main._table_columns('submission')
+            'corrected_at', 'user_note'} <= main._table_columns('submission')
     assert {'business_name', 'business_tin', 'business_vrn'} <= main._table_columns('instance_config')
     assert {'enrolment_token', 'session_token_hash', 'revoked_at', 'last_seen_at',
             'activated_at', 'created_at'} <= main._table_columns('device')
@@ -331,3 +331,46 @@ def test_migration_leaves_a_placeholder_only_vendor_unregistered(legacy_database
     vendor = Vendor.query.one()
     assert vendor.vrn is None
     assert vendor.is_vat_registered is False
+
+
+def test_migration_rescues_the_sender_notes_that_are_still_recoverable(legacy_database):
+    """
+    `description` held two different things by turns, and the migration can only save
+    one of them.
+
+    It starts as what the person submitting typed and is overwritten with the model's
+    own summary the moment a receipt lands. So a submission that has not completed still
+    holds the sender's words and they can be moved to the column that now keeps them; a
+    completed one holds the model's sentence, and moving that would be worse than losing
+    it - it would come back to the model later labelled as a human's note.
+    """
+    import main
+
+    for index, (status, description) in enumerate([
+        ('queued', 'Diesel for the site generator'),
+        ('failed', 'Client lunch, Mwanza tender'),
+        ('completed', 'Plastic sheeting for the workshop.'),
+        ('queued', None),
+    ], start=10):
+        db.session.execute(sa_text(
+            "INSERT INTO submission (id, received_at, status, input_type, input_data,"
+            " description, device_id) VALUES (:id, :now, :status, 'photo', 'x.jpg',"
+            " :description, 1)"
+        ), {'id': index, 'now': datetime.utcnow(), 'status': status,
+            'description': description})
+    db.session.commit()
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    from models.user import Submission
+    notes = {row.id: row.user_note for row in Submission.query.filter(Submission.id >= 10)}
+    assert notes == {
+        10: 'Diesel for the site generator',
+        11: 'Client lunch, Mwanza tender',
+        12: None,
+        13: None,
+    }
+    # And the column it came out of is left exactly as it was: the dashboard row and the
+    # CSV export both read it, and this migration is not the place to change what they show.
+    assert db.session.get(Submission, 10).description == 'Diesel for the site generator'

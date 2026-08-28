@@ -134,6 +134,13 @@ receipt verification code and usually a Z number and an EFD serial. A handwritte
 chit, a parking stub, a proforma invoice, a delivery note or a foreign till slip is
 still a business document worth recording, but it is not an EFD receipt and must not
 be described as one - say which it is in `document_type`.
+
+The photograph sometimes arrives with a note from the person who took it. Treat it the
+way you would treat them standing beside you: it says what the paper cannot - which
+vehicle the diesel went into, whose lunch it was, what the job was for - and it is
+often the only thing that settles the category and the business purpose. It is not part
+of the receipt. Never transcribe a figure, a date, a TIN or a code out of it, and where
+it contradicts what is printed, what is printed wins.
 """
 
 TEXT_RECORD_SYSTEM_PROMPT = """
@@ -171,6 +178,12 @@ Reading notes for the formats this sees most:
 `document_type` is almost always 'other_receipt' here: a real proof of purchase, just
 not an EFD receipt. Use 'tra_efd_receipt' only if the text is a transcription of one,
 and 'not_a_receipt' if it records no purchase at all.
+
+The paste sometimes arrives with a note from the person who sent it, given separately
+from the record itself. It says what the text cannot - which meter the token was for,
+what the transfer was paying - and it is often the only thing that settles the category
+and the business purpose. It is not part of the record: never transcribe a figure, a
+date or a reference out of it, and where it contradicts the record, the record wins.
 """
 
 VISION_TOOLS = [
@@ -974,8 +987,7 @@ def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
         "already verified - use them, do not restate them.\n\n"
         f"{json.dumps(facts, indent=None, separators=(',', ':'))}"
     )
-    if user_note:
-        prompt += f"\n\nThe person who submitted it noted: {user_note}"
+    prompt += _note_block(user_note)
 
     messages = [
         {"role": "system", "content": JUDGMENT_SYSTEM_PROMPT},
@@ -1011,8 +1023,31 @@ def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
 # billed as input tokens on every retry. Generous enough that nothing real is cut.
 TEXT_RECORD_MAX_CHARS = 4000
 
+# And how much of the sender's note. It is one line typed on a phone with a receipt in
+# the other hand; anything past this is a paste that belongs in the record itself.
+USER_NOTE_MAX_CHARS = 600
 
-def extract_receipt_details(content, is_image, config):
+
+def _note_block(user_note):
+    """
+    The sender's note as a labelled block, or '' when there is none.
+
+    Labelled every time it is sent, and always after the document, because the thing to
+    avoid is the model reading it as more of the receipt. What somebody typed on a phone
+    is not evidence of what was printed - it is the reason the purchase happened, which
+    is exactly the half of the categorisation question the paper never answers.
+    """
+    note = ' '.join((user_note or '').split())[:USER_NOTE_MAX_CHARS]
+    if not note:
+        return ''
+    return (
+        '\n\nThe person who submitted it added this note. It is context for the category '
+        'and the business purpose, not part of the document - do not transcribe anything '
+        f'out of it:\n{note}'
+    )
+
+
+def extract_receipt_details(content, is_image, config, user_note=None):
     """
     Reads a receipt the only way left: by having a model transcribe it.
 
@@ -1023,25 +1058,34 @@ def extract_receipt_details(content, is_image, config):
     schema, so everything downstream (_store_llm_draft, _receipt_from_transcription,
     the admin's field-by-field correction) has exactly one shape to handle.
 
+    `user_note` is what the person submitting it typed in the box beside the camera. It
+    reaches the model with the document because it answers the question the document
+    cannot - 'diesel for the generator, not the van' is the whole difference between two
+    categories, and no amount of looking at the paper will produce it. It is labelled as
+    a note rather than run together with the receipt, and the prompts above say plainly
+    that nothing may be transcribed out of it: it decides the judgment, never the facts.
+
     Receipts submitted as a TRA URL never come through here at all: their facts are
     parsed from the verified page. See utils/tra_parser.parse_receipt_html.
     """
     if not config or not config.llm_api_key:
         raise ValueError("LLM API key is not configured.")
 
+    note = _note_block(user_note)
     if is_image:
         messages = [
             {"role": "system", "content": VISION_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Please transcribe this receipt image and provide a tax analysis."},
+                    {"type": "text",
+                     "text": "Please transcribe this receipt image and provide a tax analysis." + note},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_to_base64(content)}"}},
                 ],
             },
         ]
         kind = 'vision'
-        print("[LLM] Reading a photographed receipt with the vision model...")
+        print(f"[LLM] Reading a photographed receipt with the vision model{' (with a note)' if note else ''}...")
     else:
         record = (content or '').strip()
         if not record:
@@ -1052,11 +1096,12 @@ def extract_receipt_details(content, is_image, config):
             {
                 "role": "user",
                 "content": ("Record this purchase and provide a tax analysis. The text is "
-                            f"reproduced exactly as it was received:\n\n{record}"),
+                            f"reproduced exactly as it was received:\n\n{record}{note}"),
             },
         ]
         kind = 'text'
-        print(f"[LLM] Reading a written purchase record ({len(record)} chars)...")
+        print(f"[LLM] Reading a written purchase record ({len(record)} chars"
+              f"{', with a note' if note else ''})...")
 
     extracted_data = _call_with_fallback(
         get_llm_client(config), config, kind, messages,

@@ -147,7 +147,21 @@ class Submission(db.Model):
     status = db.Column(db.String(20), nullable=False, default='queued', index=True)
     input_type = db.Column(db.String(10), nullable=False)
     input_data = db.Column(db.String(1024), nullable=False)
+    # What this submission is *about*, in one line. Written by whoever submitted it and
+    # then, once a receipt lands, overwritten with the model's own one-sentence summary
+    # - which is what the dashboard row and the CSV export both read.
     description = db.Column(db.Text, nullable=True)
+    # What the person who submitted it said about it, kept apart from `description`
+    # because that column stops being their words the moment the receipt is stored.
+    #
+    # It is the only thing on a submission that no automation can derive: 'diesel for
+    # the generator, not the van', 'client lunch - Mwanza tender'. A photograph shows
+    # what was bought and never why, and the why is what decides the category and half
+    # the deductibility question. So it goes to the model with the photograph, the
+    # pasted SMS and the verified facts alike (see main._sender_note), and it has to
+    # still be here on the retry tomorrow and the re-analysis next month - which it was
+    # not, while the LLM's summary was landing on top of it.
+    user_note = db.Column(db.Text, nullable=True)
     location = db.Column(db.String(255), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     # The exception class behind the last failure, stored as its own field rather than
@@ -423,6 +437,15 @@ class Receipt(db.Model):
     # answered is "which of these numbers is still the model's?".
     corrected_fields = db.Column(db.Text, nullable=True)
     category = db.Column(db.String(50), nullable=True, index=True)
+    # When an admin last set the category by hand.
+    #
+    # Kept apart from corrected_fields, which is about the printed facts on the receipt
+    # panel, because the category is not one of those: it is a judgment, it is the
+    # model's on every receipt including the ones TRA verified, and it is the one thing
+    # here a person may overrule on any receipt at all. Its presence is also an
+    # instruction - re-analysis leaves a hand-set category alone rather than replacing
+    # somebody's decision with a fresh guess. See main.set_receipt_category.
+    category_corrected_at = db.Column(db.DateTime, nullable=True)
     # 'ok', 'unavailable' (the model could not be reached) or 'skipped'.
     llm_status = db.Column(db.String(20), nullable=True)
     processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)

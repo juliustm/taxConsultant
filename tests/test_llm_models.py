@@ -716,3 +716,40 @@ def test_the_salvaged_receipt_still_names_itself_on_tras_portal():
 
     assert llm_processor.reconstructed_receipt_url(data) == (
         'https://verify.tra.go.tz/66FF047250_095433')
+
+
+# --- The note the sender typed ----------------------------------------------
+
+def test_the_senders_note_is_labelled_rather_than_run_into_the_document():
+    """
+    The note is context, and the model has to be able to tell it from the paper.
+
+    Run together with the receipt it is transcribable text, and a model that reads
+    'about 40,000 of diesel' out of somebody's aside has invented an amount nothing was
+    printed with. Labelled, with the instruction attached, it can still decide the
+    category - which is the whole reason it is sent.
+    """
+    block = llm_processor._note_block('Diesel for the site generator')
+
+    assert block.startswith('\n\n')
+    assert 'do not transcribe anything out of it' in block
+    assert block.rstrip().endswith('Diesel for the site generator')
+
+
+def test_no_note_adds_nothing_at_all():
+    """An absent note is not an empty heading; nothing is appended."""
+    for empty in (None, '', '   ', '\n\t'):
+        assert llm_processor._note_block(empty) == ''
+
+
+def test_a_note_is_bounded_like_every_other_thing_a_phone_can_paste():
+    """
+    The box accepts a paste of any size, and every retry pays for it again.
+
+    Whitespace is squashed on the way in too: a note pasted out of a chat arrives with
+    the line breaks of wherever it was written, and those buy nothing here.
+    """
+    block = llm_processor._note_block('word  \n  word ' * 400)
+
+    assert 'word word' in block
+    assert len(block) < 1200

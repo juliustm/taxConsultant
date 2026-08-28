@@ -103,15 +103,17 @@
                         </div>
                         <div class="hidden sm:-my-px sm:ml-6 sm:flex sm:space-x-8">
                             {# A receipt page is reached from the dashboard, so it keeps that tab lit.
-                            Queue and Devices used to live here too - Queue duplicated the
-                            dashboard's own 'Queued' tab, and Devices is one click inside
-                            Settings, so both were dropped rather than left as redundant. #}
+                            Queue, Devices and Categories are all reached from inside Settings
+                            and light it up rather than adding a sixth and seventh name up here -
+                            Queue duplicated the dashboard's own 'Queued' tab, and the other two
+                            are pages you visit when something needs tidying, not places the day
+                            is spent. This bar is for the four views of the book. #}
                             {% set nav_items = [
                             ('index', 'Dashboard', ['index', 'receipt_detail']),
                             ('insights', 'Insights', ['insights']),
                             ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
                             ('vendors', 'Vendors', ['vendors']),
-                            ('configure_instance', 'Settings', ['configure_instance', 'manage_devices']),
+                            ('configure_instance', 'Settings', ['configure_instance', 'manage_devices', 'manage_categories']),
                             ] %}
                             {% for endpoint, label, active_on in nav_items %}
                             <a href="{{ url_for(endpoint) }}" class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium

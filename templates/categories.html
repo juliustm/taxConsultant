@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{#
+  What the money was spent *on*, and the two things that go wrong with it.
+
+  /vendors answers who was paid; this answers what for. The difference between them is
+  that a vendor is a fact - TRA issued the TIN - and a category is a judgment made by a
+  classifier and a language model, either of which can be wrong and both of which can
+  come back with nothing at all. So this page is not a report. It is the two repairs:
+  the receipts nothing categorised, and the categories that turned out to be one
+  category spelled twice.
+#}
+
+{% macro money(cents) -%}
+    {%- if cents is none -%}---{%- else -%}{{ '{:,.0f}'.format(cents / 100) }}{%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+<div x-data="categoriesPage()" class="px-4 sm:px-0">
+
+    <div class="md:flex md:items-center md:justify-between">
+        <div>
+            <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Categories</h1>
+            <p class="mt-1 text-sm text-gray-500">
+                What each category is worth, and what still needs filing. Renaming one moves every
+                receipt under it &mdash; rename onto a name already in use and the two become one.
+            </p>
+        </div>
+        {# Back to where this page is reached from, which is the Categories tab in
+           Settings rather than the top bar - this is a page for tidying up, not one of
+           the daily views of the book. #}
+        <a href="{{ url_for('configure_instance', tab='categories') }}"
+           class="mt-4 text-sm font-medium text-indigo-600 hover:text-indigo-500 md:mt-0">&larr; Back to settings</a>
+    </div>
+
+    <p x-show="message" x-cloak class="mt-4 rounded-md p-3 text-sm"
+       :class="failed ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-900'" x-text="message"></p>
+
+    {# The receipts nothing could categorise. First, because it is the only thing on this
+       page that is a backlog: everywhere else they look exactly like receipts that were
+       categorised correctly, since what they carry is no chip at all. #}
+    {% if uncategorised %}
+    <div class="mt-6 rounded-lg bg-amber-50 p-5 ring-1 ring-inset ring-amber-600/20">
+        <h2 class="text-base font-semibold text-amber-900">
+            {{ uncategorised }} receipt{{ '' if uncategorised == 1 else 's' }}
+            {{ 'carries' if uncategorised == 1 else 'carry' }} no category
+        </h2>
+        <p class="mt-1 text-sm text-amber-800">
+            {{ money(uncategorised_cents) }} TZS in all. That is what a receipt whose lines all read
+            &lsquo;SUMMARIZED SALE&rsquo; looks like, or one processed while the model was unreachable.
+            Each one is a category away from being reportable.
+        </p>
+        <a href="{{ url_for('index', tab='processed', category='uncategorised') }}"
+           class="mt-3 inline-flex items-center rounded-md bg-amber-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-500">
+            Show them
+        </a>
+    </div>
+    {% endif %}
+
+    <div class="mt-6 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+        <div class="border-b border-gray-200 px-6 py-4">
+            <h2 class="text-base font-semibold text-gray-900">In use</h2>
+            <p class="mt-1 text-sm text-gray-500">
+                {{ money(total_cents) }} TZS filed across {{ rows|length }} categor{{ 'y' if rows|length == 1 else 'ies' }}.
+                Cancelled and test receipts are excluded from the totals.
+            </p>
+        </div>
+
+        {% if rows %}
+        <ul class="divide-y divide-gray-100">
+            {% for row in rows %}
+            <li class="px-6 py-4">
+                <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-x-2">
+                            <a class="peek text-sm font-medium text-gray-900"
+                               href="{{ url_for('index', tab='processed', category=row.key) }}"
+                               data-peek="category:{{ row.key }}">{{ row.label }}</a>
+                            {% if row.custom %}
+                            <span class="inline-flex items-center rounded-md bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+                                  title="Named on this instance. The classifier will not produce it on its own.">named here</span>
+                            {% endif %}
+                        </div>
+                        <p class="mt-0.5 text-xs text-gray-500">
+                            {{ row.count }} receipt{{ '' if row.count == 1 else 's' }}
+                            &middot; {{ row.share }}% of spending
+                            {% if row.hand_set %}&middot; {{ row.hand_set }} set by hand{% endif %}
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-x-4">
+                        <span class="font-mono text-sm text-gray-900">{{ money(row.total_cents) }}</span>
+                        <button type="button" @click="startRename('{{ row.key }}')"
+                                class="text-sm font-semibold text-indigo-600 hover:text-indigo-500">Rename</button>
+                    </div>
+                </div>
+
+                {# The bar is the whole reason the totals are worth looking at: a category
+                   is unremarkable until you can see it is a third of the book. #}
+                <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div class="h-1.5 rounded-full bg-indigo-500" style="width: {{ row.share }}%"></div>
+                </div>
+
+                <div x-show="renaming === '{{ row.key }}'" x-cloak class="mt-3 rounded-md bg-gray-50 p-4 ring-1 ring-inset ring-gray-200">
+                    <label for="rename-{{ row.key }}" class="block text-xs font-medium uppercase tracking-wide text-gray-500">
+                        Move {{ row.count }} receipt{{ '' if row.count == 1 else 's' }} to
+                    </label>
+                    <input id="rename-{{ row.key }}" x-model="target" x-ref="rename-{{ row.key }}" type="text"
+                           list="category-names" autocomplete="off" spellcheck="false"
+                           @keydown.enter.prevent="rename()" @keydown.escape="renaming = null"
+                           placeholder="An existing category, or a new name"
+                           class="mt-1 block w-full rounded-md border-0 py-1.5 text-sm text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600">
+                    <p class="mt-1 text-xs text-gray-500">
+                        Typing the name of a category that already exists merges the two. A name is matched
+                        however it is capitalised or pluralised, so there is no way to create a near-duplicate
+                        of one already here.
+                    </p>
+                    <div class="mt-3 flex items-center gap-x-3">
+                        <button type="button" @click="rename()" :disabled="busy || !target.trim()"
+                                class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
+                            <span x-text="busy ? 'Moving...' : 'Rename'"></span>
+                        </button>
+                        <button type="button" @click="renaming = null" :disabled="busy"
+                                class="text-sm font-semibold text-gray-600 hover:text-gray-900 disabled:opacity-50">Cancel</button>
+                    </div>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="px-6 py-8 text-center text-sm text-gray-500">Nothing is categorised yet.</p>
+        {% endif %}
+    </div>
+
+    {# The rest of the fixed set. Listed rather than hidden because the question an admin
+       has on this page is 'what can I file this under', and a category with nothing in it
+       yet is a perfectly good answer to it. #}
+    {% if unused %}
+    <div class="mt-6 rounded-lg bg-white p-6 shadow ring-1 ring-black ring-opacity-5">
+        <h2 class="text-base font-semibold text-gray-900">Not used yet</h2>
+        <p class="mt-1 text-sm text-gray-500">
+            Part of the fixed set every receipt is classified against, with nothing filed under them
+            so far. They need no setting up &mdash; they are offered on every receipt already.
+        </p>
+        <div class="mt-3 flex flex-wrap gap-1.5">
+            {% for row in unused %}
+            <span class="inline-flex items-center rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600">{{ row.label }}</span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# Offered to the rename box by the browser itself, so merging into an existing
+       category is a pick rather than a spelling test. #}
+    <datalist id="category-names">
+        {% for row in rows + unused %}<option value="{{ row.label }}"></option>{% endfor %}
+    </datalist>
+</div>
+
+<script>
+function categoriesPage() {
+    return {
+        renaming: null,
+        target: '',
+        busy: false,
+        message: '',
+        failed: false,
+
+        startRename(key) {
+            this.renaming = key;
+            this.target = '';
+            this.message = '';
+            this.$nextTick(() => this.$refs[`rename-${key}`]?.focus());
+        },
+
+        async rename() {
+            if (!this.target.trim()) return;
+            this.busy = true;
+            this.failed = false;
+            try {
+                const body = new FormData();
+                body.append('from', this.renaming);
+                body.append('to', this.target);
+                const response = await fetch('{{ url_for('rename_category') }}', { method: 'POST', body });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'That rename was refused.');
+
+                this.message = payload.message;
+                // Every count, total and share on this page is derived from what just
+                // moved, so the honest redraw is a reload rather than a patched-up row.
+                setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                this.failed = true;
+                this.message = error.message;
+                this.busy = false;
+            }
+        },
+    }
+}
+</script>
+{% endblock %}
