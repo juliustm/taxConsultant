@@ -7,7 +7,7 @@
  * a fading head, creased across the middle, curled, photographed in a dim shop, and
  * overlaid with the security watermark the paper stock already carried.
  *
- * Three decisions follow from that:
+ * Four decisions follow from that:
  *
  *   1. Resolution beats framerate. A small code has few pixels per module, so the
  *      camera is asked for 1920 on its long edge - and asked again once the track can
@@ -25,6 +25,15 @@
  *      scanner that only insists is worse than useless in the field. After a few
  *      seconds the app offers the photo path instead, which the server already
  *      handles end to end.
+ *
+ *   4. The photograph is what was on screen. The camera is configured once, when it
+ *      opens, and never touched again - because on a phone whose rear camera is one
+ *      virtual device in front of three lenses, changing a track's format resets the
+ *      zoom, and resetting the zoom changes the lens. A shutter that reconfigures the
+ *      camera to grab more pixels hands back a wider picture than the one that was
+ *      framed, which is worth less than the smaller one: the extra pixels land on the
+ *      table around the receipt, not on the receipt. So the still is the preview frame,
+ *      cropped to what was on the glass and nothing narrower. See capture().
  */
 (function (global) {
     'use strict';
@@ -130,6 +139,30 @@
     };
 
     /*
+     * The same options, minus the pass a QR code cannot need.
+     *
+     * `tryRotate` re-runs the whole detector on a rotated copy of the image, which is
+     * how a decoder finds a barcode printed sideways. A QR code's finder patterns are
+     * three corners of a square: the detector reads it at any angle already, and the
+     * rotated pass is a second full search that can only find what the first one did.
+     * On the live loop - the only place the cost is paid ten times a second, and on
+     * exactly the phones with no native detector to fall back to - that pass is pure
+     * latency, and latency here reads as "the scanner is slow" and then as "the scanner
+     * does not work", because a frame still being decoded is a frame the next one
+     * queues behind.
+     *
+     * Dropped on the live path only. A still gets one look and can afford everything;
+     * see decodeStill, which keeps the full set.
+     */
+    var ZXING_LIVE_OPTIONS = {};
+    for (var zxingOption in ZXING_OPTIONS) {
+        if (Object.prototype.hasOwnProperty.call(ZXING_OPTIONS, zxingOption)) {
+            ZXING_LIVE_OPTIONS[zxingOption] = ZXING_OPTIONS[zxingOption];
+        }
+    }
+    ZXING_LIVE_OPTIONS.tryRotate = false;
+
+    /*
      * ZXing in a worker, where it belongs.
      *
      * See decoder-worker.js for why: on a phone with no native detector this decode is
@@ -193,7 +226,8 @@
         });
     }
 
-    async function decodeWithZXing(canvas) {
+    async function decodeWithZXing(canvas, options) {
+        options = options || ZXING_OPTIONS;
         var ctx = canvas.getContext('2d', { willReadFrequently: true });
         var image = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
@@ -201,7 +235,7 @@
         // structured-cloning that ten times a second is its own performance problem.
         // getImageData hands us a fresh buffer each call, so giving it away is safe.
         var viaWorker = askWorker(
-            { buffer: image.data.buffer, width: image.width, height: image.height, options: ZXING_OPTIONS },
+            { buffer: image.data.buffer, width: image.width, height: image.height, options: options },
             [image.data.buffer]
         );
 
@@ -221,7 +255,7 @@
         }
 
         var zxing = await getZXing();
-        var results = await zxing.readBarcodesFromImageData(image, ZXING_OPTIONS);
+        var results = await zxing.readBarcodesFromImageData(image, options);
         if (results && results.length && results[0].text) return results[0].text;
         return null;
     }
@@ -316,14 +350,108 @@
         return true;
     }
 
-    // How long to let the camera reconfigure, and how many frames to let it settle
-    // afterwards. Both deliberately short: this sits between the user pressing the
-    // shutter and the photo appearing, and a still that arrives late enough to feel
-    // broken is worse than one taken at the preview's resolution.
-    var FULL_RES_DEADLINE_MS = 900;
-    var SETTLE_FRAMES = 3;
+    /*
+     * The box an element occupies on screen, in CSS pixels, or null if it has none.
+     *
+     * getBoundingClientRect rather than clientWidth/clientHeight, because the element
+     * this is asked about is the `position: fixed` viewfinder and its offset from the
+     * top of the viewport is half the answer - a rect carries it, a width does not. The
+     * clientWidth branch is for the test harness and for any element that answers a
+     * rect of zeroes because it is not laid out yet.
+     */
+    function elementBox(el) {
+        if (!el) return null;
+        if (typeof el.getBoundingClientRect === 'function') {
+            var rect = el.getBoundingClientRect();
+            if (rect && rect.width && rect.height) {
+                return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+            }
+        }
+        if (el.clientWidth && el.clientHeight) {
+            return { left: 0, top: 0, width: el.clientWidth, height: el.clientHeight };
+        }
+        return null;
+    }
 
-    /* One delivered frame, where the browser will say so, and one paint otherwise. */
+    /*
+     * Crops a captured frame down to exactly the part of it a person could see.
+     *
+     * The viewfinder is `object-fit: cover` (static/css/scan.css): the video is scaled
+     * until it fills the screen and whatever hangs over the edges is cut off. A phone
+     * held upright is a 9:19.5-ish screen showing a 9:16 or 3:4 sensor, so the part cut
+     * off is substantial - a fifth of the frame down each side is routine - and it is
+     * cut off only in the preview. `capture()` draws the whole video, so without this
+     * the photograph would contain a band of floor, table and thumb down each side that
+     * nobody had seen, let alone framed. What that costs is not only tidiness: those
+     * bands are pixels inside the upload budget, so the receipt itself arrives smaller
+     * than it needed to be, and the QR code with it.
+     *
+     * The screen, and nothing narrower. This briefly cropped to photo mode's corner
+     * brackets instead, on the reasoning that the brackets are an instruction - "fit the
+     * receipt in here" - and should therefore be the boundary. In the hand it was the
+     * more confusing of the two mistakes: the brackets are inset from the screen edges,
+     * so a receipt that was fully visible in the preview came back with its top or its
+     * last line cut off, and there was nothing on screen to explain which. A viewfinder
+     * that keeps less than it shows is not a viewfinder. So what is on the glass is what
+     * is saved, and the brackets now sit at the edge of it (see .photo-frame) rather
+     * than describing a second, smaller frame nobody was told about.
+     *
+     * The arithmetic is `cover` run backwards. `cover` scales the frame by
+     * max(boxW/vw, boxH/vh) and centres it on the element, so a point on screen divides
+     * back through that scale to land on a source pixel.
+     *
+     * Falls back to the window, and then to no crop: a photograph with too much in it
+     * beats no photograph.
+     */
+    function cropToViewfinder(canvas, video) {
+        var view = elementBox(video)
+            || (global.innerWidth && global.innerHeight
+                ? { left: 0, top: 0, width: global.innerWidth, height: global.innerHeight }
+                : null);
+        if (!view || !canvas.width || !canvas.height) return canvas;
+
+        var target = view;
+
+        var scale = Math.max(view.width / canvas.width, view.height / canvas.height);
+        if (!scale || !isFinite(scale)) return canvas;
+
+        // Where source pixel (0,0) sits on screen once `cover` has scaled and centred it.
+        var originX = view.left + (view.width - canvas.width * scale) / 2;
+        var originY = view.top + (view.height - canvas.height * scale) / 2;
+
+        var sx = Math.round((target.left - originX) / scale);
+        var sy = Math.round((target.top - originY) / scale);
+        var w = Math.round(target.width / scale);
+        var h = Math.round(target.height / scale);
+
+        // Clamped, because rounding at the edges of a scaled rectangle can ask for a
+        // pixel past the end of what the sensor gave us - and drawImage with a source
+        // rectangle outside the image is a transparent band, not a crop.
+        sx = Math.max(0, Math.min(sx, canvas.width - 1));
+        sy = Math.max(0, Math.min(sy, canvas.height - 1));
+        w = Math.max(1, Math.min(w, canvas.width - sx));
+        h = Math.max(1, Math.min(h, canvas.height - sy));
+
+        // Nothing to give up: do not re-encode the whole photograph for a rounding
+        // difference.
+        if (sx === 0 && sy === 0 && w === canvas.width && h === canvas.height) return canvas;
+
+        var cropped = global.document.createElement('canvas');
+        cropped.width = w;
+        cropped.height = h;
+        cropped.getContext('2d', { willReadFrequently: true })
+               .drawImage(canvas, sx, sy, w, h, 0, 0, w, h);
+        return cropped;
+    }
+
+    /*
+     * One delivered frame, where the browser will say so, and one paint otherwise.
+     *
+     * The shutter waits on this before it draws. A tap is a moment of movement - the
+     * finger lands, the phone dips - and the frame already sitting in the element is
+     * the one from before that. Waiting for the next one costs a sixtieth of a second
+     * and is the difference between a sharp receipt and a smeared one.
+     */
     function nextFrame(video) {
         return new Promise(function (resolve) {
             if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(function () { resolve(); });
@@ -331,84 +459,6 @@
         });
     }
 
-    /*
-     * Waits for the video element to actually be producing the frames we asked for.
-     *
-     * `applyConstraints` resolving means the track has accepted the new mode, not that a
-     * frame in it has arrived - and on a phone the camera is genuinely reconfiguring
-     * hardware, which takes a moment. Drawing before that lands copies the old
-     * resolution, or worse a torn frame from the middle of the switch.
-     *
-     * Two waits, because either alone is wrong. The dimensions must change - or the
-     * deadline pass, since a camera is free to have given us nothing new and this may
-     * not hang the shutter on it - and then a few more frames must go by: the first
-     * frame at a new mode is routinely mis-exposed and still hunting for focus, which on
-     * a QR code is the difference between a read and a retake.
-     */
-    async function settleAfterModeChange(video, wasEdge, deadlineMs) {
-        var until = Date.now() + deadlineMs;
-        while (Date.now() < until) {
-            if (Math.max(video.videoWidth, video.videoHeight) !== wasEdge) break;
-            await nextFrame(video);
-        }
-        for (var i = 0; i < SETTLE_FRAMES; i++) await nextFrame(video);
-    }
-
-    /*
-     * The still, at the best resolution this camera actually has.
-     *
-     * This exists because of what the fallback used to be. Where `ImageCapture` is
-     * missing - which means every iPhone, since WebKit has never shipped it - `capture`
-     * simply drew the viewfinder, and the viewfinder is a preview stream: negotiated for
-     * smooth playback at a size chosen to be cheap, routinely 720x1280 on a phone whose
-     * sensor holds twelve megapixels. A receipt's QR code in such a frame is about sixty
-     * pixels across, under two pixels per module, and it is unreadable by this decoder,
-     * by the one on the server, and by any preprocessing either of them could apply.
-     * That single fallback is why server-side decoding on iOS never once succeeded.
-     *
-     * So the track is asked for its maximum just long enough to take the frame, and put
-     * back afterwards. Not left raised: the preview loop decodes ten frames a second and
-     * doing that at full sensor resolution is a hot phone and a stuttering viewfinder,
-     * which is the trade PREVIEW_TARGET_EDGE already settled for the live path.
-     *
-     * Every step is allowed to fail into the old behaviour. A camera that will not
-     * change mode, or has no capabilities to report, still yields the preview frame -
-     * which is exactly what this used to do, and is worth having over an error.
-     */
-    async function grabAtFullResolution(track, video, canvas) {
-        var restore = null;
-        var wasEdge = Math.max(video.videoWidth || 0, video.videoHeight || 0);
-
-        try {
-            var caps = track.getCapabilities ? track.getCapabilities() : null;
-            var settings = track.getSettings ? track.getSettings() : {};
-            var upright = (settings.height || 0) > (settings.width || 0);
-            var limit = caps && (upright ? caps.height : caps.width);
-            var current = Math.max(settings.width || 0, settings.height || 0);
-
-            if (limit && limit.max && limit.max > current) {
-                // Only the long edge is constrained, so the camera keeps its own aspect
-                // ratio instead of being asked for a mode it does not have - the same
-                // reasoning as raiseResolution, and the same failure if ignored.
-                restore = upright ? { height: { ideal: settings.height } }
-                                  : { width: { ideal: settings.width } };
-                await track.applyConstraints(
-                    upright ? { height: { ideal: limit.max } } : { width: { ideal: limit.max } });
-                await settleAfterModeChange(video, wasEdge, FULL_RES_DEADLINE_MS);
-            }
-        } catch (e) { /* the preview resolution is still a photograph */ }
-
-        var drew = drawFull(video, canvas);
-
-        // Restored even when the draw failed, or the viewfinder is left running at full
-        // sensor resolution for the rest of the session.
-        if (restore) {
-            try {
-                await track.applyConstraints(restore);
-            } catch (e) { /* it will be corrected the next time the camera is opened */ }
-        }
-        return drew;
-    }
 
     // ------------------------------------------------------------- camera
 
@@ -456,31 +506,218 @@
      */
     var PREVIEW_TARGET_EDGE = 1920;
 
-    async function raiseResolution(track) {
-        if (!track.getCapabilities || !track.applyConstraints) return;
+    /*
+     * Close enough to leave alone.
+     *
+     * A format change is not free and it is not invisible: on a phone whose rear camera
+     * is one virtual device in front of three lenses, reconfiguring the format resets
+     * the zoom factor, and the zoom factor is which lens you are looking through. So a
+     * stream that came back at 1600 when 1920 was asked for is not worth correcting -
+     * the twenty percent of extra pixels does not decide any receipt, and the price of
+     * asking is a viewfinder that jumps to the ultra-wide.
+     */
+    var RESOLUTION_SLACK = 1.25;
+
+    /*
+     * Everything this track needs, asked for once.
+     *
+     * One call rather than two, and that is the whole point of the function. Per spec
+     * `applyConstraints` replaces a track's entire constraint set - it is not a patch -
+     * so the old pair of calls, focus hints and then resolution, meant the second one
+     * silently discarded the first. Continuous autofocus was requested on every camera
+     * open and taken away again a moment later, every time, which on a phone being held
+     * over a small printed code is most of the difference between a scanner that reads
+     * and one that hunts.
+     *
+     * Every step is allowed to fail: a camera that reports no capabilities, or refuses
+     * the constraint, still streams at whatever it negotiated, which is a working
+     * scanner.
+     */
+    async function tuneCamera(track) {
+        if (!track.applyConstraints) return;
+
+        var caps = null;
+        var settings = {};
         try {
-            var caps = track.getCapabilities();
-            var settings = track.getSettings ? track.getSettings() : {};
-            var upright = (settings.height || 0) > (settings.width || 0);
-            var limit = upright ? caps.height : caps.width;
-            if (!limit || !limit.max) return;
+            caps = track.getCapabilities ? track.getCapabilities() : null;
+            settings = (track.getSettings ? track.getSettings() : {}) || {};
+        } catch (e) { /* nothing to tune against; fall through and do nothing */ }
+        if (!caps) return;
 
-            var target = Math.min(PREVIEW_TARGET_EDGE, limit.max);
-            if (target <= Math.max(settings.width || 0, settings.height || 0)) return;
+        var upright = (settings.height || 0) > (settings.width || 0);
+        var current = Math.max(settings.width || 0, settings.height || 0);
+        var wanted = {};
 
+        var limit = upright ? caps.height : caps.width;
+        if (limit && limit.max) {
             // Only the long edge, so the browser keeps the camera's own aspect ratio
             // rather than being asked for a mode that does not exist and falling back
             // to something smaller than it started with.
-            await track.applyConstraints(
-                upright ? { height: { ideal: target } } : { width: { ideal: target } });
+            var target = Math.min(PREVIEW_TARGET_EDGE, limit.max);
+            if (target > current * RESOLUTION_SLACK) {
+                if (upright) wanted.height = { ideal: target };
+                else wanted.width = { ideal: target };
+            }
+        }
+
+        var advanced = [];
+        if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) {
+            advanced.push({ focusMode: 'continuous' });
+        }
+        if (!advanced.length && !wanted.height && !wanted.width) return;
+
+        if (advanced.length) {
+            wanted.advanced = advanced;
+            // Pinned to what it is already streaming when the resolution needs no
+            // change. Sending the focus hint on its own would clear the size and aspect
+            // ratio getUserMedia negotiated and let the camera pick a format again -
+            // which is the same reconfiguration, and the same lens reset, arriving by a
+            // side door.
+            if (!wanted.height && !wanted.width && current) {
+                if (upright) wanted.height = { ideal: settings.height };
+                else wanted.width = { ideal: settings.width };
+            }
+        }
+
+        try {
+            await track.applyConstraints(wanted);
         } catch (e) { /* the stream is still usable at whatever it negotiated */ }
     }
 
-    function requestCamera() {
+    /*
+     * Which of this phone's cameras to open, remembered between launches.
+     *
+     * `facingMode: 'environment'` is a request for "a rear camera", not for a
+     * particular one, and on a phone with three of them the browser picks. What it
+     * picks is frequently the ultra-wide - it is the one the platform considers the
+     * default - and an ultra-wide is the worst of the three for this job: the shortest
+     * focal length, the closest minimum focus, and a receipt held at arm's length
+     * rendered small in the middle of a very wide frame, which is the exact condition
+     * under which a QR code stops having enough pixels per module to decode. There is
+     * no constraint that says "the main camera"; the only way to reach a specific one
+     * is by its deviceId, and the only way to know which deviceId is the good one is to
+     * let whoever is holding the phone try them.
+     *
+     * localStorage rather than the IndexedDB store the rest of the app uses, and that
+     * is forced rather than preferred: the camera is opened by an inline script in
+     * <head> (templates/scan/shell.html) before pwa.js has parsed, let alone opened a
+     * database. A preference that can only be read asynchronously is one that arrives
+     * after the wrong camera is already running, and correcting it then costs a second
+     * getUserMedia and a visible flicker on every single launch.
+     */
+    var CAMERA_PREF_KEY = 'karani.camera.deviceId';
+
+    function preferredCameraId() {
+        try {
+            return global.localStorage.getItem(CAMERA_PREF_KEY) || null;
+        } catch (e) {
+            // Private mode on older WebKit throws on access rather than returning null.
+            return null;
+        }
+    }
+
+    function rememberCamera(deviceId) {
+        try {
+            if (deviceId) global.localStorage.setItem(CAMERA_PREF_KEY, deviceId);
+            else global.localStorage.removeItem(CAMERA_PREF_KEY);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /*
+     * The cameras this device has, as {deviceId, label, isDefault}.
+     *
+     * Labels are empty until a camera permission has been granted - the spec hides them
+     * from an unprivileged page, because the list of cameras is itself a fingerprint -
+     * so a caller that wants readable names has to ask after the stream is open. The
+     * numbering is provided here rather than left to the caller so that an unlabelled
+     * list is still something a person can work through: "Camera 2" is a poor name and
+     * a perfectly good instruction.
+     */
+    async function listCameras() {
+        if (!global.navigator.mediaDevices || !global.navigator.mediaDevices.enumerateDevices) {
+            return [];
+        }
+        var devices;
+        try {
+            devices = await global.navigator.mediaDevices.enumerateDevices();
+        } catch (e) {
+            return [];
+        }
+        var preferred = preferredCameraId();
+        var index = 0;
+        return (devices || [])
+            .filter(function (device) { return device.kind === 'videoinput'; })
+            .map(function (device) {
+                index += 1;
+                return {
+                    deviceId: device.deviceId,
+                    label: device.label || ('Camera ' + index),
+                    labelled: !!device.label,
+                    selected: !!preferred && device.deviceId === preferred,
+                };
+            });
+    }
+
+    /*
+     * The camera constraints, with a remembered camera named where there is one.
+     *
+     * `exact`, not `ideal`, and that matters: an `ideal` deviceId is a suggestion the
+     * browser may decline, which would silently hand back the same default camera the
+     * preference exists to escape and leave the diagnostics screen claiming a choice
+     * that never took effect. `exact` fails loudly instead, and requestCamera below
+     * turns that failure into a retry with no preference at all - so a stale id (a
+     * cleaned-up device, a USB camera unplugged) costs one extra call rather than a
+     * scanner that will not open.
+     */
+    function constraintsFor(deviceId) {
+        if (!deviceId) return CAMERA_CONSTRAINTS;
+        var video = {};
+        for (var key in CAMERA_CONSTRAINTS.video) {
+            if (Object.prototype.hasOwnProperty.call(CAMERA_CONSTRAINTS.video, key)) {
+                video[key] = CAMERA_CONSTRAINTS.video[key];
+            }
+        }
+        // The two cannot both be honoured, and naming a device is the more specific
+        // request: facingMode left in place is what lets a browser answer with a
+        // different camera than the one that was asked for.
+        delete video.facingMode;
+        video.deviceId = { exact: deviceId };
+        return { audio: false, video: video };
+    }
+
+    /*
+     * Which camera a stream is actually coming from, or null where the browser will not
+     * say. Null is "cannot tell", never "wrong one" - see switchCamera.
+     */
+    function streamDeviceId(stream) {
+        try {
+            var tracks = stream && stream.getVideoTracks ? stream.getVideoTracks() : [];
+            var first = tracks[0];
+            return first && first.getSettings ? (first.getSettings().deviceId || null) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function requestCamera(deviceId) {
         if (!global.navigator.mediaDevices || !global.navigator.mediaDevices.getUserMedia) {
             return Promise.reject(new Error('This browser cannot open a camera.'));
         }
-        return global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+        var wanted = deviceId === undefined ? preferredCameraId() : deviceId;
+        if (!wanted) return global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+
+        return global.navigator.mediaDevices.getUserMedia(constraintsFor(wanted))
+            .catch(function (error) {
+                // A remembered camera that no longer exists must never be the reason
+                // this app cannot scan. Fall back to whatever the phone offers, and
+                // leave the preference alone: an id that fails once because another app
+                // holds the camera is not an id worth forgetting.
+                if (error && error.name === 'NotAllowedError') throw error;
+                return global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+            });
     }
 
     /*
@@ -524,18 +761,6 @@
         }
         global.__cameraPromise = requestCamera();
         return global.__cameraPromise;
-    }
-
-    async function applyFocusHints(track) {
-        if (!track.getCapabilities) return;
-        try {
-            var caps = track.getCapabilities();
-            var advanced = [];
-            if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) {
-                advanced.push({ focusMode: 'continuous' });
-            }
-            if (advanced.length) await track.applyConstraints({ advanced: advanced });
-        } catch (e) { /* the stream is still usable without these */ }
     }
 
     function hasTorch(track) {
@@ -590,7 +815,7 @@
                 if (!text) {
                     if (attempts % STRETCH_EVERY === 0) stretchContrast(canvas);
                     try {
-                        text = await decodeWithZXing(canvas);
+                        text = await decodeWithZXing(canvas, ZXING_LIVE_OPTIONS);
                         engineOk = true;
                     } catch (e) {
                         // A decoder that cannot run is not "no code in this frame", and
@@ -658,8 +883,7 @@
 
                 track = stream.getVideoTracks()[0] || null;
                 if (track) {
-                    await applyFocusHints(track);
-                    await raiseResolution(track);
+                    await tuneCamera(track);
                 }
 
                 hasNative = !!(await getBarcodeDetector());
@@ -754,14 +978,99 @@
 
                 track = stream.getVideoTracks()[0] || null;
                 if (track) {
-                    await applyFocusHints(track);
-                    await raiseResolution(track);
+                    await tuneCamera(track);
                 }
                 report('onStarted', { torch: track ? hasTorch(track) : false, native: hasNative });
                 return true;
             },
 
+            /*
+             * Swaps to another of the phone's cameras, and remembers the choice.
+             *
+             * The old stream is stopped first and deliberately: a phone will not
+             * generally hand out two of its rear cameras at once, so asking for the new
+             * one while still holding the old is how this fails with NotReadableError on
+             * exactly the devices that have a camera worth switching to.
+             *
+             * Which is also why the old stream cannot simply be dropped on failure.
+             * Once it is stopped it is gone, so if the new camera will not open, this
+             * reopens with no preference rather than leaving a viewfinder that is black
+             * and a scanner that is running - the state that reads as "the app broke
+             * when I touched the settings".
+             */
+            async switchCamera(deviceId) {
+                var wasRunning = running;
+                running = false;
+
+                if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+                global.__cameraPromise = null;
+
+                var opened;
+                var honoured;
+                try {
+                    opened = await requestCamera(deviceId);
+                    // requestCamera answers an exact deviceId it cannot open by
+                    // reopening with no preference at all, so a stream coming back is
+                    // not the same thing as the switch having happened. Checked against
+                    // what is really streaming, because a preference saved for a camera
+                    // the phone declined is the bug this exists to stop: the settings
+                    // screen ticks a lens that is not running, the viewfinder never
+                    // changes, and every launch after this one pays for a getUserMedia
+                    // that falls back anyway.
+                    //
+                    // A browser that will not report a deviceId at all counts as
+                    // honoured. "Cannot tell" is not "wrong", and refusing to save on
+                    // it would make the preference unusable on the phones that need it.
+                    var got = streamDeviceId(opened);
+                    honoured = !deviceId || !got || got === deviceId;
+                } catch (e) {
+                    opened = await requestCamera(null);
+                    honoured = !deviceId;
+                }
+                rememberCamera(honoured ? deviceId : null);
+
+                global.__cameraPromise = Promise.resolve(opened);
+                stream = opened;
+                video.srcObject = stream;
+                try {
+                    await video.play();
+                } catch (e) { /* a tap resumes it; the stream itself is fine */ }
+
+                track = stream.getVideoTracks()[0] || null;
+                if (track) {
+                    await tuneCamera(track);
+                }
+
+                report('onStarted', { torch: track ? hasTorch(track) : false, native: hasNative });
+                if (wasRunning) {
+                    running = true;
+                    startedAt = Date.now();
+                    attempts = 0;
+                    struggling = false;
+                    pump();
+                }
+                // Three facts rather than one id, because the caller's job is to tell
+                // someone the truth about what just happened, and "here is a deviceId"
+                // cannot distinguish a switch that worked from a phone that quietly
+                // gave the same camera back.
+                return {
+                    requested: deviceId || null,
+                    deviceId: streamDeviceId(opened),
+                    honoured: honoured,
+                };
+            },
+
             get torchAvailable() { return track ? hasTorch(track) : false; },
+
+            /* Which camera is actually feeding the viewfinder, for the settings list to
+               tick - the preference says what was asked for, this says what was given. */
+            get activeCameraId() {
+                try {
+                    return track && track.getSettings ? (track.getSettings().deviceId || null) : null;
+                } catch (e) {
+                    return null;
+                }
+            },
 
             /* What can actually read a code right now, for the diagnostics screen. */
             get engineStatus() {
@@ -784,42 +1093,75 @@
             },
 
             /*
-             * Grabs a still.
+             * Grabs a still - the one the viewfinder was showing, and no more.
              *
-             * Tried at the sensor's full resolution first, which is often several times
-             * what the preview stream carries, and decoded once before giving up on the
-             * code - a frame that video could not read frequently reads here. Whatever
-             * happens, the caller gets a JPEG small enough to sit in an outbox and cross
-             * a mobile connection.
+             * This used to raise the track to the sensor's maximum for the duration of
+             * the shutter and put it back afterwards, which was wrong in two ways that
+             * only show up on real hardware.
              *
-             * Both routes to those pixels are here because neither is available
-             * everywhere, and the difference between them is the difference between a
-             * receipt TRA confirms and one a model guesses at. See grabAtFullResolution.
+             * The first is what it looked like. Changing a track's format is not a
+             * resolution change on a phone with three rear lenses; it is a
+             * reconfiguration, and the camera comes back at its default zoom - which on
+             * a modern iPhone means the ultra-wide. So the preview showed a receipt
+             * filling the frame, the shutter silently switched lens, and the photograph
+             * that came out was the same receipt small in the middle of a table. The
+             * crop below could not save it: it crops to what the viewfinder showed, and
+             * by then the viewfinder was showing something else.
+             *
+             * The second is what it cost. Two applyConstraints calls and up to a second
+             * of waiting for frames to settle sat between the tap and the picture, on
+             * the one interaction in this app where the phone is being held over a
+             * receipt and the person is waiting.
+             *
+             * So the still is now the preview frame, taken as it is. The preview is
+             * already asked for 1920 on its long edge when the camera opens (see
+             * tuneCamera), which is where a receipt's QR code stops being the limiting
+             * factor - and cropping it to the glass means those pixels land on what the
+             * person framed instead of on the floor beside it.
+             *
+             * ImageCapture.takePhoto went with it, and for the same reason: it takes
+             * from the sensor rather than from the preview stream, so where it exists
+             * at all it has its own field of view and its own idea of the framing. A
+             * photograph that does not match what was on screen is not a better
+             * photograph.
              */
-            async capture() {
+            /*
+             * One still off the live preview.
+             *
+             * `options.decode` is false when the person chose Photo rather than Scan
+             * QR, and it is false because the modes are supposed to mean what they say.
+             * A Photo that quietly decoded came back labelled with a receipt code
+             * nobody had asked it to read, which is the app overruling a choice that
+             * had just been made explicitly on screen.
+             *
+             * Nothing is lost by not reading it here. The photograph goes up at
+             * UNDECODED_MAX_EDGE - the larger of the two sizes, chosen precisely so the
+             * server can decode it - and utils/qr.py then works it over with contrast
+             * stretching and overlapping tiles, which is a better decoder than this one
+             * has any way to be on a phone. A receipt photographed with its QR code in
+             * shot still ends up verified against TRA; it just is not this screen's job
+             * to announce that before the picture has even been submitted.
+             */
+            async capture(options) {
                 if (!track) throw new Error('Camera is not running.');
+                var decode = !options || options.decode !== false;
+
+                // The frame after the tap, not the one before it.
+                await nextFrame(video);
+
                 var full = global.document.createElement('canvas');
-                var bitmap = null;
+                if (!drawFull(video, full)) throw new Error('No frame to capture.');
 
-                if (global.ImageCapture) {
-                    try {
-                        var capture = new global.ImageCapture(track);
-                        var blob = await capture.takePhoto();
-                        bitmap = await createImageBitmap(blob);
-                    } catch (e) { bitmap = null; }
-                }
+                // Cropped before it is decoded, not after, so that what the code was
+                // read from is the same picture that gets filed. Decoding the wider
+                // frame first would occasionally return a QR code from outside the
+                // viewfinder - a poster behind the counter, the receipt underneath this
+                // one - and queue it against a photograph that visibly does not contain
+                // it, which is a worse answer than not reading it at all.
+                var framed = cropToViewfinder(full, video);
 
-                if (bitmap) {
-                    full.width = bitmap.width;
-                    full.height = bitmap.height;
-                    full.getContext('2d').drawImage(bitmap, 0, 0);
-                    bitmap.close();
-                } else if (!await grabAtFullResolution(track, video, full)) {
-                    throw new Error('No frame to capture.');
-                }
-
-                var text = await decodeStill(full);
-                return { text: text, blob: await toJpeg(full, text ? null : UNDECODED_MAX_EDGE) };
+                var text = decode ? await decodeStill(framed) : null;
+                return { text: text, blob: await toJpeg(framed, text ? null : UNDECODED_MAX_EDGE) };
             },
         };
     }
@@ -1015,6 +1357,68 @@
         });
     }
 
+    /*
+     * The same photograph, re-encoded until it fits inside a byte budget.
+     *
+     * This exists because of the one failure in this app that a field user could do
+     * nothing whatsoever about. A photo larger than the body limit of whatever proxy
+     * sits in front of the server is refused with a 413 before Flask is ever reached,
+     * and the app said so: "This photo is too large for the server to accept (HTTP
+     * 413)", under a receipt that then sat in the outbox for good. Nobody standing in a
+     * shop knows what an ingress body limit is, and no phone camera app offers to make
+     * a picture smaller. The receipt was simply lost, and the person holding it had
+     * been told it was their problem.
+     *
+     * It is not their problem. A photograph that will not fit is a photograph to
+     * re-encode, and this is the only place that knows how. The ladder drops the long
+     * edge and the quality together, because they trade differently: the first step
+     * costs almost nothing visible, and by the last one the file is roughly a fifth of
+     * what it was. It stops at the first step that fits, so a photo one kilobyte over
+     * the line is not squeezed to the floor for it.
+     *
+     * The floor is deliberate. Below about 1280px a receipt's printed verification code
+     * stops being legible to the vision model, and an illegible photograph that uploads
+     * is worth less than a legible one that needs the server's limit raised - so the
+     * smallest step is still a readable receipt, and if even that will not go through,
+     * the caller is told rather than being handed a picture of nothing.
+     *
+     * Returns the original blob unchanged when it already fits, or when this phone
+     * cannot decode it at all (an ImageBitmap failure, a browser with no canvas): a
+     * photograph that might not fit still beats no photograph.
+     */
+    var SHRINK_LADDER = [[2400, 0.78], [2000, 0.74], [1600, 0.7], [1280, 0.62]];
+
+    async function shrinkToFit(blob, maxBytes) {
+        if (!blob || !maxBytes || blob.size <= maxBytes) return blob;
+
+        var canvas;
+        try {
+            var source = await loadBitmap(blob);
+            canvas = global.document.createElement('canvas');
+            canvas.width = source.width;
+            canvas.height = source.height;
+            canvas.getContext('2d').drawImage(source, 0, 0);
+            if (source.close) source.close();
+        } catch (e) {
+            return blob;
+        }
+
+        var smallest = blob;
+        for (var i = 0; i < SHRINK_LADDER.length; i++) {
+            var candidate;
+            try {
+                candidate = await toJpeg(canvas, SHRINK_LADDER[i][0], SHRINK_LADDER[i][1]);
+            } catch (e) {
+                break;
+            }
+            if (candidate.size < smallest.size) smallest = candidate;
+            if (candidate.size <= maxBytes) return candidate;
+        }
+        // Everything this ladder can do, done. It may still be over the budget - that is
+        // the caller's call to make, and it is a different answer from "nothing worked".
+        return smallest;
+    }
+
     // ------------------------------------------------------------- receipt URLs
 
     /*
@@ -1041,15 +1445,29 @@
         readImageFile: readImageFile,
         requestCamera: requestCamera,
         acquireStream: acquireStream,
+        // Which camera, and remembering the answer. Read by the diagnostics screen,
+        // and by the inline <head> script that opens the camera before this file has
+        // parsed - which is why the preference lives in localStorage.
+        listCameras: listCameras,
+        preferredCameraId: preferredCameraId,
+        rememberCamera: rememberCamera,
+        CAMERA_PREF_KEY: CAMERA_PREF_KEY,
+        // Exported to be testable: whether the photograph matches what was framed is
+        // pure arithmetic on two aspect ratios, and not otherwise observable without a
+        // phone in the room.
+        cropToViewfinder: cropToViewfinder,
         getBarcodeDetector: getBarcodeDetector,
         getZXing: getZXing,
         warmDecoder: warmDecoder,
         toJpeg: toJpeg,
-        // Exported to be testable. Whether the still is taken at the sensor's
-        // resolution or at the viewfinder's is the single decision that determines
-        // whether a server-side decode is possible at all, and it is not observable
-        // from anywhere else without a camera in the room.
-        grabAtFullResolution: grabAtFullResolution,
+        // The way out of a 413. Exported because the sync loop is what discovers the
+        // server's body limit, and this is what answers it.
+        shrinkToFit: shrinkToFit,
+        // Exported to be testable. Whether the camera is reconfigured after it has
+        // opened is the decision that determines whether a photograph matches what was
+        // on screen, and it is not observable from anywhere else without a phone in the
+        // room.
+        tuneCamera: tuneCamera,
         RECEIPT_URL_RE: RECEIPT_URL_RE,
         CAMERA_CONSTRAINTS: CAMERA_CONSTRAINTS,
     };

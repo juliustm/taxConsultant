@@ -52,6 +52,11 @@
         <img src="{{ url_for('static', filename='icons/icon-192.png') }}" alt=""
              class="mx-auto h-16 w-16 rounded-2xl shadow-sm">
 
+        {# Whose app this is. Somebody is being asked to install a receipts app on their
+           own phone from a link in a message; the name of the business they work for is
+           the difference between that and installing something anonymous. #}
+        <p class="mt-3 text-center text-sm font-semibold text-gray-500">{{ brand.name }}</p>
+
         <!-- ============ DONE ============ -->
         <template x-if="done">
             <div class="mt-6 text-center">

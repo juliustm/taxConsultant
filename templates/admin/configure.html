@@ -135,6 +135,44 @@
                     </p>
                     {% endif %}
 
+                    {# Marks this tab as present in the post. A checkbox sends nothing when
+                       it is unticked, so without a field that is always sent, 'off' and
+                       'this tab was not on screen' are the same thing - and saving the
+                       front page would quietly switch the rebuild off. #}
+                    <input type="hidden" name="llm_settings" value="1">
+
+                    <div class="mt-6 border-t border-gray-200 pt-6">
+                        <div class="relative flex items-start">
+                            <div class="flex h-6 items-center">
+                                <input id="rebuild_url_from_text" name="rebuild_url_from_text" type="checkbox"
+                                       {% if config.rebuilds_urls_from_text() %}checked{% endif %}
+                                       class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600">
+                            </div>
+                            <div class="ml-3 text-sm leading-6">
+                                <label for="rebuild_url_from_text" class="font-medium text-gray-900">
+                                    Rebuild a TRA address from text read off the photo
+                                </label>
+                                <p class="text-gray-500">
+                                    When no QR code can be decoded, the verification code and time the model
+                                    reads off the paper are turned back into a portal address and put to TRA.
+                                    It is the single most valuable step in the photo pipeline when it works
+                                    &mdash; it replaces a transcription with TRA's own figures.
+                                </p>
+                                <p class="mt-1 text-gray-500">
+                                    Turn it off if your devices photograph a lot of documents that are
+                                    <em>not</em> EFD receipts &mdash; mobile-money messages, delivery notes,
+                                    handwritten chits. Those carry a plausible run of digits too, so an
+                                    address gets built that the portal will never confirm, and the submission
+                                    spends its whole retry schedule finding that out. With this off, what the
+                                    model read is stored directly and stays editable.
+                                </p>
+                                <p class="mt-1 text-xs text-gray-400">
+                                    Either way, any single submission can be settled by hand from its own page.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
                     {# The photo path reads a receipt's QR code here on the server before it
                        asks any model, because a decoded code means TRA's own figures instead
                        of a transcription. Without the decoder that step is skipped silently -

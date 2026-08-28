@@ -46,9 +46,17 @@
 
         {% if not scan %}
         <p class="text-sm text-gray-600">
-            No scan was recorded for this submission. Either it predates this record being
-            kept, or the receipt had already been identified and the decoder was not run
-            again.
+            The decoder has not been run on this photograph. That is the ordinary state for
+            a scan whose QR code the phone read: the code went straight to the portal, and
+            spending half a second decoding it again here would buy a receipt that is
+            already verified nothing at all.
+        </p>
+        <p class="mt-2 text-sm text-gray-600">
+            Which makes <span class="font-medium">Scan again</span> worth a press when the
+            question is the decoder rather than the receipt. Every report on this instance
+            comes from a photograph the phone had already <em>failed</em> to read - the hard
+            cases, by construction - so the only way to see what the server makes of an
+            ordinary, readable code is to run it over one.
         </p>
         {% else %}
         <div class="rounded-md p-3 {{ {'good': 'bg-green-50 text-green-900', 'warn': 'bg-yellow-50 text-yellow-900', 'bad': 'bg-red-50 text-red-900'}[tone] }}">

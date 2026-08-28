@@ -74,6 +74,8 @@
                     <span class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Verified by TRA</span>
                 {% elif receipt.extraction_source == 'llm_vision' %}
                     <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from photo</span>
+                {% elif receipt.extraction_source == 'llm_text' %}
+                    <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from pasted text</span>
                 {% endif %}
                 {% if assessment.score is not none %}
                     {% set score_style = 'bg-green-100 text-green-800' if assessment.score >= 90 else ('bg-yellow-100 text-yellow-800' if assessment.score >= 70 else 'bg-red-100 text-red-800') %}
@@ -402,7 +404,10 @@
                 <div class="space-y-4 px-6 py-5 text-sm">
                     <div class="flex justify-between gap-x-4">
                         <span class="text-gray-500">Submitted</span>
-                        <span class="text-gray-900">{{ submission.received_at.strftime('%Y-%m-%d %H:%M') }} UTC by {{ submission.device.name if submission.device else 'unknown device' }}</span>
+                        {# The device is a key like every other value on this page: it opens
+                           everything that phone has collected, and answers itself on hover. #}
+                        <span class="text-gray-900">{{ submission.received_at.strftime('%Y-%m-%d %H:%M') }} UTC by
+                            {% if submission.device %}<a class="peek" href="/?tab=processed&device={{ submission.device.id }}" data-peek="device:{{ submission.device.id }}">{{ submission.device.name }}</a>{% else %}unknown device{% endif %}</span>
                     </div>
                     {% if submission.location %}
                     <div class="flex justify-between gap-x-4">
@@ -443,6 +448,12 @@
                     <div class="flex justify-between gap-x-4">
                         <span class="text-gray-500">TRA page</span>
                         <a href="{{ submission.input_data }}" target="_blank" rel="noopener" class="truncate text-indigo-600 hover:underline">Open on verify.tra.go.tz</a>
+                    </div>
+                    {% endif %}
+                    {% if submission.input_type == 'text' %}
+                    <div>
+                        <p class="mb-2 text-gray-500">What was pasted</p>
+                        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ submission.input_data }}</pre>
                     </div>
                     {% endif %}
                     {% if photo_url %}

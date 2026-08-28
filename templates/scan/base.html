@@ -6,7 +6,11 @@
        double-tap zoom makes every button feel like it lagged. viewport-fit=cover lets
        the camera fill the notch area. #}
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>{% block title %}Scan Receipts{% endblock %}</title>
+    {# The instance's own name, not the product's. This is a tool a business hands to
+       its staff; the tab, the home-screen caption and the app switcher should all say
+       whose it is. `brand` comes from the context processor in main.py and is safe on
+       an instance that has never been near Settings - it falls back to Karani. #}
+    <title>{% block title %}{{ brand.name }} Receipts{% endblock %}</title>
 
     {# The activation page overrides this with a manifest whose start_url carries the
        token, so adding to the home screen carries the activation with it. #}
@@ -22,7 +26,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Receipts">
+    {# Matches short_name in the manifest, which is what Android reads. iOS reads this
+       one, and the two disagreeing is an app whose caption changes when it is
+       installed. #}
+    <meta name="apple-mobile-web-app-title" content="{{ brand.short_name }}">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='icons/icon-192.png') }}">
 

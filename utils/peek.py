@@ -28,6 +28,7 @@ Three rules, and they are the same ones utils/analytics works under:
 Values are formatted here rather than in the browser so that one receipt's total is
 written the same way on the table, in a card and on the receipt page.
 """
+import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -35,7 +36,7 @@ from statistics import mean
 
 from sqlalchemy.orm import joinedload, selectinload
 
-from models.user import Receipt, ReceiptItem, Submission, Vendor, db
+from models.user import Device, Receipt, ReceiptItem, Submission, Vendor, db
 from utils import classify, compliance
 from utils.money import from_cents
 
@@ -64,6 +65,7 @@ class Card:
     The sections are deliberately few and always mean the same thing:
 
       badges   - what this thing *is* (VAT registered, verified by TRA, cancelled)
+      image    - the paper itself, where the card is about a photograph
       stats    - the two or three headline numbers, large
       rows     - label/value pairs, the supporting detail
       checks   - pass/warn/fail items with their own wording, for compliance
@@ -76,6 +78,9 @@ class Card:
     title: str
     subtitle: str = None
     badges: list = field(default_factory=list)
+    # A URL served by this instance, never one off a receipt. The browser puts it in an
+    # img src, so this is the one field on the card that is fetched rather than read.
+    image: str = None
     stats: list = field(default_factory=list)
     rows: list = field(default_factory=list)
     checks: list = field(default_factory=list)
@@ -106,7 +111,8 @@ class Card:
     def as_dict(self):
         return {
             'kind': self.kind, 'key': self.key, 'title': self.title,
-            'subtitle': self.subtitle, 'badges': self.badges, 'stats': self.stats,
+            'subtitle': self.subtitle, 'badges': self.badges, 'image': self.image,
+            'stats': self.stats,
             'rows': self.rows, 'checks': self.checks, 'notes': self.notes,
             'evidence': self.evidence, 'href': self.href, 'href_label': self.href_label,
         }
@@ -126,6 +132,22 @@ def build(kind, key, business=None, today=None):
 
     card = builder(key, business, today or date.today())
     return card.as_dict() if card else None
+
+
+def spending_scope():
+    """
+    Receipts that represent money actually spent, as a query to narrow further.
+
+    Mirrors main._spending_only. A queued submission is not yet money, and a cancelled
+    or test receipt never was, so a card that counted them would report a total no VAT
+    return will ever agree with.
+    """
+    return (
+        Receipt.query
+        .join(Submission, Receipt.submission_id == Submission.id)
+        .filter(Submission.status == 'completed',
+                Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False))
+    )
 
 
 # --- Vendor -----------------------------------------------------------------
@@ -243,11 +265,7 @@ def vendor_query(key):
     so a receipt cannot be counted under two suppliers.
     """
     vendor = Vendor.query.filter_by(lookup_key=key).first()
-    query = (
-        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
-        .filter(Submission.status == 'completed',
-                Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False))
-    )
+    query = spending_scope()
 
     if vendor is not None:
         owned = Receipt.vendor_id == vendor.id
@@ -394,6 +412,8 @@ def code_card(key, business, today):
         card.badge('verified by TRA', GOOD)
     elif receipt.extraction_source == 'llm_vision':
         card.badge('read from a photo', WARN)
+    elif receipt.extraction_source == 'llm_text':
+        card.badge('read from pasted text', WARN)
     if receipt.is_cancelled:
         card.badge('cancelled', BAD)
     if receipt.is_test:
@@ -470,11 +490,7 @@ def category_card(key, business, today):
     The share is the useful part. A category is unremarkable until you see that it is
     a third of everything, or that one supplier is all of it.
     """
-    query = (
-        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
-        .filter(Submission.status == 'completed',
-                Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False))
-    )
+    query = spending_scope()
     scoped = query.filter(Receipt.category == key)
     count, total_cents, vat_cents, largest = scoped.with_entities(
         db.func.count(Receipt.id), db.func.sum(Receipt.total_incl_tax_cents),
@@ -527,11 +543,7 @@ def date_card(key, business, today):
     except (TypeError, ValueError):
         return None
 
-    query = (
-        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
-        .filter(Submission.status == 'completed',
-                Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False))
-    )
+    query = spending_scope()
     count, total_cents, vat_cents = query.filter(Receipt.receipt_date == day).with_entities(
         db.func.count(Receipt.id), db.func.sum(Receipt.total_incl_tax_cents),
         db.func.sum(Receipt.total_tax_cents),
@@ -645,6 +657,165 @@ def item_card(key, business, today):
     return card
 
 
+def device_card(key, business, today):
+    """
+    One device: what it has collected, and whether it is still collecting it well.
+
+    A receipt's device is the closest thing this system has to a person - which phone,
+    in whose pocket, standing in front of which till. That makes it the unit an admin
+    actually manages, and the three things worth knowing about one are invisible
+    receipt by receipt: a phone whose scans keep failing, a phone that stopped a
+    fortnight ago and nobody noticed, and a phone that is quietly most of the spend.
+    """
+    try:
+        device_id = int(key)
+    except (TypeError, ValueError):
+        return None
+
+    device = db.session.get(Device, device_id)
+    if device is None:
+        return None
+
+    scoped = spending_scope().filter(Receipt.device_id == device.id)
+    count, total_cents, vat_cents, first_seen, last_seen = scoped.with_entities(
+        db.func.count(Receipt.id),
+        db.func.sum(Receipt.total_incl_tax_cents),
+        db.func.sum(Receipt.total_tax_cents),
+        db.func.min(Receipt.receipt_date),
+        db.func.max(Receipt.receipt_date),
+    ).one()
+    total_cents = total_cents or 0
+
+    overall = spending_scope().with_entities(
+        db.func.sum(Receipt.total_incl_tax_cents)).scalar() or 0
+
+    # Counted over submissions, not receipts: a device's failures are exactly the
+    # attempts that never became a receipt, so a count of receipts cannot see them.
+    by_status = dict(
+        db.session.query(Submission.status, db.func.count(Submission.id))
+        .filter(Submission.device_id == device.id)
+        .group_by(Submission.status).all()
+    )
+    submitted = sum(by_status.values())
+    failed = by_status.get('failed', 0)
+    duplicates = by_status.get('duplicate', 0)
+    last_submission = (
+        db.session.query(db.func.max(Submission.received_at))
+        .filter(Submission.device_id == device.id).scalar()
+    )
+
+    card = Card('device', str(device.id), device.name, subtitle='Submitting device')
+    tones = {'active': GOOD, 'awaiting_activation': INFO, 'signed_out': MUTED, 'revoked': BAD}
+    card.badge(device.status.replace('_', ' '), tones.get(device.status, MUTED))
+
+    card.stat('Collected', _money(total_cents), 'TZS')
+    card.stat('Receipts', str(count))
+    card.stat('Share', f'{total_cents * 100 / overall:.1f}%' if overall else '--')
+
+    if count:
+        card.money_row('Average receipt', int(total_cents / count))
+    card.money_row('VAT charged', vat_cents or 0)
+    card.row('Submissions', str(submitted))
+    if failed:
+        card.row('Failed to verify', str(failed), BAD)
+    if duplicates:
+        card.row('Duplicates caught', str(duplicates), INFO)
+    if last_submission:
+        card.row('Last submission', last_submission.strftime('%d %b %Y'))
+
+    top = (
+        scoped.with_entities(Receipt.category, db.func.sum(Receipt.total_incl_tax_cents))
+        .filter(Receipt.category.isnot(None))
+        .group_by(Receipt.category)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc())
+        .limit(2).all()
+    )
+    for category, cents in top:
+        card.row(category.replace('_', ' '), _money(cents or 0))
+
+    # Ordered by what it costs to ignore: a revoked device is a decision already taken,
+    # a failing one is money not being recorded, a silent one is money not being
+    # collected at all.
+    if device.is_revoked:
+        card.note('Revoked. It cannot submit anything further; its history stays here.', MUTED)
+    elif submitted >= 5 and failed * 100 / submitted >= 20:
+        card.note(f'{failed} of {submitted} submissions from this device never verified. '
+                  'Usually the camera, the light or the angle rather than the receipts.', BAD)
+    elif last_submission is not None and (today - last_submission.date()).days >= 14:
+        quiet = (today - last_submission.date()).days
+        card.note(f'Nothing collected for {quiet} days. Receipts not scanned are input '
+                  'VAT not claimed, and the claim window runs from the receipt date.', WARN)
+    elif count and overall and total_cents * 100 / overall >= 60:
+        card.note('Most of the recorded spending comes in through this one device.', INFO)
+
+    card.evidence = _span(count, first_seen, last_seen)
+    card.href = f'/?tab=processed&device={device.id}'
+    card.href_label = 'Show what it collected'
+    return card
+
+
+def photo_card(key, business, today):
+    """
+    The paper behind a row, without leaving the row.
+
+    Confirming a receipt against its photograph is the commonest reason an admin opens
+    a submission at all, and it is a page load, a look and a click back for something
+    the eye settles in under a second. The picture is the whole card; everything under
+    it is there to say which reading of the paper the figures beside it came from.
+    """
+    try:
+        submission_id = int(key)
+    except (TypeError, ValueError):
+        return None
+
+    submission = Submission.query.filter_by(id=submission_id).options(
+        joinedload(Submission.receipt), joinedload(Submission.device),
+    ).first()
+    if submission is None:
+        return None
+
+    name = submission.photo_name
+    if not name:
+        return None
+
+    receipt = submission.receipt
+    card = Card('photo', str(submission.id),
+                (receipt.vendor_name if receipt else None) or 'Receipt photograph')
+    # Resolved by basename against the serving route, exactly as main.submission_photo_url
+    # does: rows written before the persistence volume moved hold an absolute path into
+    # a directory that no longer exists.
+    card.image = f'/uploads/{os.path.basename(name)}'
+    card.subtitle = _when(receipt) if receipt else 'not processed yet'
+
+    if receipt is not None and receipt.extraction_source == 'tra_html':
+        card.badge('verified by TRA', GOOD)
+    elif receipt is not None:
+        card.badge('read from this image', WARN)
+    if receipt is not None and receipt.corrected_at:
+        card.badge('corrected by hand', INFO)
+
+    if receipt is not None and receipt.total_incl_tax_cents is not None:
+        card.stat('Total', _money(receipt.total_incl_tax_cents), 'TZS')
+    if submission.device is not None:
+        card.row('Collected by', submission.device.name)
+    when = submission.captured_at or submission.received_at
+    if when is not None:
+        # captured_at is when somebody stood in front of the receipt; received_at is
+        # when the server heard about it, and offline queuing puts days between them.
+        card.row('Photographed' if submission.captured_at else 'Received',
+                 when.strftime('%d %b %Y %H:%M'))
+    if receipt is not None and receipt.category:
+        card.row('Category', receipt.category.replace('_', ' '))
+
+    if receipt is not None and receipt.extraction_source != 'tra_html':
+        card.note('The figures beside this row were read off this image, not from '
+                  "TRA's own record. Worth reading them against the paper.", WARN)
+
+    card.href = card.image
+    card.href_label = 'Open full size'
+    return card
+
+
 def tax_office_card(key, business, today):
     """The TRA office a supplier is administered by, and who else we buy from there."""
     rows = (
@@ -682,6 +853,8 @@ BUILDERS = {
     'till': till_card,
     'category': category_card,
     'date': date_card,
+    'device': device_card,
+    'photo': photo_card,
     'item': item_card,
     'tax_office': tax_office_card,
 }

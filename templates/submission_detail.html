@@ -22,7 +22,7 @@
                 </h1>
                 <p class="mt-1 text-sm text-gray-500">
                     Submitted {{ submission.received_at.strftime('%d %b %Y %H:%M') }} UTC
-                    by {{ submission.device.name if submission.device else 'an unknown device' }}
+                    by {% if submission.device %}<a class="peek" href="/?tab=processed&device={{ submission.device.id }}" data-peek="device:{{ submission.device.id }}">{{ submission.device.name }}</a>{% else %}an unknown device{% endif %}
                 </p>
             </div>
             <div class="mt-4 flex items-center gap-x-3 md:mt-0">
@@ -184,6 +184,21 @@
                         </div>
                     </div>
 
+                    {# The paste, reproduced exactly.
+
+                       For a submission whose evidence is text there is nothing else to
+                       look at - no paper, no portal page - so this is the whole of what
+                       an admin is checking the model's reading against. Shown verbatim,
+                       whitespace and line breaks intact, because a LUKU SMS is read
+                       line by line and reflowing it into a paragraph is what makes a
+                       meter number stop looking like a meter number. #}
+                    {% if submission.input_type == 'text' %}
+                    <div class="mt-4">
+                        <p class="mb-2 text-sm text-gray-500">What was pasted</p>
+                        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ submission.input_data }}</pre>
+                    </div>
+                    {% endif %}
+
                     {% if photo_url %}
                     <div class="mt-4">
                         <p class="mb-2 text-sm text-gray-500">Photograph</p>
@@ -192,6 +207,99 @@
                     {% endif %}
                 </div>
             </div>
+
+            {# What the vision model read, and the way out of a wrong guess.
+
+               This card exists because of a specific and expensive failure. The photo
+               pipeline rebuilds a TRA address out of the verification code the model
+               transcribes, and on a document that is not an EFD receipt at all - a
+               mobile-money SMS, a delivery note - it finds a plausible run of digits and
+               rebuilds one anyway. The portal will never confirm it, so the submission
+               spends its entire retry schedule finding that out, and until now the
+               reading the model had already made was discarded the moment that retry was
+               booked. An admin looking at this page saw a code, a countdown, and nothing
+               about what the document actually says.
+
+               So the transcription is kept and shown, and the button below files it as
+               the receipt - no second vision call, no further requests to the portal -
+               after which every figure on it is editable on the receipt page. #}
+            {% if draft_fields %}
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5"
+                 x-data="keepExtraction({{ submission.id }})">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">What the photo says</h2>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Read off the picture by the vision model, before TRA was asked about it.
+                        {% if submission.recovered_url and not submission.corrected_at %}
+                            The address above was built out of these same characters.
+                        {% endif %}
+                    </p>
+                </div>
+                <div class="px-6 py-5">
+                    {% set doc_type = draft.get('document_type') %}
+                    {% if doc_type and doc_type != 'tra_efd_receipt' %}
+                    <p class="mb-4 rounded-md bg-yellow-50 p-3 text-sm text-yellow-900">
+                        The model did not read this as an EFD receipt &mdash; it called it
+                        <span class="font-mono">{{ doc_type }}</span>. TRA has no record of a document
+                        that was never issued by an EFD, so asking the portal about it cannot succeed.
+                    </p>
+                    {% endif %}
+
+                    <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                        {% for label, value in draft_fields %}
+                        <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1">
+                            <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
+                            <dd class="text-right text-sm text-gray-900">{{ value }}</dd>
+                        </div>
+                        {% endfor %}
+                    </dl>
+
+                    {% if draft.get('llm_extracted_description') %}
+                    <p class="mt-4 text-sm text-gray-600">{{ draft.get('llm_extracted_description') }}</p>
+                    {% endif %}
+
+                    <p x-show="message" x-cloak class="mt-4 rounded-md p-3 text-sm"
+                       :class="failed ? 'bg-red-50 text-red-900' : 'bg-green-50 text-green-900'"
+                       x-text="message"></p>
+
+                    <div class="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-gray-200 pt-5">
+                        <button @click="keep()" :disabled="busy"
+                                class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
+                            <span x-text="busy ? 'Filing...' : 'Keep these details'"></span>
+                        </button>
+                        {% if rebuild_allowed %}
+                        <button @click="decline()" :disabled="busy"
+                                class="rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                            Stop rebuilding the address
+                        </button>
+                        {% endif %}
+                    </div>
+                    <p class="mt-3 text-xs text-gray-500">
+                        {% if rebuild_allowed %}
+                            <span class="font-medium">Keep these details</span> stops the retries and files
+                            this as a receipt read from the photograph, which you can then correct field by
+                            field. <span class="font-medium">Stop rebuilding the address</span> only stops the
+                            guessing, and leaves the receipt to be verified another way &mdash; by rescanning
+                            the QR code, or by typing the code and time in above.
+                        {% else %}
+                            Addresses are no longer being rebuilt from text for this submission
+                            {% if not rebuild_allowed_here %}(and are switched off for this instance){% endif %}.
+                            Keeping these details files them as a receipt you can then correct field by field.
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+            {% elif submission.input_type == 'photo' and submission.recovered_url %}
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="px-6 py-5">
+                    <p class="text-sm text-gray-600">
+                        Nothing has been read off this photograph yet. That is normal for a submission
+                        whose QR code decoded on the way past &mdash; the code went straight to the
+                        portal and the vision model was never asked.
+                    </p>
+                </div>
+            </div>
+            {% endif %}
 
             {% include "_qr_scan.html" %}
 
@@ -293,6 +401,61 @@
 </div>
 
 <script>
+/*
+ * The two ways out of an address that will never verify.
+ *
+ * Both reload rather than patching the page, for the same reason the rescan button
+ * does: either one changes what this submission *is*. Keeping the details turns it
+ * into a receipt and moves it to a different page entirely; declining the rebuild
+ * clears the address, the code and the retry text that were rendered from them. A
+ * subset of that patched in JavaScript is how a fresh verdict ends up sitting beside
+ * stale figures.
+ */
+function keepExtraction(submissionId) {
+    return {
+        busy: false,
+        failed: false,
+        message: '',
+
+        async post(path, body) {
+            this.busy = true;
+            this.failed = false;
+            this.message = '';
+            try {
+                const response = await fetch(`/submissions/${submissionId}/${path}`, {
+                    method: 'POST',
+                    body: body || undefined,
+                });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'That was refused.');
+                return payload;
+            } catch (error) {
+                this.message = error.message;
+                this.failed = true;
+                this.busy = false;
+                return null;
+            }
+        },
+
+        async keep() {
+            const payload = await this.post('keep-extraction');
+            if (!payload) return;
+            // Straight to the receipt, because that is where these numbers become
+            // editable - which is the half of "keep them" that matters.
+            window.location = payload.receipt_id
+                ? `/receipts/${payload.receipt_id}`
+                : window.location.pathname;
+        },
+
+        async decline() {
+            const body = new FormData();
+            body.append('declined', '1');
+            const payload = await this.post('rebuild-policy', body);
+            if (payload) window.location.reload();
+        },
+    };
+}
+
 function submissionPage() {
     return {
         busy: false,

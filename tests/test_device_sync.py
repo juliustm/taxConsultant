@@ -158,6 +158,92 @@ def test_sync_requires_a_session(app):
 
 # --- Photos ------------------------------------------------------------------
 
+# --- Pasted records ----------------------------------------------------------
+
+def test_a_pasted_record_is_filed_as_its_own_kind_of_submission(phone):
+    """
+    The expenses that never produce a receipt at all.
+
+    Electricity bought as a LUKU token, water, a mobile money transfer: what the payer
+    is left holding is a few lines of text on a phone and nothing else will ever be
+    issued. Those went in as photographs of a screen, read back by a vision model doing
+    OCR on text we already had exactly. They ride in the JSON batch because they are the
+    same shape of request a URL is - a few hundred bytes with no blob in them.
+    """
+    record = 'LUKU\nToken: 1234 5678 9012 3456 7890\nUnits: 96.4 kWh\nAmount: TZS 30,000'
+    response = phone.post('/scan/api/sync', json={
+        'items': [{'client_uuid': 'luku-1', 'text': record,
+                   'captured_at': '2026-07-27T08:15:00Z'}],
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()['results'][0]['status'] == 'accepted'
+
+    submission = Submission.query.one()
+    assert submission.input_type == 'text'
+    assert submission.input_data == record
+    # No code was claimed for it: a LUKU token is not a TRA verification code, and
+    # writing one here is what sends the pipeline off to look up a receipt that has
+    # never existed.
+    assert submission.receipt_code is None
+
+
+def test_an_item_with_neither_a_code_nor_text_is_still_rejected(phone):
+    """The batch takes two kinds of thing now, and nothing is not one of them."""
+    response = phone.post('/scan/api/sync', json={
+        'items': [{'client_uuid': 'empty-1'}, {'client_uuid': 'empty-2', 'text': '   '}],
+    })
+
+    results = response.get_json()['results']
+    assert [r['status'] for r in results] == ['rejected', 'rejected']
+    assert Submission.query.count() == 0
+
+
+def test_a_url_still_outranks_a_paste_on_the_same_item(phone):
+    """
+    A pasted TRA link is a receipt, and the scanner sends it as one.
+
+    If both arrive anyway, the code wins: it is the only one of the two the portal will
+    answer for. The text is not kept, because input_data has exactly one meaning per row
+    and every reader of it would otherwise need to learn a second.
+    """
+    phone.post('/scan/api/sync', json={
+        'items': [{'client_uuid': 'both-kinds',
+                   'receipturl': 'https://verify.tra.go.tz/58E41A514_092022',
+                   'text': 'some note about it'}],
+    })
+
+    submission = Submission.query.one()
+    assert submission.input_type == 'url'
+    assert submission.input_data == 'https://verify.tra.go.tz/58E41A514_092022'
+
+
+def test_an_enormous_paste_is_trimmed_rather_than_refused(phone):
+    """
+    Submission.input_data is a VARCHAR(1024). On SQLite that means nothing and on
+    Postgres it means a failed insert, so the cap is applied here rather than discovered
+    there - and a truncated record beats an error on a receipt somebody is filing.
+    """
+    import main
+    phone.post('/scan/api/sync', json={
+        'items': [{'client_uuid': 'huge', 'text': 'x' * 5000}],
+    })
+
+    submission = Submission.query.one()
+    assert len(submission.input_data) == main.TEXT_SUBMISSION_MAX_CHARS
+
+
+def test_a_resent_paste_creates_nothing_new(phone):
+    """Same idempotency guarantee as every other path: the uuid is the identity."""
+    item = {'client_uuid': 'luku-same', 'text': 'LUKU token 1234'}
+    first = phone.post('/scan/api/sync', json={'items': [item]})
+    second = phone.post('/scan/api/sync', json={'items': [item]})
+
+    assert Submission.query.count() == 1
+    assert first.get_json()['results'][0]['status'] == 'accepted'
+    assert second.get_json()['results'][0]['status'] == 'duplicate'
+
+
 def test_a_photo_is_stored_and_queued(phone):
     response = phone.post('/scan/api/sync/photo', data={
         'client_uuid': 'photo-1',
@@ -184,6 +270,116 @@ def test_resending_the_same_photo_creates_nothing_new(phone):
     assert Submission.query.count() == 1
     assert first.get_json()['status'] == 'accepted'
     assert second.get_json()['status'] == 'duplicate'
+
+
+def test_a_scan_carrying_both_a_code_and_its_photo_becomes_one_verified_submission(phone):
+    """
+    The commonest scan of all, and the one that used to throw half of itself away.
+
+    A phone that decodes a receipt's QR code is holding a photograph of that receipt at
+    the same instant. The code went up in the JSON batch and the picture was dropped on
+    the phone, so every receipt TRA confirmed had no image behind it - nobody could go
+    back to the paper to check a line item or settle a dispute about what was bought.
+
+    Both arrive here now, through this endpoint rather than the batch, because a
+    photograph cannot go in the batch and splitting the pair across two requests is how
+    they become two submissions the moment the second one fails.
+    """
+    response = phone.post('/scan/api/sync/photo', data={
+        'client_uuid': 'both-1',
+        'receipturl': 'https://verify.tra.go.tz/58E41A514_092022',
+        'receiptphoto': (io.BytesIO(b'jpeg-bytes'), 'receipt.jpg'),
+    }, content_type='multipart/form-data')
+
+    assert response.status_code == 200
+    submission = Submission.query.one()
+
+    # Processed as the URL: the code is the stronger claim about which receipt this is,
+    # and it is what the portal answers with its own figures.
+    assert submission.input_type == 'url'
+    assert submission.input_data == 'https://verify.tra.go.tz/58E41A514_092022'
+    assert submission.receipt_code == '58E41A514'
+
+    # And the paper is kept beside it, in its own column so that neither reader of
+    # input_data has to learn a second meaning for it.
+    assert submission.photo_filename
+    assert submission.photo_filename.endswith('.jpg')
+
+
+def test_a_photo_sent_without_a_code_is_unchanged(phone):
+    """
+    The other half of the same decision, and the one that must not have moved.
+
+    A photograph with no code is still a photo submission with its filename in
+    input_data, exactly as every row already in every database has it.
+    """
+    phone.post('/scan/api/sync/photo', data={
+        'client_uuid': 'photo-only',
+        'receiptphoto': (io.BytesIO(b'jpeg-bytes'), 'receipt.jpg'),
+    }, content_type='multipart/form-data')
+
+    submission = Submission.query.one()
+    assert submission.input_type == 'photo'
+    assert submission.input_data.endswith('.jpg')
+    assert submission.photo_filename is None
+
+
+def test_the_photograph_is_found_whichever_column_holds_it(phone, app):
+    """
+    One question - "is there a picture, and what is it called" - with two storage sites.
+
+    Every page that shows a photograph reads it through these, so a reader that knew
+    about only one of the columns would show the paper on old rows and not on new ones,
+    or the other way round.
+    """
+    import main
+
+    phone.post('/scan/api/sync/photo', data={
+        'client_uuid': 'with-code',
+        'receipturl': 'https://verify.tra.go.tz/58E41A514_092022',
+        'receiptphoto': (io.BytesIO(b'jpeg-bytes'), 'receipt.jpg'),
+    }, content_type='multipart/form-data')
+    phone.post('/scan/api/sync/photo', data={
+        'client_uuid': 'no-code',
+        'receiptphoto': (io.BytesIO(b'jpeg-bytes'), 'receipt.jpg'),
+    }, content_type='multipart/form-data')
+
+    with_code, no_code = Submission.query.order_by(Submission.id).all()
+
+    with app.test_request_context():
+        assert main.submission_photo_url(with_code).endswith('.jpg')
+        assert main.submission_photo_url(no_code).endswith('.jpg')
+        assert main.submission_photo_path(with_code).endswith('.jpg')
+
+    # A URL submission with no picture behind it - the bot path, and every row that
+    # predates this - still says so rather than pointing at a file that is not there.
+    plain = Submission(device_id=with_code.device_id, input_type='url',
+                       input_data='https://verify.tra.go.tz/PLAIN123_010101')
+    db.session.add(plain)
+    db.session.commit()
+    with app.test_request_context():
+        assert main.submission_photo_url(plain) is None
+        assert main.submission_photo_path(plain) is None
+
+
+def test_a_verified_submission_with_a_photo_is_announced_with_both(phone):
+    """
+    The dashboard reads input_data and photo_url as two different things.
+
+    They used to be one field that meant a URL on some rows and an image path on
+    others, which was survivable only while a submission could not have both. Collapsing
+    them now would put an image path on a row whose input_type says 'url'.
+    """
+    phone.post('/scan/api/sync/photo', data={
+        'client_uuid': 'both-2',
+        'receipturl': 'https://verify.tra.go.tz/58E41A514_092022',
+        'receiptphoto': (io.BytesIO(b'jpeg-bytes'), 'receipt.jpg'),
+    }, content_type='multipart/form-data')
+
+    row = phone.get('/scan/api/submissions').get_json()['submissions'][0]
+    assert row['input_type'] == 'url'
+    assert row['input_data'] == 'https://verify.tra.go.tz/58E41A514_092022'
+    assert row['photo_url'].endswith('.jpg')
 
 
 # --- History and retry -------------------------------------------------------

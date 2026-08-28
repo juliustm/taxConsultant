@@ -45,6 +45,23 @@ class InstanceConfig(db.Model):
     landing_cta_label = db.Column(db.String(60), nullable=True)
     landing_cta_url = db.Column(db.String(500), nullable=True)
 
+    # --- How hard to try to turn a photograph into a verified receipt ---
+    # Whether a portal address may be rebuilt out of text the vision model read off the
+    # paper, when no QR code could be decoded from it.
+    #
+    # On by default, because when it works it is worth more than everything else the
+    # photo pipeline does: it replaces a model's reading of a crumpled print with TRA's
+    # own record of the sale. But it is a guess made from a transcription, and a wrong
+    # guess is expensive in a way the right one is not - a document that was never an EFD
+    # receipt (a mobile-money SMS, a parking stub, a delivery note) yields a plausible
+    # run of digits, becomes a portal address nobody will ever confirm, and then occupies
+    # the retry schedule for two days while the one usable reading of it is discarded.
+    #
+    # So it is a setting on instances whose receipts do not photograph well, or that
+    # collect a lot of documents that are not EFD receipts. NULL means on - the default
+    # every existing instance has been running with.
+    rebuild_url_from_text = db.Column(db.Boolean, nullable=True, default=True)
+
     post_callback_url = db.Column(db.String(500), nullable=True)
     s3_bucket_name = db.Column(db.String(200), nullable=True)
     s3_access_key_id = db.Column(db.String(200), nullable=True)
@@ -56,6 +73,14 @@ class InstanceConfig(db.Model):
 
     def is_configured(self):
         return all([self.llm_provider, self.llm_api_key])
+
+    def rebuilds_urls_from_text(self):
+        """Whether the photo pipeline may guess a portal address from transcribed text.
+
+        NULL means on: the column was added to instances that had been rebuilding all
+        along, and a migration cannot know which of them wanted it off.
+        """
+        return self.rebuild_url_from_text is not False
 
 class Device(db.Model):
     """
@@ -151,6 +176,46 @@ class Submission(db.Model):
     # and a page that says where an address came from is the difference between trusting
     # it and checking it again.
     corrected_at = db.Column(db.DateTime, nullable=True)
+    # The photograph filed alongside a submission whose input was a URL.
+    #
+    # A scan used to be one thing or the other: a QR code the phone read, or a picture it
+    # could not. That threw away the more useful half of the commonest case. When the
+    # phone decodes the code it also has, in its hand, a photograph of the receipt that
+    # produced it - and the moment the code is read that picture was being discarded, so
+    # the receipt TRA confirms had no image behind it and nobody could ever look at the
+    # paper again. It also meant the server-side decoder only ever ran on photographs the
+    # phone had already failed on, which is why its hit rate reads as a fault rather than
+    # as the selection effect it is.
+    #
+    # A bare filename, resolved against UPLOAD_FOLDER exactly as input_data is for a
+    # photo submission - see main.submission_photo_path for why not an absolute path.
+    # NULL on a URL submission with no picture behind it, and on a photo submission,
+    # whose image is still input_data.
+    photo_filename = db.Column(db.String(255), nullable=True)
+    # What the vision model read off the photograph, as the JSON it returned.
+    #
+    # Kept because the pipeline used to read a photograph, rebuild a portal address out
+    # of the code it transcribed, and then - when the portal would not confirm it -
+    # throw the entire transcription away and book a retry. For up to two days the
+    # submission then showed an admin nothing at all: no vendor, no total, no date, on a
+    # receipt that had already been read and paid for. Worse where the rebuild was wrong
+    # in the first place, because a document that was never an EFD receipt retries
+    # against a portal that will never have heard of it, and the one usable reading of it
+    # is the one that was discarded.
+    #
+    # So the transcription is written here the moment it exists, before anything is
+    # attempted with it, and the admin can accept it as the receipt at any point. See
+    # main._receipt_from_photo and main.accept_submission_extraction.
+    llm_draft = db.Column(db.Text, nullable=True)
+    # Set when an admin has said to stop rebuilding a portal address for this submission
+    # out of transcribed text, and to keep what was read off the photograph instead.
+    #
+    # A submission-level answer to an instance-level setting (InstanceConfig.
+    # rebuild_url_from_text): the setting decides the default for receipts nobody has
+    # looked at, and this decides the one an admin is looking at now. Never cleared by a
+    # retry - a person having judged this document not to be a TRA receipt outranks the
+    # pipeline's guess on every later attempt, which is the whole point of recording it.
+    rebuild_declined = db.Column(db.Boolean, nullable=False, default=False)
     # What the server-side QR decoder saw, as the JSON report utils.qr.scan returns.
     # Stored rather than logged because the three ways a photograph reaches the vision
     # model - the decoder is not installed, the upload was unopenable, the code is
@@ -173,6 +238,29 @@ class Submission(db.Model):
     claimed_at = db.Column(db.DateTime, nullable=True)
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('submissions', lazy=True))
+
+    @property
+    def photo_name(self):
+        """
+        The stored filename of this submission's photograph, or None if it has none.
+
+        Two columns hold one idea, for a reason that is historical rather than designed.
+        A photo submission keeps its image in input_data, because for a long time a photo
+        was the *only* thing such a submission had. A submission that carries both a QR
+        code and the picture it was read from keeps the picture in photo_filename,
+        because input_data is the URL and there is only one of it. Every reader wants the
+        same answer - "is there a photograph, and what is it called" - so it is worked
+        out here, on the row itself, rather than in each of them.
+
+        photo_filename first: a photo submission never has one, so the order only decides
+        what happens to a row that somehow has both, and the explicit column is the newer
+        and more specific statement.
+        """
+        if self.photo_filename:
+            return self.photo_filename
+        if self.input_type == 'photo' and self.input_data:
+            return self.input_data
+        return None
 
 class EventLog(db.Model):
     """

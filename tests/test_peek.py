@@ -16,11 +16,11 @@ to exist - including for a supplier who never got a Vendor row of their own.
 import json
 import shutil
 import subprocess
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from models.user import db, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
+from models.user import db, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
 
 
 @pytest.fixture
@@ -317,6 +317,146 @@ def test_the_date_card_counts_the_day_and_names_the_return_it_falls_on(client, d
     assert '20 Apr 2026' in text_of(payload)
 
 
+# --- Device -----------------------------------------------------------------
+
+def test_the_device_card_reports_what_one_phone_collected(client, device):
+    """
+    A device is the closest thing here to a person, so it is the unit an admin manages.
+
+    Share is the figure that is invisible receipt by receipt: a phone quietly being
+    most of the spending is a fact about how the business runs.
+    """
+    other = Device(name='Van two', api_key='van-key')
+    db.session.add(other)
+    db.session.commit()
+
+    store(device, total=300_00, tax=0)
+    store(device, total=100_00, tax=0)
+    store(other, total=100_00, tax=0)
+
+    payload = card(client, 'device', device.id)
+
+    assert payload['title'] == 'Test device'
+    stats = {stat['label']: stat['value'] for stat in payload['stats']}
+    assert stats['Collected'] == '400.00'
+    assert stats['Receipts'] == '2'
+    assert stats['Share'] == '80.0%'
+    assert payload['href'] == f'/?tab=processed&device={device.id}'
+
+
+def test_the_device_card_counts_the_submissions_no_receipt_came_out_of(client, device):
+    """
+    A device's failures are exactly the attempts that never became a receipt, so a
+    count of receipts is structurally unable to see them.
+    """
+    store(device)
+    for _ in range(4):
+        db.session.add(Submission(device_id=device.id, input_type='photo',
+                                  input_data='blurred.jpg', status='failed'))
+    db.session.commit()
+
+    payload = card(client, 'device', device.id)
+
+    assert '4 of 5 submissions from this device never verified' in text_of(payload)
+
+
+def test_the_device_card_notices_one_that_has_gone_quiet(client, device):
+    """Receipts not scanned are input VAT not claimed, and nobody is told."""
+    receipt = store(device)
+    receipt.submission.received_at = datetime.utcnow() - timedelta(days=40)
+    db.session.commit()
+
+    assert 'Nothing collected for 40 days' in text_of(card(client, 'device', device.id))
+
+
+def test_a_revoked_device_says_so_rather_than_looking_idle(client, device):
+    store(device)
+    device.revoked_at = datetime.utcnow()
+    db.session.commit()
+
+    payload = card(client, 'device', device.id)
+
+    assert {'label': 'revoked', 'tone': 'bad'} in payload['badges']
+    assert 'its history stays here' in text_of(payload)
+
+
+def test_a_device_that_does_not_exist_is_a_404(client, device):
+    assert client.get('/api/peek/device/9999').status_code == 404
+    assert client.get('/api/peek/device/the-red-one').status_code == 404
+
+
+# --- Photograph -------------------------------------------------------------
+
+def test_the_photo_card_carries_the_picture_itself(client, device):
+    """
+    Confirming figures against the paper is the commonest reason to open a submission
+    at all, and it was a page load, a look and a click back for something the eye
+    settles in under a second.
+    """
+    receipt = store(device)
+    receipt.submission.photo_filename = 'receipt_20260510.jpg'
+    db.session.commit()
+
+    payload = card(client, 'photo', receipt.submission_id)
+
+    assert payload['image'] == '/uploads/receipt_20260510.jpg'
+    assert payload['href'] == '/uploads/receipt_20260510.jpg'
+    assert payload['title'] == 'PLASCO LIMITED'
+    assert {'label': 'Collected by', 'value': 'Test device', 'tone': 'muted'} in payload['rows']
+
+
+def test_the_photo_card_resolves_a_path_left_by_an_older_volume(client, device):
+    """Rows written before the persistence volume moved hold an absolute path."""
+    receipt = store(device)
+    receipt.submission.photo_filename = '/var/old/uploads/receipt.jpg'
+    db.session.commit()
+
+    assert card(client, 'photo', receipt.submission_id)['image'] == '/uploads/receipt.jpg'
+
+
+def test_a_photo_submission_keeps_its_image_where_it_always_did(client, device):
+    """A photo submission has no photo_filename - the image is its input_data."""
+    submission = Submission(device_id=device.id, input_type='photo',
+                            input_data='snap.jpg', status='queued')
+    db.session.add(submission)
+    db.session.commit()
+
+    assert card(client, 'photo', submission.id)['image'] == '/uploads/snap.jpg'
+
+
+def test_a_row_with_no_photograph_has_no_card(client, device):
+    """The chip is only rendered where there is an image, so this is a stale link."""
+    receipt = store(device)
+
+    assert client.get(f'/api/peek/photo/{receipt.submission_id}').status_code == 404
+
+
+def test_the_photo_card_says_when_the_figures_were_read_off_the_image(client, device):
+    """
+    The difference between TRA's record of a sale and a model's reading of a crumpled
+    print is the whole reason to look at the paper, so the card names which one it is.
+    """
+    receipt = store(device, extraction_source='llm_vision')
+    receipt.submission.photo_filename = 'snap.jpg'
+    db.session.commit()
+
+    payload = card(client, 'photo', receipt.submission_id)
+
+    assert {'label': 'read from this image', 'tone': 'warn'} in payload['badges']
+    assert 'not from TRA' in text_of(payload)
+
+
+def test_a_verified_photo_is_badged_as_verified(client, device):
+    receipt = store(device)
+    receipt.submission.photo_filename = 'snap.jpg'
+    db.session.commit()
+
+    payload = card(client, 'photo', receipt.submission_id)
+
+    assert {'label': 'verified by TRA', 'tone': 'good'} in payload['badges']
+    assert 'not from TRA' not in text_of(payload)
+
+
 def test_the_date_card_refuses_a_key_that_is_not_a_date(client, device):
     store(device)
     assert client.get('/api/peek/date/last-tuesday').status_code == 404
@@ -486,6 +626,7 @@ def test_the_receipt_page_marks_up_every_key_it_prints(client, device):
         f'data-peek="item:{receipt.id}:1"',
         'data-peek="tax_office:MEDIUM TAXPAYERS DIVISION"',
         'data-peek="category:fuel"',
+        f'data-peek="device:{device.id}"',
     ]:
         assert spec in body, spec
 
@@ -501,6 +642,35 @@ def test_the_dashboard_ships_the_key_its_rows_link_by(client, device):
     payload = client.get('/api/submissions').get_json()
 
     assert payload['submissions'][0]['receipt']['vendor_key'] == 'tin:100147181'
+
+
+def test_the_dashboard_ships_the_device_behind_each_row(client, device):
+    """
+    Who collected a receipt is a fact the table had but never showed. The row needs the
+    id and not only the name: the chip is a filter link and a hover card, both keyed on
+    the id, and two phones can be called 'Front desk' a year apart.
+    """
+    store(device)
+
+    row = client.get('/api/submissions').get_json()['submissions'][0]
+
+    assert row['device_id'] == device.id
+    assert row['device_name'] == 'Test device'
+
+
+def test_the_dashboard_marks_up_its_device_and_photograph_chips(client, device):
+    """
+    Rendered by Alpine, so what is asserted here is the template's binding rather than
+    a finished attribute - which is still the thing a refactor silently drops.
+    """
+    body = client.get('/').get_data(as_text=True)
+
+    for spec in [
+        'data-peek="`device:${sub.device_id}`"',
+        'data-peek="`photo:${sub.id}`"',
+        'data-peek-warm',
+    ]:
+        assert spec in body, spec
 
 
 def test_the_dashboard_loads_the_peek_script(client, device):

@@ -9,7 +9,7 @@
  * Bump CACHE_VERSION on any change to APP_SHELL or to the files it names. Old caches
  * are deleted on activate, so the bump is the whole upgrade mechanism.
  */
-const CACHE_VERSION = 'v8';
+const CACHE_VERSION = 'v12';
 const PRECACHE = `scan-precache-${CACHE_VERSION}`;
 const RUNTIME = `scan-runtime-${CACHE_VERSION}`;
 

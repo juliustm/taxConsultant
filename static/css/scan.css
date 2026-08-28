@@ -104,15 +104,24 @@ input, textarea, [contenteditable] {
 
 .reticle.is-hit { outline-color: #22c55e; outline-width: 4px; }
 
-/* Photo mode frames the whole sensor, because that is what a photo captures.
-   Showing the small QR box while taking a full-frame picture told the user their
-   receipt had to fit inside a box it was never cropped to. */
+/* Photo mode's brackets mark the edge of the picture, and that is all they do.
+
+   Scanner.capture keeps exactly what the viewfinder was showing - the whole preview,
+   mapped back through `object-fit: cover` onto the sensor - so these are pulled out to
+   the edge of the glass, inside the safe area by enough to be seen on a notched phone.
+
+   They spent a version inset from the screen while being treated as the crop, which is
+   the worse of the two ways to get this wrong: a receipt that was entirely visible in
+   the preview came back with its top line or its total missing, and nothing on screen
+   said which strip had gone. A viewfinder that keeps less than it shows is not a
+   viewfinder. Moving these insets no longer moves the photograph - the preview decides
+   that now - so they can be placed for legibility. */
 .photo-frame {
     position: fixed;
-    top: calc(env(safe-area-inset-top, 0px) + 3.5rem);
-    right: 1rem;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 8.5rem);
-    left: 1rem;
+    top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+    right: 0.5rem;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);
+    left: 0.5rem;
     pointer-events: none;
 }
 
@@ -148,9 +157,13 @@ input, textarea, [contenteditable] {
     color: rgba(255, 255, 255, 0.65);
     font-size: 0.875rem;
     font-weight: 600;
-    padding: 0.5rem 1.1rem;
+    /* Three segments now, not two. 1.1rem a side put the switch within a few pixels
+       of the viewport on a 320px phone; this keeps the tap targets comfortable and the
+       whole control clear of the edges. */
+    padding: 0.5rem 0.9rem;
     border-radius: 9999px;
     cursor: pointer;
+    white-space: nowrap;
     transition: background-color 150ms ease, color 150ms ease;
 }
 
@@ -171,6 +184,157 @@ input, textarea, [contenteditable] {
 
 .shutter:active { transform: scale(0.93); }
 .shutter:disabled { opacity: 0.5; }
+
+/* Upload mode's centre button. The shutter's size and position - because it is the
+   primary action of the mode and the thumb is already there - but never its colour: a
+   solid white disc means "take the picture" on every camera anyone has held, and using
+   it for Paste would be a promise the button does not keep. */
+.shutter-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(24, 24, 27, 0.85);
+    border-color: rgba(255, 255, 255, 0.55);
+    color: #fff;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+/* --- History, promoted --------------------------------------------------- */
+
+/* The way back to what has actually been sent.
+
+   This was an unlabelled circle with a clock in it, sitting next to another unlabelled
+   circle with a picture in it, on a black screen where the only obvious control is the
+   shutter. Nobody found it. It is now a labelled, filled button - the second real
+   control on the screen - because "did my receipts go?" is the question the whole app
+   exists to answer and it should never be a guess which icon asks it. */
+.dash-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.7rem 1rem;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.92);
+    color: #18181b;
+    font-size: 0.875rem;
+    font-weight: 650;
+    text-decoration: none;
+    box-shadow: 0 1px 12px rgba(0, 0, 0, 0.45);
+    transition: transform 100ms ease, background-color 150ms ease;
+}
+
+.dash-link:active { transform: scale(0.97); background: rgba(255, 255, 255, 0.8); }
+
+/* The outbox count, and the only thing on the camera screen that says receipts are
+   still sitting on this phone. Amber rather than the sync pill's grey: this is not a
+   status to read, it is a number that should make somebody look. */
+.dash-link-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.35rem;
+    border-radius: 9999px;
+    background: #f59e0b;
+    color: #111;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+/* --- Upload pane --------------------------------------------------------- */
+
+/* Not a viewfinder overlay - a panel that takes the middle of the screen, over a
+   camera that is deliberately still running behind it. Leaving the preview up is what
+   keeps Upload feeling like one of the three modes rather than a page you navigated
+   to; dimming it is what keeps the text on top readable over whatever is in shot. */
+.upload-pane {
+    /* Never squashed by the flex spacers above and below it: the box has a keyboard
+       coming for it, and a panel that shrinks instead of scrolling is one whose Save
+       button ends up somewhere nobody can reach. The pane keeps its height and the
+       fixed pane scrolls (see the .fixed.inset-0 rule near the top). */
+    flex: none;
+    margin: 0 1rem;
+    padding: 1rem;
+    border-radius: 1.25rem;
+    background: rgba(9, 9, 11, 0.86);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.upload-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.upload-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.9rem 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 0.9rem;
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 100ms ease, background-color 150ms ease;
+}
+
+.upload-tile:active { transform: scale(0.97); background: rgba(255, 255, 255, 0.12); }
+.upload-tile:disabled { opacity: 0.5; }
+
+.upload-label {
+    display: block;
+    margin-top: 0.9rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+/* 16px, and that is not a style choice: iOS zooms the whole page in on focus for any
+   font-size below it, which on a fixed full-screen camera layout is a viewport that
+   never comes back. */
+.upload-textarea {
+    margin-top: 0.35rem;
+    width: 100%;
+    resize: none;
+    border: 0;
+    border-radius: 0.75rem;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.75rem 0.85rem;
+    font-size: 1rem;
+    line-height: 1.4;
+    color: #fff;
+}
+
+.upload-textarea::placeholder { color: rgba(255, 255, 255, 0.35); }
+.upload-textarea:focus { outline: 2px solid #6366f1; outline-offset: 0; }
+
+.upload-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.6rem;
+}
+
+.upload-save {
+    min-height: 2.75rem;
+    padding: 0 1rem;
+    font-size: 0.875rem;
+    flex: none;
+}
+
+.upload-save:disabled { opacity: 0.45; }
 
 /* One green pulse on a successful decode. The scanner resumes immediately afterwards,
    so this flash is the only acknowledgement - it has to be unmissable and over fast. */
@@ -400,6 +564,57 @@ input, textarea, [contenteditable] {
         radial-gradient(120% 90% at 15% 0%, rgba(79, 70, 229, 0.55) 0%, rgba(79, 70, 229, 0) 60%),
         linear-gradient(180deg, #14141a 0%, #0a0a0c 100%);
     color: #fff;
+}
+
+/* The instance's name, in the strip of hero above the figures.
+
+   Absolutely positioned inside the hero's own top padding rather than being the first
+   flex item in it: the hero centres its content in a fixed block, so anything added to
+   the flow pushes the total and the three stats down by its full height. This sits in
+   space that was already empty. */
+.dash-brand {
+    position: absolute;
+    top: calc(var(--hero-inset) + 1rem);
+    left: 1.5rem;
+    right: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.dash-brand-logo {
+    height: 1.5rem;
+    width: 1.5rem;
+    border-radius: 0.375rem;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.dash-brand-initial {
+    display: flex;
+    height: 1.5rem;
+    width: 1.5rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.375rem;
+    background: rgba(255, 255, 255, 0.14);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+/* Truncated rather than wrapped: a two-line business name in a fixed-height hero
+   pushes into the eyebrow underneath it. */
+.dash-brand-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.7);
 }
 
 .dash-eyebrow {

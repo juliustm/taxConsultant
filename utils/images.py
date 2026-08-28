@@ -40,6 +40,7 @@ path for a photo it cannot read. Rejecting at intake would drop a receipt at the
 moment nobody is watching - the device has been told the upload succeeded - which is
 the same reasoning that keeps a malformed URL acceptable at ingest.
 """
+import base64
 import io
 import os
 
@@ -108,14 +109,20 @@ def store_photo(photo, folder, filename):
     return filename
 
 
-def _bounded_jpeg(raw):
+def _bounded_jpeg(raw, max_edge=STORED_MAX_EDGE, quality=JPEG_QUALITY):
     """
-    The photograph as JPEG bytes within the cap and the right way up, or None to say
-    'what arrived is already fine, write that instead'.
+    The photograph as JPEG bytes within `max_edge` and the right way up, or None to say
+    'what arrived is already fine, use that instead'.
 
     None rather than the original bytes so the caller cannot accidentally lose the
     distinction between 'unchanged' and 'changed', and so the untouched path never
     round-trips through an encoder at all.
+
+    Two callers with two caps: what is kept on disk (STORED_MAX_EDGE, set by the QR
+    decoder) and what is handed to the vision model (MODEL_MAX_EDGE, set by what it can
+    read). One function because the work either way is the same three decisions -
+    orientation, size, colour mode - and having two copies of them is how a photograph
+    ends up upright in one path and sideways in the other.
     """
     try:
         # Deliberately not decoded yet. Size, format and EXIF all come from the header,
@@ -131,7 +138,7 @@ def _bounded_jpeg(raw):
 
     # Already small, already upright, already JPEG: the overwhelmingly common case,
     # since the scanner bounds its own uploads. Touching it would only add loss.
-    if max(size) <= STORED_MAX_EDGE and not rotated and fmt == 'JPEG':
+    if max(size) <= max_edge and not rotated and fmt == 'JPEG':
         return None
 
     try:
@@ -143,8 +150,8 @@ def _bounded_jpeg(raw):
                 image = ImageOps.exif_transpose(image)
 
             longest = max(image.size)
-            if longest > STORED_MAX_EDGE:
-                scale = STORED_MAX_EDGE / longest
+            if longest > max_edge:
+                scale = max_edge / longest
                 image = image.resize(
                     (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
                     Image.LANCZOS,
@@ -161,7 +168,7 @@ def _bounded_jpeg(raw):
             # surviving the transpose would turn them a second time; and every reader
             # downstream already assumes JPEG (llm_processor labels the data URL
             # image/jpeg unconditionally), which this makes true rather than usual.
-            image.save(buffer, format='JPEG', quality=JPEG_QUALITY, optimize=True,
+            image.save(buffer, format='JPEG', quality=quality, optimize=True,
                        progressive=True)
             return buffer.getvalue()
     except Exception:
@@ -169,6 +176,49 @@ def _bounded_jpeg(raw):
         # guard on something absurd. Either way the upload is still a receipt somebody
         # scanned, and the pipeline is where that gets a verdict.
         return None
+
+
+# The long edge of the copy handed to the vision model.
+#
+# A stored photograph is bounded at STORED_MAX_EDGE, and that number is set by the QR
+# decoder: 3000px is where a code that started small in a 12MP frame still has enough
+# pixels a module to come back. The model is a different reader with a different need -
+# it is looking at printed words, and the app's own measurements put 1600 as comfortably
+# enough for those - so sending it the decoder's copy spends bytes nobody uses.
+#
+# It is not a small overspend. The file goes to the provider base64-encoded into a data
+# URL (llm_processor), so it travels a third larger than it is stored, on an instance
+# that may be working through a day's backlog on a shared line - and it is charged for
+# as image tokens, which scale with the pixels.
+#
+# 2000 rather than 1600 because of what the model is now also asked to read: when no QR
+# code can be decoded, the verification code printed underneath it in plain type is the
+# route back to a receipt TRA confirms (see _receipt_from_photo). That is small print on
+# thermal paper, and it is the one thing on the page where the margin is thin. 2000 is
+# the size the scanner already treats as enough to read a receipt at
+# (Scanner.toJpeg's default), and it halves the encoded payload against 3000.
+MODEL_MAX_EDGE = 2000
+
+# Higher than JPEG_QUALITY above, and for a different consumer. That one is a file kept
+# forever; this one is a throwaway copy whose only job is to be read once, and ringing
+# artefacts around small digits are exactly what costs a transcription.
+MODEL_JPEG_QUALITY = 90
+
+
+def encoded_for_model(path):
+    """
+    The photograph at `path` as base64 JPEG, bounded to MODEL_MAX_EDGE.
+
+    Falls back to the file exactly as it sits on disk whenever Pillow cannot help -
+    an unreadable header, a format this build was not compiled for, a resize that
+    raises. A vision call on a larger image than necessary is a cost; a vision call
+    that does not happen is a receipt that fails, and the second is much worse.
+    """
+    with open(path, 'rb') as handle:
+        raw = handle.read()
+
+    bounded = _bounded_jpeg(raw, MODEL_MAX_EDGE, MODEL_JPEG_QUALITY)
+    return base64.b64encode(bounded if bounded is not None else raw).decode('utf-8')
 
 
 def _orientation_of(image):

@@ -80,6 +80,7 @@ PENDING_COLUMNS = {
         ('landing_cta_url', 'VARCHAR(500)'),
         ('llm_text_model', 'VARCHAR(100)'),
         ('llm_vision_model', 'VARCHAR(100)'),
+        ('rebuild_url_from_text', 'BOOLEAN'),
     ),
     'submission': (
         ('next_attempt_at', 'DATETIME'),
@@ -91,6 +92,9 @@ PENDING_COLUMNS = {
         ('client_uuid', 'VARCHAR(64)'),
         ('captured_at', 'DATETIME'),
         ('corrected_at', 'DATETIME'),
+        ('photo_filename', 'VARCHAR(255)'),
+        ('llm_draft', 'TEXT'),
+        ('rebuild_declined', 'BOOLEAN NOT NULL DEFAULT 0'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -552,8 +556,68 @@ SORT_COLUMNS = {
     'receipt_date': Receipt.receipt_date,
 }
 
+# How many suppliers the filter panel offers as one-click selections, and how many
+# the insights column names. The panel is a picker and wants breadth; the insights
+# column is a finding and wants the few that matter.
+FACET_VENDOR_LIMIT = 12
+TOP_VENDOR_LIMIT = 6
+# Categories named individually in a breakdown before the tail is collapsed into one
+# 'other' row. Past this the bars are too short to compare and the list is a legend.
+BREAKDOWN_LIMIT = 8
+
+
+def _read_list(args, key, cast=None):
+    """
+    A repeatable query parameter, read as a list of distinct values.
+
+    Accepted both ways round - `category=fuel&category=meals` and `category=fuel,meals`
+    - because the first is what this page emits and the second is what somebody types by
+    hand or pastes into a chat. A value that will not cast is ignored rather than
+    rejected, the same way an unparseable date already is: a mangled link should show
+    the reader a table, not a 500, and the chips above it say what is actually applied.
+    """
+    values, seen = [], set()
+    for raw in args.getlist(key):
+        for part in str(raw).split(','):
+            part = part.strip()
+            if not part:
+                continue
+            if cast is not None:
+                try:
+                    part = cast(part)
+                except (TypeError, ValueError):
+                    continue
+            if part in seen:
+                continue
+            seen.add(part)
+            values.append(part)
+    return values
+
+
+def _selection(filters, key):
+    """
+    One filter's selected values, tolerant of a single value written as itself.
+
+    The multi-value filters are lists, but a filter dict can also be assembled by hand
+    - in a test, or by a caller that only ever meant one category - and a bare string
+    handed to an IN clause matches its own characters rather than itself.
+    """
+    value = filters.get(key)
+    if not value:
+        return []
+    return list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+
 def _read_filters(args):
-    """The table's filter state, read from a query string and normalised."""
+    """
+    The table's filter state, read from a query string and normalised.
+
+    Three of these are lists, and that is most of what lets the table answer a real
+    question. 'What did the two vans spend on fuel and repairs last quarter' is one
+    query with three selections in it; asked one value at a time it is six separate
+    looks and a total the reader has to add up themselves - which is the point at
+    which people stop asking.
+    """
     tab = args.get('tab', 'processed')
     sort = args.get('sort', 'received_at')
     return {
@@ -561,7 +625,15 @@ def _read_filters(args):
         'search': (args.get('search') or '').strip(),
         # Set by clicking a category anywhere it is shown, so 'what else is fuel?' is
         # one click rather than a search that would also match a vendor called Fuel.
-        'category': (args.get('category') or '').strip(),
+        # Repeatable now, and every single-value link ever shared still means what it did.
+        'category': _read_list(args, 'category'),
+        # Which phone or bot the receipt came in through. Same click-to-filter contract
+        # as the category chip, because 'show me everything off that device' is the
+        # question an admin asks the moment one of them starts producing bad scans.
+        'device': _read_list(args, 'device', cast=int),
+        # Vendor lookup keys ('tin:100147181'), the same key /vendors/<key> is addressed
+        # by - never the printed name, which one supplier spells three ways.
+        'vendor': _read_list(args, 'vendor'),
         'start_date': args.get('start_date', ''),
         'end_date': args.get('end_date', ''),
         'sort': sort if sort in SORT_COLUMNS else 'received_at',
@@ -613,8 +685,26 @@ def _filtered_submissions(filters, ordered=True):
             Submission.description.ilike(pattern),
         ))
 
-    if filters.get('category'):
-        query = query.filter(Receipt.category == filters['category'])
+    categories = _selection(filters, 'category')
+    if categories:
+        query = query.filter(Receipt.category.in_(categories))
+
+    devices = _selection(filters, 'device')
+    if devices:
+        query = query.filter(Submission.device_id.in_(devices))
+
+    vendor_keys = _selection(filters, 'vendor')
+    if vendor_keys:
+        # Matched on the vendor row, which is keyed on the TIN TRA issued, so selecting
+        # a supplier selects every spelling of them. The printed TIN is an OR rather
+        # than a fallback because a receipt read off a photograph can carry a TIN and
+        # still have no Vendor row behind it, and it is the same supplier either way.
+        matched = db.session.query(Vendor.id).filter(Vendor.lookup_key.in_(vendor_keys))
+        conditions = [Receipt.vendor_id.in_(matched)]
+        tins = [key.split(':', 1)[1] for key in vendor_keys if key.startswith('tin:')]
+        if tins:
+            conditions.append(Receipt.vendor_tin.in_(tins))
+        query = query.filter(db.or_(*conditions))
 
     start_date = _parse_date_arg(filters['start_date'])
     end_date = _parse_date_arg(filters['end_date'])
@@ -653,6 +743,10 @@ def _submissions_page(filters, page, per_page=DEFAULT_PAGE_SIZE):
         'has_next': paged.has_next,
         'has_prev': paged.has_prev,
         'insights': _filtered_insights(filters),
+        # What else could be selected, so the pickers and the chips that stand for an
+        # applied filter can both be drawn without a second round trip - and so a
+        # device or supplier that has been filtered down to nothing still has a name.
+        'facets': _filter_facets(filters),
         'tab_counts': _tab_counts(filters),
         'filters': filters,
     }
@@ -665,24 +759,43 @@ def _spending_only(query):
         Receipt.is_test.is_(False),
     )
 
+def _device_names():
+    """Every device's name by id. One query against a table with a handful of rows."""
+    return {device.id: device.name for device in Device.query.all()}
+
+
+def _share(cents, total_cents):
+    return round(cents * 100 / total_cents, 1) if total_cents else 0.0
+
+
 def _filtered_insights(filters):
     """
-    Totals across everything the filter matches, not just the page on screen.
+    Everything the filter matches, added up - not just the page on screen.
 
-    Summed by the database, so the figure does not change when you turn the page. Only
+    Summed by the database, so the figures do not change when you turn the page. Only
     completed, non-void receipts count: a queued submission is not yet money and a
     cancelled one never was.
+
+    The breakdowns underneath the totals are what make a multi-part filter worth
+    building. A total answers 'how much'; the split answers 'made of what, collected by
+    whom', which is the question that was actually being asked and previously took an
+    export and a pivot table to get at.
     """
     base = _filtered_submissions(filters, ordered=False)
+    spending = _spending_only(base)
 
-    count, total_cents, vat_cents = _spending_only(base).with_entities(
+    count, total_cents, vat_cents, largest_cents, first_date, last_date = spending.with_entities(
         db.func.count(Receipt.id),
         db.func.sum(Receipt.total_incl_tax_cents),
         db.func.sum(Receipt.total_tax_cents),
+        db.func.max(Receipt.total_incl_tax_cents),
+        db.func.min(Receipt.receipt_date),
+        db.func.max(Receipt.receipt_date),
     ).one()
+    count, total_cents, vat_cents = count or 0, total_cents or 0, vat_cents or 0
 
     top_vendors = (
-        _spending_only(base)
+        spending
         .with_entities(
             Receipt.vendor_name, Receipt.vendor_tin,
             db.func.count(Receipt.id), db.func.sum(Receipt.total_incl_tax_cents),
@@ -692,24 +805,170 @@ def _filtered_insights(filters):
         .filter(Receipt.vendor_id.isnot(None))
         .group_by(Receipt.vendor_id)
         .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc())
-        .limit(3).all()
+        .limit(TOP_VENDOR_LIMIT).all()
     )
 
+    by_category = (
+        spending
+        .with_entities(
+            Receipt.category, db.func.count(Receipt.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .group_by(Receipt.category)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc()).all()
+    )
+    by_device = (
+        spending
+        .with_entities(
+            Submission.device_id, db.func.count(Receipt.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .group_by(Submission.device_id)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc()).all()
+    )
+    names = _device_names()
+
     return {
-        'count': count or 0,
-        'total_cents': total_cents or 0,
-        'vat_cents': vat_cents or 0,
+        'count': count,
+        'total_cents': total_cents,
+        'vat_cents': vat_cents,
+        'average_cents': int(total_cents / count) if count else 0,
+        'largest_cents': largest_cents or 0,
+        # The stretch of calendar the figures cover, which is the denominator a reader
+        # needs before a total means anything - and is not the same as the dates asked
+        # for, since a range can be wider than the receipts inside it.
+        'first_date': first_date.isoformat() if first_date else None,
+        'last_date': last_date.isoformat() if last_date else None,
         'top_vendors': [
             {
                 'name': name or 'Unnamed vendor', 'tin': tin,
                 'count': vendor_count, 'cents': cents or 0,
-                # The same key /vendors/<key> and the hover cards use, built by the
-                # rule that owns it rather than reassembled by the browser.
+                'share_pct': _share(cents or 0, total_cents),
+                # The same key /vendors/<key>, the hover cards and the vendor filter
+                # use, built by the rule that owns it rather than reassembled here.
                 'key': Vendor.make_lookup_key(tin, name),
             }
             for name, tin, vendor_count, cents in top_vendors
         ],
+        'by_category': _capped_breakdown([
+            {
+                'key': category, 'label': (category or 'uncategorised').replace('_', ' '),
+                'count': category_count, 'cents': cents or 0,
+                'share_pct': _share(cents or 0, total_cents),
+            }
+            for category, category_count, cents in by_category
+        ], total_cents),
+        'by_device': [
+            {
+                'key': device_id, 'label': names.get(device_id, 'Unknown device'),
+                'count': device_count, 'cents': cents or 0,
+                'share_pct': _share(cents or 0, total_cents),
+            }
+            for device_id, device_count, cents in by_device
+        ],
     }
+
+
+def _capped_breakdown(rows, total_cents):
+    """
+    The largest few slices, with the tail collapsed into one honest 'other' row.
+
+    Collapsed rather than truncated: a list that silently stops at eight does not add
+    up to the total printed above it, and a reader who notices that has to distrust
+    every other figure on the panel to work out why.
+    """
+    if len(rows) <= BREAKDOWN_LIMIT:
+        return rows
+
+    head, tail = rows[:BREAKDOWN_LIMIT], rows[BREAKDOWN_LIMIT:]
+    rest_cents = sum(row['cents'] for row in tail)
+    return head + [{
+        'key': None, 'label': f'{len(tail)} more', 'count': sum(row['count'] for row in tail),
+        'cents': rest_cents, 'share_pct': _share(rest_cents, total_cents),
+    }]
+
+
+def _filter_facets(filters):
+    """
+    What there is to filter by, counted under everything except the pickers themselves.
+
+    That exclusion is what makes a second selection possible. Counted under the current
+    selection, choosing 'fuel' would empty the category list of every other category and
+    there would be no way to add 'meals' to it - the filter would be a series of
+    single choices wearing a multi-select's clothes. So the tab, the search and the
+    dates narrow the options; the three multi-value pickers do not narrow themselves.
+
+    Counted over submissions rather than over spending, so the device picker still
+    works on the Failed and Queued tabs, where by definition no money was recorded.
+    """
+    scope = {**filters, 'category': [], 'device': [], 'vendor': []}
+    base = _filtered_submissions(scope, ordered=False)
+
+    categories = (
+        base.with_entities(Receipt.category, db.func.count(Submission.id))
+        .filter(Receipt.category.isnot(None))
+        .group_by(Receipt.category)
+        .order_by(db.func.count(Submission.id).desc()).all()
+    )
+    device_counts = dict(
+        base.with_entities(Submission.device_id, db.func.count(Submission.id))
+        .group_by(Submission.device_id).all()
+    )
+    vendors = (
+        base.with_entities(
+            Receipt.vendor_name, Receipt.vendor_tin, db.func.count(Submission.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .filter(Receipt.vendor_id.isnot(None))
+        .group_by(Receipt.vendor_id)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc())
+        .limit(FACET_VENDOR_LIMIT).all()
+    )
+
+    vendor_options = [
+        {
+            'key': Vendor.make_lookup_key(tin, name), 'label': name or 'Unnamed vendor',
+            'tin': tin, 'count': vendor_count,
+        }
+        for name, tin, vendor_count, _cents in vendors
+    ]
+    # A supplier chosen from a wider range, or from a vendor page, must stay listed
+    # once the dates move past their last receipt - otherwise the only way to remove
+    # a filter is to guess that it is still applied.
+    listed = {option['key'] for option in vendor_options}
+    missing = [key for key in _selection(filters, 'vendor') if key not in listed]
+    if missing:
+        for vendor in Vendor.query.filter(Vendor.lookup_key.in_(missing)).all():
+            vendor_options.append({
+                'key': vendor.lookup_key, 'label': vendor.name or 'Unnamed vendor',
+                'tin': vendor.tin, 'count': 0,
+            })
+            listed.add(vendor.lookup_key)
+        for key in missing:
+            if key not in listed:
+                vendor_options.append({
+                    'key': key, 'label': key.split(':', 1)[-1], 'tin': None, 'count': 0,
+                })
+
+    return {
+        'categories': [
+            {'key': category, 'label': category.replace('_', ' '), 'count': category_count}
+            for category, category_count in categories
+        ],
+        # Every device, including the ones with nothing in range: an admin looking for
+        # what a particular phone collected needs to see that the answer is none,
+        # which a list that quietly omits it cannot say.
+        'devices': sorted(
+            [
+                {'key': device.id, 'label': device.name,
+                 'count': device_counts.get(device.id, 0), 'status': device.status}
+                for device in Device.query.all()
+            ],
+            key=lambda option: (-option['count'], option['label'].lower()),
+        ),
+        'vendors': vendor_options,
+    }
+
 
 def _tab_counts(filters):
     """
@@ -740,24 +999,36 @@ def _tab_counts(filters):
     ).count()
     return counts
 
+def submission_photo_name(submission):
+    """
+    The stored filename of this submission's photograph, or None if it has none.
+
+    The rule itself lives on the row - see Submission.photo_name - because the hover
+    cards need the same answer and cannot import this module. This stays as the name
+    every caller here already uses, and tolerates a None submission.
+    """
+    return submission.photo_name if submission is not None else None
+
 def submission_photo_path(submission):
     """
-    Where a photo submission's file actually is, right now.
+    Where a submission's photograph actually is, right now.
 
-    input_data holds a bare filename, but rows written before the persistence volume
+    The stored name is a bare filename, but rows written before the persistence volume
     moved hold an absolute path into a directory that no longer exists. Resolving by
     basename against the current UPLOAD_FOLDER reads both, and keeps the database
     free of any dependency on where the volume happens to be mounted.
     """
-    return os.path.join(
-        current_app.config['UPLOAD_FOLDER'], os.path.basename(submission.input_data)
-    )
+    name = submission_photo_name(submission)
+    if not name:
+        return None
+    return os.path.join(current_app.config['UPLOAD_FOLDER'], os.path.basename(name))
 
 def submission_photo_url(submission):
-    """The public URL for a photo submission's image, or None if it isn't a photo."""
-    if not submission or submission.input_type != 'photo':
+    """The public URL for a submission's photograph, or None if it has none."""
+    name = submission_photo_name(submission)
+    if not name:
         return None
-    return url_for('uploaded_file', filename=os.path.basename(submission.input_data))
+    return url_for('uploaded_file', filename=os.path.basename(name))
 
 def prepare_submissions_for_frontend(submissions, detailed=True):
     """Converts Submission objects into a JSON-serialisable list of dictionaries."""
@@ -771,14 +1042,29 @@ def prepare_submissions_for_frontend(submissions, detailed=True):
 
         # A photo's stored filename becomes a public /uploads/... URL; a URL
         # submission is already the thing the frontend should show.
-        frontend_input_data = submission_photo_url(sub) or sub.input_data
+        #
+        # Kept apart from photo_url below, which a URL submission can now also have.
+        # Collapsing the two - which this did, while a photograph and a URL were still
+        # mutually exclusive - would put an image path in input_data on a row whose
+        # input_type says 'url', and every reader of that pair would then be wrong.
+        photo_url = submission_photo_url(sub)
+        frontend_input_data = (photo_url or sub.input_data) if sub.input_type == 'photo' \
+            else sub.input_data
 
         data = {
             "id": sub.id, "status": sub.status, "received_at": sub.received_at.isoformat(),
             "input_type": sub.input_type, "input_data": frontend_input_data, # Use the transformed path
+            # The photograph, whatever the input was. A scan whose QR code the phone read
+            # now files the picture it read it from alongside the code, so a verified
+            # receipt has the paper behind it too.
+            "photo_url": photo_url,
             "description": sub.description, "location": sub.location,
             "error_message": sub.error_message, "is_duplicate": sub.status == 'duplicate',
             "receipt": receipt_data, "device_name": sub.device.name if sub.device else 'Unknown Device',
+            # The id as well as the name: the row's device chip is a filter link and a
+            # hover card, and both are addressed by id. A name is not an identity -
+            # two devices can be called 'Front desk' a year apart.
+            "device_id": sub.device_id,
             # What is known about a submission before - or without - a verified receipt
             # behind it, so a row that never resolves is still something to act on.
             "receipt_code": sub.receipt_code,
@@ -1137,6 +1423,55 @@ def _scan_photo_qr(submission, photo_path):
     return report.get('url')
 
 
+def _may_rebuild_url(submission, config):
+    """
+    Whether a portal address may be guessed from text the model read off this photo.
+
+    Two switches, deliberately at different altitudes. The instance setting is the
+    default for every photograph nobody has looked at; the submission flag is one
+    admin's verdict on the document in front of them, and it wins - a person who has
+    read the picture and said "this is not a TRA receipt" knows something the pipeline
+    does not, and a later retry must not overrule them.
+    """
+    if submission.rebuild_declined:
+        return False
+    return config is None or config.rebuilds_urls_from_text()
+
+
+def _store_llm_draft(submission, data):
+    """
+    Keeps what the vision model read, so no outcome below can throw it away.
+
+    Committed on its own, before the layers that act on it, for the same reason
+    _scan_photo_qr commits its report: everything after this can raise or reschedule,
+    and the reading is worth having either way. A draft that cannot be serialised is
+    simply not stored - this is a convenience for the admin page, never a reason to
+    fail a receipt that is otherwise fine.
+    """
+    try:
+        submission.llm_draft = json.dumps(data)
+        db.session.commit()
+    except (TypeError, ValueError) as e:
+        db.session.rollback()
+        print(f'[Photo] Could not store the transcription for submission {submission.id}: {e}')
+
+
+def _stored_llm_draft(submission):
+    """
+    The stored transcription for a submission, or None.
+
+    Tolerant of junk for the same reason _stored_qr_scan is: it is read by a page whose
+    job is explaining why a receipt has not landed, and it may not fail while doing it.
+    """
+    if submission is None or not submission.llm_draft:
+        return None
+    try:
+        draft = json.loads(submission.llm_draft)
+    except ValueError:
+        return None
+    return draft if isinstance(draft, dict) else None
+
+
 def _receipt_from_photo(submission, config):
     """
     Builds a Receipt from a photograph, preferring TRA's numbers over the model's.
@@ -1167,6 +1502,23 @@ def _receipt_from_photo(submission, config):
          handwritten chit - this is not a fallback but the right answer, and the
          document_type the model returns says so rather than leaving it looking like an
          EFD receipt that failed verification.
+
+    Layer 2 is a guess, and the two things that follow from that are what most of the
+    care below is about.
+
+    The first is that the guess is now *skippable*. An instance can turn it off
+    (InstanceConfig.rebuild_url_from_text) and an admin can turn it off for one
+    submission (Submission.rebuild_declined), because on a document that was never an
+    EFD receipt it does real harm: a mobile-money SMS yields a plausible run of digits,
+    those become a portal address nobody will ever confirm, and the submission then
+    spends two days on the retry schedule.
+
+    The second is that the transcription is never thrown away again. It is written to
+    the submission the moment it exists, before any of it is acted on, so a photograph
+    sitting in a retry schedule still has a vendor, a total and a date an admin can
+    read - and accept, in one click, as the receipt. It used to be discarded the instant
+    layer 2 booked a retry, which is how a receipt that had already been read and paid
+    for showed an admin nothing at all.
     """
     if not config.is_configured():
         raise ValueError("Instance is not configured with LLM provider and API key.")
@@ -1177,7 +1529,11 @@ def _receipt_from_photo(submission, config):
     # portal was unwilling. Neither the decoder nor the model can improve on that, and
     # re-running them once per retry would spend a vision call each time to arrive back
     # at the same URL.
-    if submission.recovered_url:
+    #
+    # Not when an admin has declined the rebuild since that attempt: the address in
+    # recovered_url is then exactly the guess they have just judged wrong, and going
+    # back to the portal with it is the loop they asked to be let out of.
+    if submission.recovered_url and not submission.rebuild_declined:
         print(f"[Photo] Retrying the code recovered earlier: {submission.recovered_url}")
         receipt, settled = _verify_photo_against_tra(
             submission, config, submission.recovered_url, source='the code recovered from it')
@@ -1196,13 +1552,19 @@ def _receipt_from_photo(submission, config):
 
     data = extract_receipt_details(photo_path, True, config)
 
+    # Written before anything is done with it. Everything below this line can end in a
+    # retry booked for tomorrow, and until this was stored that outcome took the whole
+    # transcription with it - see the docstring.
+    _store_llm_draft(submission, data)
+
     # Layer 2: the model read the code off the paper, so the portal can still be asked.
     # Skipped when a URL has already been recovered - by an earlier attempt or by the
     # decoder above - because that one came from the machine-readable code and the
     # portal has just declined it. Asking again with a transcription of the same code
     # spends a request to be told the same thing.
     document_type = (data.get('document_type') or '').strip() or 'tra_efd_receipt'
-    if document_type == 'tra_efd_receipt' and not submission.recovered_url:
+    if (document_type == 'tra_efd_receipt' and not submission.recovered_url
+            and _may_rebuild_url(submission, config)):
         rebuilt = reconstructed_receipt_url(data)
         if rebuilt:
             print(f"[Photo] Rebuilt a verification URL from the transcription: {rebuilt}")
@@ -1213,6 +1575,99 @@ def _receipt_from_photo(submission, config):
             print("[Photo] Portal would not confirm the transcribed code; storing what was read.")
 
     # Layer 3: what the model read, kept as the model's reading.
+    return _receipt_from_transcription(submission, data, config)
+
+
+def _receipt_from_text(submission, config):
+    """
+    Builds a Receipt from a written record of a purchase - the SMS, not the paper.
+
+    A large share of what an organisation actually spends never produces a receipt at
+    all. Electricity bought as a LUKU token, a water bill, a government control number,
+    a mobile money transfer: what the payer is left holding is a few lines of text on a
+    phone, and no EFD receipt is ever going to be issued for it. Until this path existed
+    the only way to file one of those was to screenshot it, save the screenshot, and
+    upload the screenshot - a photograph of a screen, read back by a vision model that
+    was being asked to do OCR on text we already had perfectly.
+
+    So the text is read as text. Structurally this is the photo path with its first two
+    layers mostly gone, because they have nothing to work on:
+
+      * There is no QR code to decode - the whole point is that there is no receipt.
+      * The address rebuild survives, but only for the one case it fits: somebody
+        pasting the verification code and time off an EFD receipt they are holding. The
+        model is told plainly (TEXT_RECORD_SYSTEM_PROMPT) that a LUKU token or an
+        M-Pesa reference is not a verification code, because the failure to avoid here
+        is a plausible run of digits becoming a portal address that nobody will ever
+        confirm and two days of retries behind it.
+      * What the model read is what gets stored, as extraction_source='llm_text' - a
+        weaker claim than a photograph, and marked as one everywhere it is shown.
+
+    A pasted TRA link never reaches here: the scanner recognises one and queues it as a
+    URL submission, which is the strongest path of the three.
+    """
+    if not config.is_configured():
+        raise ValueError("Instance is not configured with LLM provider and API key.")
+
+    # Layer 0, exactly as on the photo path: an earlier attempt already worked out
+    # which receipt this is and only the portal was unwilling. Re-reading the text
+    # would arrive back at the same address having paid for another model call.
+    if submission.recovered_url and not submission.rebuild_declined:
+        print(f"[Text] Retrying the code recovered earlier: {submission.recovered_url}")
+        receipt, settled = _verify_photo_against_tra(
+            submission, config, submission.recovered_url,
+            source='the code recovered from it', label='Text')
+        if settled:
+            return receipt
+
+    data = extract_receipt_details(submission.input_data, False, config)
+
+    # Stored before anything acts on it, for the reason spelled out in
+    # _receipt_from_photo: everything below can end in a retry booked for tomorrow, and
+    # a submission sitting in that schedule should still show an admin a vendor, a
+    # total and a date they can accept in one click.
+    _store_llm_draft(submission, data)
+
+    document_type = (data.get('document_type') or '').strip() or 'other_receipt'
+    if (document_type == 'tra_efd_receipt' and not submission.recovered_url
+            and _may_rebuild_url(submission, config)):
+        rebuilt = reconstructed_receipt_url(data)
+        if rebuilt:
+            print(f"[Text] Rebuilt a verification URL from the pasted text: {rebuilt}")
+            receipt, settled = _verify_photo_against_tra(
+                submission, config, rebuilt, source='the code in the pasted text', label='Text')
+            if settled:
+                return receipt
+            print("[Text] Portal would not confirm that code; storing what was read.")
+
+    return _receipt_from_transcription(
+        submission, data, config, source='llm_text', default_document_type='other_receipt')
+
+
+def _receipt_from_transcription(submission, data, config, source='llm_vision',
+                                default_document_type='tra_efd_receipt'):
+    """
+    A Receipt built out of what a model read, or None if it is a duplicate.
+
+    Split out of _receipt_from_photo so the admin page can build the same receipt from
+    the same stored transcription (see accept_submission_extraction). One reader of one
+    shape of data: a receipt an admin accepts by hand has to be indistinguishable from
+    one the pipeline stored on its own, or the two paths drift and only one of them
+    keeps getting the fixes. A pasted record (_receipt_from_text) fills in the same
+    schema and so lands here too.
+
+    The two parameters are what the callers disagree about, and only that:
+
+      * `source` becomes extraction_source, which every reader of a receipt uses to say
+        where its numbers came from. 'llm_vision' is a model reading paper; 'llm_text'
+        is a model reading somebody's paste. Neither is 'tra_html', which is the only
+        value that means the revenue authority itself supplied the figures.
+      * `default_document_type` is what an answer with the field missing is taken to
+        mean. A photograph with nothing said about it is overwhelmingly an EFD receipt.
+        A pasted LUKU SMS never is, and defaulting it to one would put a made-up EFD
+        receipt in the ledger every time the model forgot to fill the field in.
+    """
+    document_type = (data.get('document_type') or '').strip() or default_document_type
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
     if _register_duplicate(submission, verification_code, config):
         return None
@@ -1247,7 +1702,7 @@ def _receipt_from_photo(submission, config):
         receipt_date=_parse_iso_date(data.get('receipt_date')),
         receipt_time=_parse_iso_time(data.get('receipt_time')),
         is_cancelled=bool(data.get('is_cancelled')),
-        extraction_source='llm_vision', llm_status='ok',
+        extraction_source=source, llm_status='ok',
         document_type=document_type,
         category=category, raw_llm_response=json.dumps(judgment),
         device_id=submission.device_id, submission_id=submission.id,
@@ -1270,9 +1725,13 @@ def _receipt_from_photo(submission, config):
     return receipt
 
 
-def _verify_photo_against_tra(submission, config, url, source):
+def _verify_photo_against_tra(submission, config, url, source, label='Photo'):
     """
     Tries to turn a photograph into a verified receipt using a URL recovered from it.
+
+    `label` is only ever the log prefix. Pasted records take this same path (see
+    _receipt_from_text) and a line reading '[Photo] Verified against TRA' on a
+    submission that has no photograph is the kind of log that costs an afternoon.
 
     Returns (receipt, settled). `settled` is the important half: True means this
     submission's outcome is decided and the caller must stop - it verified, or it is a
@@ -1302,14 +1761,14 @@ def _verify_photo_against_tra(submission, config, url, source):
         # A URL submission fails here on purpose - guessing at numbers is what this
         # pipeline exists to avoid. A photograph is different: nobody is guessing,
         # there is a picture of the receipt and a model that can read it.
-        print(f"[Photo] The verified page did not parse ({e}); reading the photo instead.")
+        print(f"[{label}] The verified page did not parse ({e}); reading it here instead.")
         return None, False
 
     if receipt is not None:
         # The photograph is still the submission's input, and is still worth looking at,
         # but the numbers on this receipt came from the portal - which is what
         # extraction_source='tra_html', set by the URL path, already records.
-        print(f"[Photo] Verified against TRA via {source}: {submission.receipt_code}")
+        print(f"[{label}] Verified against TRA via {source}: {submission.receipt_code}")
 
     return receipt, not exhausted
 
@@ -1429,6 +1888,8 @@ def process_submission(submission):
     never inferred: see utils/tra_parser. The LLM is asked only to categorise the
     purchase and comment on it, so an LLM outage costs the analysis and nothing else.
     Photographed receipts have no machine-readable source and still go through vision.
+    A pasted record - the SMS that a LUKU or water payment produces instead of a
+    receipt - has no source either, and goes through the text model for the same reason.
     """
     print(f"[TaskStart] Processing submission {submission.id} (Type: {submission.input_type})")
     try:
@@ -1440,6 +1901,8 @@ def process_submission(submission):
             receipt = _receipt_from_tra_url(submission, config)
         elif submission.input_type == 'photo':
             receipt = _receipt_from_photo(submission, config)
+        elif submission.input_type == 'text':
+            receipt = _receipt_from_text(submission, config)
         else:
             raise ValueError(f"Unsupported submission type '{submission.input_type}'.")
 
@@ -1666,11 +2129,101 @@ def receipt_detail(receipt_id):
         corrected_fields=json.loads(receipt.corrected_fields or '[]'),
     )
 
-# Windows the insights page can be run over. Bounded on purpose: every analysis there
-# needs the line items loaded, and "what is happening lately" is the question being
-# asked - a five-year sweep answers a different one, more slowly.
+# Windows the insights page can be run over. Kept only as an inbound alias now: the
+# page speaks the dashboard's own filter language (start_date/end_date and the three
+# multi-value pickers), and every link made before it did still has to mean what it
+# meant. Translated to a date range on the way in, never rendered back out.
 INSIGHT_WINDOWS = {'30': 30, '90': 90, '365': 365}
-DEFAULT_INSIGHT_WINDOW = '90'
+
+
+def _read_insight_filters(args):
+    """
+    The insights page reads the dashboard's filter, in exactly the same words.
+
+    One vocabulary across both pages is the whole point of the pickers living here: a
+    range narrowed on this page has to still mean that range when it is opened in the
+    ledger, and a supplier pinned from a receipt row has to survive the trip back. The
+    alternative - two filter languages that agree until they do not - is how a figure
+    quoted off one page ends up disagreeing with the table it was supposedly read from.
+    """
+    filters = _read_filters(args)
+    # Insights are about money that was actually recorded. Which tab a table happens to
+    # be standing on is not a question this page can be asked.
+    filters['tab'] = 'processed'
+
+    if not filters['start_date'] and not filters['end_date']:
+        window = args.get('window')
+        if window in INSIGHT_WINDOWS:
+            end = datetime.utcnow().date()
+            filters['start_date'] = (end - timedelta(days=INSIGHT_WINDOWS[window] - 1)).isoformat()
+            filters['end_date'] = end.isoformat()
+    return filters
+
+
+def _insight_linkers(filters):
+    """
+    The link builders the insights page draws its pickers with.
+
+    Every control on that page is an ordinary link carrying the whole filter with one
+    thing changed. No JavaScript, and - more to the point - every state the page can
+    reach is a URL somebody can bookmark, paste into a message, or hand to the ledger
+    and the CSV so all three are looking at the same rows. Handing the template
+    functions rather than pre-built URLs is what lets a facet of fifty values cost one
+    line of Jinja.
+    """
+    def carried(changes):
+        merged = {
+            'search': filters['search'],
+            'category': _selection(filters, 'category'),
+            'device': _selection(filters, 'device'),
+            'vendor': _selection(filters, 'vendor'),
+            'start_date': filters['start_date'],
+            'end_date': filters['end_date'],
+            **changes,
+        }
+        # Empty values are dropped rather than sent blank, so 'all time' is an address
+        # with no dates in it instead of one carrying two empty ones.
+        return {key: value for key, value in merged.items() if value not in ('', None, [])}
+
+    def link(**changes):
+        return url_for('insights', **carried(changes))
+
+    def toggle(key, value):
+        """The same list with this value added if it is missing, removed if it is not."""
+        current = _selection(filters, key)
+        remaining = [entry for entry in current if entry != value]
+        return link(**{key: remaining if len(remaining) != len(current) else [*current, value]})
+
+    return {
+        'filter_link': link,
+        'filter_toggle': toggle,
+        # The same filter, in the two other places it has to mean the same thing.
+        'ledger_url': url_for('index', **carried({})),
+        'csv_url': url_for('export_csv', **carried({})),
+    }
+
+
+def _insight_date_presets(today):
+    """
+    The date shortcuts, computed where the page is rendered.
+
+    The same five the dashboard's drawer used to offer, under the same names, because a
+    range people already reach for should not be renamed by having moved. Server-side
+    because this page deliberately has no JavaScript to compute them in - which also
+    makes them UTC, as every other date on it already is.
+    """
+    month_start = today.replace(day=1)
+    previous_end = month_start - timedelta(days=1)
+    return [
+        {'label': 'All time', 'start': '', 'end': ''},
+        {'label': 'Last 30 days', 'start': (today - timedelta(days=29)).isoformat(),
+         'end': today.isoformat()},
+        {'label': 'This month', 'start': month_start.isoformat(), 'end': today.isoformat()},
+        {'label': 'Last month', 'start': previous_end.replace(day=1).isoformat(),
+         'end': previous_end.isoformat()},
+        {'label': 'This year', 'start': today.replace(month=1, day=1).isoformat(),
+         'end': today.isoformat()},
+    ]
 
 @app.route('/insights')
 @login_required
@@ -1678,24 +2231,28 @@ def insights():
     """
     Everything the receipts say once you stop looking at them one at a time.
 
+    Also where the filter now lives. The dashboard used to carry the pickers and a
+    summary panel beside them, which meant the page you go to for a row was also the
+    page you go to for a question, and did neither well. The pickers moved here, where
+    the answer to changing one is the whole page rather than a column of it; the
+    dashboard kept the table, the tabs and the search.
+
     Ordered by what it costs to ignore: money that cannot be reclaimed first, then
     money about to become unreclaimable, then where it all went, then what has changed
     in what things cost. Rendered server-side - there is no state to keep here, and a
     page that reports figures should not be able to fail to a blank screen.
     """
-    window = request.args.get('window', DEFAULT_INSIGHT_WINDOW)
-    days = INSIGHT_WINDOWS.get(window, INSIGHT_WINDOWS[DEFAULT_INSIGHT_WINDOW])
+    filters = _read_insight_filters(request.args)
     today = datetime.utcnow().date()
-    start = today - timedelta(days=days - 1)
-
     config = get_instance_config()
+
+    # The same rows the dashboard's table and its CSV would hand back under this
+    # filter, narrowed to the ones that are money. Selected through a subquery rather
+    # than a list of ids so the filter stays one round trip at any size.
+    matched = _spending_only(_filtered_submissions(filters, ordered=False))
     receipts = (
-        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
-        .filter(
-            Submission.status == 'completed',
-            Receipt.receipt_date >= start,
-            Receipt.receipt_date <= today,
-        )
+        Receipt.query
+        .filter(Receipt.submission_id.in_(matched.with_entities(Submission.id)))
         .options(
             selectinload(Receipt.items), selectinload(Receipt.tax_lines),
             joinedload(Receipt.submission), joinedload(Receipt.vendor),
@@ -1705,19 +2262,47 @@ def insights():
         .all()
     )
 
-    # Every submission in the window, not just the ones that produced a receipt: a
-    # verification failure rate needs the attempts that failed as its numerator and
-    # the ones that worked as its denominator.
-    submissions = Submission.query.filter(Submission.received_at >= datetime.combine(start, datetime.min.time())).all()
+    # The stretch of calendar the figures actually cover. Not the same as the range
+    # asked for: 'all time' names no dates at all, and a range can be far wider than
+    # the receipts inside it. A total without its denominator is a number the reader
+    # has to trust rather than judge.
+    asked_start = _parse_date_arg(filters['start_date'])
+    asked_end = _parse_date_arg(filters['end_date'])
+    dated = [receipt.receipt_date for receipt in receipts if receipt.receipt_date]
+    start = asked_start or (min(dated) if dated else today)
+    end = asked_end or (max(dated) if dated else today)
+    days = max(1, (end - start).days + 1)
+
+    # Every submission over the same stretch, not just the ones that produced a
+    # receipt: a verification failure rate needs the attempts that failed as its
+    # numerator and the ones that worked as its denominator. Narrowed by device when
+    # the filter names one, since 'which phone is producing bad scans' is the question
+    # that section exists to answer.
+    attempts = Submission.query.filter(
+        Submission.received_at >= datetime.combine(start, datetime.min.time()),
+    )
+    if asked_end:
+        attempts = attempts.filter(
+            Submission.received_at < datetime.combine(end + timedelta(days=1), datetime.min.time()),
+        )
+    devices = _selection(filters, 'device')
+    if devices:
+        attempts = attempts.filter(Submission.device_id.in_(devices))
 
     return render_template(
         'insights.html',
-        reliability=analytics.verification_reliability(receipts, submissions),
+        reliability=analytics.verification_reliability(receipts, attempts.all()),
         failure_titles={reason: guidance['title'] for reason, guidance in FAILURE_GUIDANCE.items()},
-        window=window if window in INSIGHT_WINDOWS else DEFAULT_INSIGHT_WINDOW,
-        windows=INSIGHT_WINDOWS,
-        days=days, start=start, today=today,
+        days=days, start=start, end=end, today=today,
         receipt_count=len(receipts),
+        # The pickers, what there is to pick, and what the picking added up to - read
+        # by the same functions the dashboard reads them with, so the two pages cannot
+        # report different totals for the same filter.
+        filters=filters,
+        facets=_filter_facets(filters),
+        holds=_filtered_insights(filters),
+        date_presets=_insight_date_presets(today),
+        **_insight_linkers(filters),
         attention=_attention(receipts, config, today),
         categories=analytics.category_breakdown(receipts),
         regions=analytics.region_breakdown(receipts),
@@ -1725,7 +2310,7 @@ def insights():
         devices=analytics.device_breakdown(receipts),
         weekday=analytics.weekday_pattern(receipts),
         compliance_scoreboard=_compliance_scoreboard(receipts, config),
-        months=analytics.monthly_totals(receipts, months=min(12, max(2, days // 30)), today=today),
+        months=analytics.monthly_totals(receipts, months=min(12, max(2, days // 30)), today=end),
         price_movements=analytics.unit_price_movements(receipts),
         cheaper=analytics.cheaper_elsewhere(receipts),
         anomalies=analytics.spend_anomalies(receipts),
@@ -2114,6 +2699,48 @@ def _stored_qr_scan(submission):
         return None
 
 
+# What of a stored transcription is worth putting on the submission page, in the order
+# somebody checking a document reads it. Deliberately the same fields, and the same
+# labels, that CORRECTABLE_FIELDS offers on the receipt page afterwards: this panel is
+# the preview of that form, and two lists that disagree would show an admin a figure
+# here they then cannot find there.
+DRAFT_FIELDS = (
+    ('vendor_name', 'Vendor', 'text'),
+    ('vendor_tin', 'Vendor TIN', 'text'),
+    ('vrn', 'VRN', 'text'),
+    ('receipt_date', 'Receipt date', 'text'),
+    ('receipt_time', 'Receipt time', 'text'),
+    ('receipt_verification_code', 'Verification code', 'text'),
+    ('receipt_number', 'Receipt no.', 'text'),
+    ('total_amount', 'Total incl. tax', 'money'),
+    ('total_excl_tax', 'Total excl. tax', 'money'),
+    ('vat_amount', 'Tax', 'money'),
+)
+
+
+def _draft_fields(draft):
+    """
+    A stored transcription as (label, value) rows, or None when there is none.
+
+    Money is formatted through the same helper the rest of the app uses rather than
+    printed as whatever JSON the model returned, so a total reads as a total on a page
+    whose whole purpose is letting somebody check it against the paper beside them.
+    """
+    if not draft:
+        return None
+
+    rows = []
+    for key, label, kind in DRAFT_FIELDS:
+        value = draft.get(key)
+        if value is None or value == '':
+            continue
+        if kind == 'money':
+            cents = to_cents(value)
+            value = format_cents(cents) if cents is not None else value
+        rows.append((label, str(value)))
+    return rows
+
+
 @app.route('/submissions/<int:submission_id>')
 @login_required
 def submission_detail(submission_id):
@@ -2140,12 +2767,20 @@ def submission_detail(submission_id):
         twin = Receipt.query.filter_by(receipt_verification_code=submission.receipt_code).first()
 
     scan = _stored_qr_scan(submission)
+    config = get_instance_config()
     return render_template(
         'submission_detail.html',
         submission=submission,
         scan=scan, scan_summary=qr.summarise(scan),
         plan=retry_plan(submission),
         reason=FAILURE_GUIDANCE.get(submission.failure_reason),
+        # What the vision model read, and whether the address being retried was built
+        # out of it. Together they are the whole of the question this page could not
+        # answer before: is this actually a TRA receipt, and if not, what is it?
+        draft=_stored_llm_draft(submission),
+        draft_fields=_draft_fields(_stored_llm_draft(submission)),
+        rebuild_allowed=_may_rebuild_url(submission, config),
+        rebuild_allowed_here=(config is None or config.rebuilds_urls_from_text()),
         # Whichever address we would actually ask the portal for. A photograph's lives in
         # recovered_url and a URL submission's in input_data, but the time printed on the
         # receipt is the same fact either way, and it is half of what an admin corrects.
@@ -2185,7 +2820,9 @@ def requeue_submission(submission_id):
         'id': submission.id, 'submission_id': submission.id, 'status': submission.status,
         'received_at': submission.received_at.isoformat(), 'input_type': submission.input_type,
         # The same public URL every other event carries - never the server-side path.
-        'input_data': submission_photo_url(submission) or submission.input_data,
+        'input_data': (submission_photo_url(submission) if submission.input_type == 'photo'
+                       else submission.input_data),
+        'photo_url': submission_photo_url(submission),
         'description': submission.description,
         'location': submission.location, 'device_id': submission.device_id,
         'device_name': submission.device.name if submission.device else 'Unknown Device',
@@ -2200,6 +2837,125 @@ def requeue_submission(submission_id):
 @login_required
 def retry_submission(submission_id):
     return requeue_submission(submission_id)
+
+
+@app.route('/submissions/<int:submission_id>/keep-extraction', methods=['POST'])
+@login_required
+def keep_submission_extraction(submission_id):
+    """
+    Stops guessing at TRA and keeps what the vision model read off the photograph.
+
+    The button for the case the pipeline handles worst. Layer 2 of _receipt_from_photo
+    rebuilds a portal address out of a code the model transcribed, and on a document
+    that is not an EFD receipt at all - a mobile-money SMS, a delivery note, a till slip
+    from a shop with no EFD - it rebuilds one anyway, because a plausible run of digits
+    is exactly what those documents contain. The address is then never confirmed, the
+    submission spends its whole retry schedule finding that out, and the one usable
+    reading of the document sits unused on the row the entire time.
+
+    This ends that, with no new vision call and no further requests to the portal:
+
+      * The rebuild is declined for this submission for good, so a later retry or an
+        admin pressing "Send to TRA again" cannot resurrect the guessed address.
+      * The address the guess produced is cleared, along with the receipt code taken
+        from it - both are that guess, and leaving them would go on describing this
+        submission as a receipt TRA ought to know about.
+      * The stored transcription becomes the receipt, exactly as layer 3 would have
+        stored it, flagged extraction_source='llm_vision' so it stays distinguishable
+        from figures the portal supplied.
+
+    What it does not do is settle the numbers. They are a model's reading and they are
+    editable from the receipt page the moment this returns - which is the point of
+    landing there rather than leaving them on a submission nobody can correct.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+    if submission.receipt is not None:
+        return jsonify({'error': 'This submission already has a receipt behind it.',
+                        'receipt_id': submission.receipt.id}), 409
+
+    draft = _stored_llm_draft(submission)
+    if not draft:
+        return jsonify({
+            'error': 'Nothing was read off this photograph yet, so there is nothing to keep. '
+                     'That happens when the photo has not reached the vision model - a '
+                     'submission still queued for its first attempt, or one whose QR code '
+                     'decoded and went straight to the portal.',
+        }), 409
+
+    # Declined first and committed with the rest: were this only set after the receipt
+    # stored, a failure in between would leave the guessed address live on a submission
+    # an admin has already ruled on.
+    submission.rebuild_declined = True
+    submission.recovered_url = None
+    # Re-derived from the transcription rather than cleared, so that every branch below
+    # keeps an identity for this document - including the duplicate one, which commits
+    # and returns without ever building a receipt to take the code from.
+    submission.receipt_code = (draft.get('receipt_verification_code') or '').strip() or None
+
+    config = get_instance_config()
+    receipt = _receipt_from_transcription(submission, draft, config)
+    if receipt is None:
+        # _register_duplicate has already committed the submission as a duplicate of a
+        # receipt we hold, which is a real outcome and not a failure.
+        db.session.commit()
+        return jsonify({'submission_id': submission.id, 'status': submission.status,
+                        'message': 'That receipt is already in the ledger, so this '
+                                   'submission was recorded as a duplicate.'}), 200
+
+    submission.next_attempt_at = None
+    submission.claimed_at = None
+    submission.error_message = None
+    submission.failure_reason = None
+    _complete_submission(submission, receipt, config)
+
+    return jsonify({
+        'submission_id': submission.id,
+        'receipt_id': receipt.id,
+        'status': submission.status,
+        'message': 'Kept what was read off the photograph. Correct anything that is wrong '
+                   'from here.',
+    }), 200
+
+
+@app.route('/submissions/<int:submission_id>/rebuild-policy', methods=['POST'])
+@login_required
+def set_submission_rebuild_policy(submission_id):
+    """
+    Turns the address-guessing on or off for one submission, without settling it.
+
+    Separate from keep-extraction because the two answer different questions. That one
+    says "this document is not a TRA receipt, file what we read"; this one says "stop
+    rebuilding the address, but keep trying" - which is what an admin wants when the
+    photograph *is* a receipt and they intend to type the code in by hand, or when the
+    QR is worth another rescan first.
+
+    Declining clears the guessed address so the next attempt starts from the photograph
+    again rather than from the digits that failed. Re-allowing it deliberately does not
+    put the old address back: the guess is cheap to make again and the stale one was
+    wrong often enough to be worth re-deriving.
+    """
+    submission = db.session.get(Submission, submission_id)
+    if submission is None:
+        return jsonify({'error': 'No such submission.'}), 404
+
+    declined = (request.form.get('declined') or '').lower() in ('1', 'true', 'on', 'yes')
+    submission.rebuild_declined = declined
+    if declined and submission.recovered_url and not submission.corrected_at:
+        # Only a guessed address is dropped. One an admin typed by hand carries
+        # corrected_at, and throwing that away would delete somebody's work.
+        submission.recovered_url = None
+        submission.receipt_code = None
+    db.session.commit()
+
+    return jsonify({
+        'submission_id': submission.id,
+        'rebuild_declined': submission.rebuild_declined,
+        'message': ('Addresses will no longer be rebuilt from text read off this photo.'
+                    if declined else
+                    'Addresses may be rebuilt from text read off this photo again.'),
+    }), 200
 
 
 @app.route('/submissions/<int:submission_id>/rescan', methods=['POST'])
@@ -2233,10 +2989,14 @@ def rescan_submission_photo(submission_id):
     if submission is None:
         return jsonify({'error': 'No such submission.'}), 404
 
-    if submission.input_type != 'photo':
-        return jsonify({'error': 'This submission is a URL, not a photograph.'}), 409
-
+    # Asked of the photograph, not of the input type. A scan whose QR code the phone
+    # read now files the picture alongside the code, so a URL submission can have one -
+    # and running the decoder over those is the only way to find out what the server
+    # side actually reads on ordinary receipts, rather than only on the ones a phone had
+    # already failed to decode.
     photo_path = submission_photo_path(submission)
+    if not photo_path:
+        return jsonify({'error': 'This submission has no photograph to scan.'}), 409
     if not os.path.exists(photo_path):
         return jsonify({'error': 'The photograph for this submission is no longer on disk.'}), 409
 
@@ -2820,6 +3580,11 @@ def configure_instance():
         # instance wants - so an empty box has to store NULL, not ''.
         config.llm_text_model = optional('llm_text_model')
         config.llm_vision_model = optional('llm_vision_model')
+        # A checkbox posts nothing at all when it is unticked, so the tab it lives on
+        # has to be identified some other way before its absence can mean 'off'. Without
+        # this guard, saving any other tab would silently switch the rebuild off.
+        if 'llm_settings' in request.form:
+            config.rebuild_url_from_text = 'rebuild_url_from_text' in request.form
         config.google_sheet_id = request.form.get('google_sheet_id')
         config.google_service_account_json = request.form.get('google_service_account_json')
         config.post_callback_url = request.form.get('post_callback_url')
@@ -3066,6 +3831,16 @@ def delete_device(device_id):
 
 SCAN_HISTORY_PAGE_SIZE = 50
 
+# The longest pasted purchase record a submission will carry.
+#
+# Submission.input_data is a VARCHAR(1024) and this has to fit inside it, which on
+# SQLite means nothing and on Postgres means a failed insert. Every real example of
+# this - a LUKU token SMS, an M-Pesa confirmation, a bank alert - is comfortably under
+# two hundred characters, so the cap is only ever reached by somebody pasting the wrong
+# thing: an email thread, a copied web page. They get the first thousand characters of
+# it filed rather than an error, which is the better of the two failures.
+TEXT_SUBMISSION_MAX_CHARS = 1000
+
 
 # All three scan routes render the same document.
 #
@@ -3134,17 +3909,24 @@ def scan_manifest():
 
     `id` is fixed so the browser still recognises every one of these as the same
     installed app, however the start_url differs.
+
+    Everything a person sees comes from the instance's own branding rather than from
+    this file. An installed app is an icon and a caption on somebody's home screen,
+    sitting next to their bank and their WhatsApp, and "Receipts" is the caption of an
+    app that could belong to anyone - which is exactly wrong for a tool a business hands
+    to its drivers and its shop staff. It is that business's app; it says so.
     """
-    config = get_instance_config()
-    name = (config.business_name if config and config.business_name else 'Karani')
+    brand = branding.of(get_instance_config())
 
     token = (request.args.get('t') or '').strip()
     start_url = url_for('scan_home', t=token) if token else '/scan/'
 
     return jsonify({
-        'name': f'{name} Receipts',
-        'short_name': 'Receipts',
-        'description': 'Scan and submit EFD receipts, online or off.',
+        'name': f'{brand.name} Receipts',
+        # What fits under an icon. See Brand.short_name - a long business name is cut at
+        # a word rather than left to the operating system's ellipsis.
+        'short_name': brand.short_name,
+        'description': f'Scan and submit EFD receipts for {brand.name}, online or off.',
         'id': '/scan/',
         'start_url': start_url,
         'scope': '/scan/',
@@ -3217,11 +3999,17 @@ def _parse_captured_at(value):
 @device_required
 def scan_api_sync():
     """
-    Takes a batch of scanned receipt URLs from a device's outbox.
+    Takes a batch of scanned receipt URLs - and pasted purchase records - from a
+    device's outbox.
 
     Every item carries the client_uuid the phone minted for it, and the response maps
     each one to its submission so the phone knows exactly what to clear. Items are
     handled independently: one malformed row does not cost the other twenty-nine.
+
+    `text` rides in this batch rather than getting a door of its own because it is the
+    same shape of request: a few hundred bytes of JSON with no blob in it. Photos are
+    the ones that need /scan/api/sync/photo, and they need it because a multi-megabyte
+    upload that fails must not take twenty-nine small ones down with it.
     """
     payload = request.get_json(silent=True) or {}
     items = payload.get('items')
@@ -3237,14 +4025,16 @@ def scan_api_sync():
             continue
         client_uuid = (item.get('client_uuid') or '').strip()
         receipt_url = (item.get('receipturl') or '').strip()
-        if not client_uuid or not receipt_url:
+        text = (item.get('text') or '').strip()
+        if not client_uuid or not (receipt_url or text):
             results.append({'client_uuid': client_uuid or None, 'status': 'rejected',
-                            'error': 'client_uuid and receipturl are both required.'})
+                            'error': 'client_uuid and one of receipturl or text are required.'})
             continue
 
         submission, created = ingest_submission(
             g.device,
-            url=receipt_url,
+            url=receipt_url or None,
+            text=text or None,
             description=item.get('description'),
             location=item.get('location'),
             client_uuid=client_uuid,
@@ -3273,9 +4063,17 @@ def scan_api_sync_photo():
     """
     Takes one photo. Deliberately not batched: a multi-megabyte blob that fails
     should not take the rest of the queue down with it.
+
+    `receipturl` is optional and is what makes this the endpoint for a scan the phone
+    *did* decode, as well as one it did not. The two used to be different submissions
+    through different doors - a decoded code went up in the JSON batch and the picture
+    it was read from was dropped on the phone - which left every verified receipt with
+    no image behind it. Sending both here files them as one submission: processed as the
+    URL, with the photograph kept beside it.
     """
     photo = request.files.get('receiptphoto')
     client_uuid = (request.form.get('client_uuid') or '').strip()
+    receipt_url = (request.form.get('receipturl') or '').strip() or None
     if not photo:
         return jsonify({'error': '`receiptphoto` is required.'}), 400
     if not client_uuid:
@@ -3284,6 +4082,7 @@ def scan_api_sync_photo():
     submission, created = ingest_submission(
         g.device,
         photo=photo,
+        url=receipt_url,
         description=request.form.get('description'),
         location=request.form.get('location'),
         client_uuid=client_uuid,
@@ -3490,15 +4289,26 @@ def scan_api_stream():
 
 # --- INTAKE & TASK RUNNER ENDPOINTS ---
 
-def ingest_submission(device, photo=None, url=None, description=None, location=None,
-                      client_uuid=None, captured_at=None):
+def ingest_submission(device, photo=None, url=None, text=None, description=None,
+                      location=None, client_uuid=None, captured_at=None):
     """
     Puts one receipt on the queue. Returns (submission, created).
 
     The single place a submission is born, shared by the bot endpoint and the
-    scanner's sync. Photos are stored as an absolute filesystem path for the backend
-    and announced as a public URL for the dashboard - two different strings for two
-    different readers, which is the one subtlety here.
+    scanner's sync. Photos are stored as a bare filename for the backend and announced
+    as a public URL for the dashboard - two different strings for two different readers,
+    which is the one subtlety here.
+
+    `photo` and `url` are not exclusive. A phone that decodes a receipt's QR code is
+    holding a photograph of that receipt at the same instant, and sending both is what
+    keeps the paper behind the verified figures - see Submission.photo_filename.
+
+    `text` is the third kind of evidence, and the one this app spent a long time having
+    no answer for: the expenses that never produce a document at all. A LUKU token, a
+    water bill, a mobile money transfer - what the payer is left holding is an SMS, and
+    photographing a screen to submit it is a workaround, not a feature. It ranks below
+    both of the others: text is somebody's paste, a URL is a code TRA will confirm, and
+    a photograph is at least a picture of the paper.
 
     Idempotent on client_uuid: an offline device retries a scan until it is
     acknowledged, and a response lost on the way back must not leave a second copy
@@ -3519,9 +4329,10 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
     db_input_data = ''
     # This will be the path sent to the frontend via SSE.
     frontend_input_data = ''
+    # The photograph filed beside a URL, when the scan carried both.
+    photo_filename = None
 
     if photo:
-        input_type = 'photo'
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
 
         # Not photo.save(). What arrives can be a 12MP frame straight off a sensor, and
@@ -3532,23 +4343,46 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         #
         # Reassigned, because a re-encode also settles the extension: what is stored is
         # the name of the file that actually exists, not the one that was uploaded.
-        filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
+        photo_filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
 
-        # Only the filename is stored. Writing the absolute path here would tie every
-        # row to wherever the persistence volume happened to be mounted that day, and
-        # moving the volume would orphan every photo already in the database.
-        db_input_data = filename
-        frontend_input_data = url_for('uploaded_file', filename=filename)
-
-    elif url:
+    if url:
+        # A URL wins the input_type even when a photograph came with it, and that
+        # ordering is the whole point of accepting both. The code is the stronger claim
+        # about which receipt this is - it goes to TRA and comes back with the portal's
+        # own figures - so the submission is processed as the URL it is, and the picture
+        # rides along as evidence rather than as a second thing to read. Only when the
+        # code is absent is the photograph the input.
         input_type = 'url'
         # For URLs, the path is the same for both backend and frontend.
         db_input_data = url
         frontend_input_data = url
 
+    elif photo_filename:
+        input_type = 'photo'
+        # Only the filename is stored. Writing the absolute path here would tie every
+        # row to wherever the persistence volume happened to be mounted that day, and
+        # moving the volume would orphan every photo already in the database.
+        db_input_data = photo_filename
+        frontend_input_data = url_for('uploaded_file', filename=photo_filename)
+        # Already the input; a second copy of the name in photo_filename would leave two
+        # columns to keep in step for no gain. submission_photo_name reads both.
+        photo_filename = None
+
+    elif text:
+        # Below `photo` as well as below `url`: a submission that carries both a
+        # picture and a pasted note is a photographed receipt with a note on it, and
+        # the picture is the better evidence of the two.
+        input_type = 'text'
+        # Bounded to the column. The scanner caps the paste at the same length before
+        # it is ever queued, so this only ever catches a caller that did not - and a
+        # silently truncated record beats a 500 on a receipt somebody is trying to file.
+        db_input_data = text.strip()[:TEXT_SUBMISSION_MAX_CHARS]
+        frontend_input_data = db_input_data
+
     new_submission = Submission(
         device_id=device.id, input_type=input_type,
         input_data=db_input_data, # Save the full filesystem path to the DB
+        photo_filename=photo_filename,
         description=description, location=location,
         client_uuid=client_uuid, captured_at=captured_at,
         # Read before anything is queued. A submission that never verifies still has
@@ -3563,6 +4397,8 @@ def ingest_submission(device, photo=None, url=None, description=None, location=N
         "received_at": new_submission.received_at.isoformat(),
         "input_type": new_submission.input_type,
         "input_data": frontend_input_data, # Send the public URL to the frontend
+        "photo_url": (url_for('uploaded_file', filename=photo_filename)
+                      if photo_filename else (frontend_input_data if input_type == 'photo' else None)),
         "description": new_submission.description, "location": new_submission.location,
         "device_id": device.id,
     }
@@ -3707,46 +4543,68 @@ def run_tasks():
 @app.route('/uploads/<path:filename>')
 @login_required
 def uploaded_file(filename):
-    """Serves a file from the upload folder."""
-    return send_from_directory(
+    """
+    Serves a receipt photograph from the upload folder.
+
+    Cached hard, and safely: a stored filename carries the timestamp it was written at
+    and the file underneath it is never rewritten, so the only thing that can change at
+    one of these addresses is the file being deleted. Without this the dashboard
+    re-downloads every photograph on every visit - each one up to
+    utils.images.STORED_MAX_EDGE, on a list where a dozen of them are on screen at once.
+
+    `private` because these are one business's receipts behind @login_required: shared
+    caches, including any proxy in front of this app, must not keep a copy that a
+    different session could be handed.
+    """
+    response = send_from_directory(
         app.config['UPLOAD_FOLDER'],
         filename,
         as_attachment=False # Display in browser instead of downloading
     )
+    response.headers['Cache-Control'] = 'private, max-age=31536000, immutable'
+    return response
+
+# The spreadsheet's columns, named once. A row is built against this list rather than
+# in step with it, so a submission that never produced a receipt can be padded to the
+# same width and still line up under the columns it has nothing to say about.
+EXPORT_HEADER = [
+    'ID', 'Status', 'Device', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
+    'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
+    'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
+    'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
+    'Category', 'Source', 'Document Type', 'Items', 'LLM Description', 'Tax Analysis',
+    'Customer Name', 'Customer ID',
+    # Computed by utils/compliance, so a spreadsheet can be filtered on what is
+    # actually claimable rather than on what was merely spent.
+    'Compliance Score', 'Input VAT Charged', 'Input VAT Recoverable',
+    'Standard Rated Excl', 'Zero Rated Or Exempt', 'Claim Deadline',
+    'Days Left To Claim', 'Failed Checks', 'Recovery Blockers',
+    'Computed Category', 'WHT Estimate',
+]
+
 
 @app.route('/export/csv')
 @login_required
 def export_csv():
-    search_query = request.args.get('search', '').lower()
-    start_date_str = request.args.get('start_date', '')
-    end_date_str = request.args.get('end_date', '')
+    """
+    Everything the current filter matches, as a spreadsheet.
 
-    query = Receipt.query.join(Submission).filter(Submission.status == 'completed')
+    The same filter the table is showing - the tab, the search, the dates, and every
+    selected category, device and supplier - read by the same function the table reads
+    it with. An export that quietly means something broader than the screen it was
+    started from is worse than no export at all: the difference only surfaces after
+    somebody has filed the number.
 
-    try:
-        if start_date_str:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-            query = query.filter(Receipt.receipt_date >= start_date)
-        if end_date_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-            query = query.filter(Receipt.receipt_date <= end_date)
-    except ValueError:
-        flash('Invalid date format provided for export.', 'danger')
-        return redirect(url_for('index'))
-    
-    # --- MODIFIED: Added .options() for eager loading of the 'submission' relationship ---
-    query = query.options(joinedload(Receipt.submission), joinedload(Receipt.items), joinedload(Receipt.tax_lines))
-
-    receipts = query.order_by(Receipt.receipt_date.desc()).all()
-    
-    if search_query:
-        filtered_receipts = []
-        for receipt in receipts:
-            vendor_match = receipt.vendor_name and search_query in receipt.vendor_name.lower()
-            desc_match = receipt.submission.description and search_query in receipt.submission.description.lower()
-            if vendor_match or desc_match:
-                filtered_receipts.append(receipt)
-        receipts = filtered_receipts
+    Rows the filter matches that have no receipt behind them (a failure, a submission
+    still queued) are exported too, with their receipt columns empty. Filtering to
+    'Failed' and downloading an empty file would be a straight lie about what is there.
+    """
+    filters = _read_filters(request.args)
+    submissions = _filtered_submissions(filters).options(
+        joinedload(Submission.receipt).selectinload(Receipt.items),
+        joinedload(Submission.receipt).selectinload(Receipt.tax_lines),
+        joinedload(Submission.device),
+    ).all()
 
     # Read before the response starts streaming: generate() is consumed after the
     # request context has gone, so everything it touches has to be loaded by now.
@@ -3755,61 +4613,13 @@ def export_csv():
     def generate():
         data = io.StringIO()
         writer = csv.writer(data)
-        header = [
-            'ID', 'Status', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
-            'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
-            'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
-            'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
-            'Category', 'Source', 'Document Type', 'Items', 'LLM Description', 'Tax Analysis',
-            'Customer Name', 'Customer ID',
-            # Computed by utils/compliance, so a spreadsheet can be filtered on what is
-            # actually claimable rather than on what was merely spent.
-            'Compliance Score', 'Input VAT Charged', 'Input VAT Recoverable',
-            'Standard Rated Excl', 'Zero Rated Or Exempt', 'Claim Deadline',
-            'Days Left To Claim', 'Failed Checks', 'Recovery Blockers',
-            'Computed Category', 'WHT Estimate',
-        ]
-        writer.writerow(header)
+        writer.writerow(EXPORT_HEADER)
         yield data.getvalue()
         data.seek(0)
         data.truncate(0)
 
-        # This will now work because receipt.submission was pre-loaded.
-        for receipt in receipts:
-            raw_response = json.loads(receipt.raw_llm_response or '{}')
-            assessment = assess_receipt(receipt, config)
-            by_code = {line.code: format_cents(line.amount_cents) for line in receipt.tax_lines}
-            items = '; '.join(
-                f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
-                f"{f' [{item.tax_code}]' if item.tax_code else ''}"
-                for item in receipt.items
-            )
-            row = [
-                receipt.submission_id, 'completed', receipt.submission.received_at.strftime('%Y-%m-%d %H:%M:%S'),
-                receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
-                receipt.vrn, receipt.tax_office, receipt.efd_serial, receipt.receipt_number,
-                receipt.z_number, receipt.receipt_verification_code, receipt.receipt_date,
-                receipt.receipt_time, format_cents(receipt.total_excl_tax_cents),
-                format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
-                format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
-                'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
-                receipt.category, receipt.extraction_source,
-                # Blank on everything TRA verified, which is by far the common case:
-                # only a photograph can be anything other than an EFD receipt.
-                receipt.document_type or '', items, receipt.submission.description,
-                raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id,
-                assessment.score, format_cents(assessment.input_vat_cents),
-                format_cents(assessment.recoverable_vat_cents),
-                format_cents(assessment.standard_rated_excl_cents),
-                format_cents(assessment.zero_or_exempt_cents),
-                assessment.claim_deadline.isoformat() if assessment.claim_deadline else '',
-                assessment.claim_days_left if assessment.claim_days_left is not None else '',
-                '; '.join(check.id for check in assessment.failed_checks),
-                '; '.join(assessment.recovery_blockers),
-                assessment.computed_category or '',
-                format_cents(assessment.wht_total_cents),
-            ]
-            writer.writerow(row)
+        for submission in submissions:
+            writer.writerow(_export_row(submission, config))
             yield data.getvalue()
             data.seek(0)
             data.truncate(0)
@@ -3817,8 +4627,58 @@ def export_csv():
     response = Response(generate(), mimetype='text/csv')
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     response.headers["Content-Disposition"] = f'attachment; filename="receipts_export_{timestamp}.csv"'
-    
+
     return response
+
+
+def _export_row(submission, config):
+    """One submission as a spreadsheet row, receipt or no receipt."""
+    device_name = submission.device.name if submission.device else ''
+    received = submission.received_at.strftime('%Y-%m-%d %H:%M:%S') if submission.received_at else ''
+    receipt = submission.receipt
+
+    if receipt is None:
+        # What is known about a submission with no receipt behind it, in the columns
+        # that are about the submission rather than about the receipt.
+        row = [''] * len(EXPORT_HEADER)
+        row[0], row[1], row[2], row[3] = submission.id, submission.status, device_name, received
+        row[EXPORT_HEADER.index('LLM Description')] = submission.description or ''
+        return row
+
+    raw_response = json.loads(receipt.raw_llm_response or '{}')
+    assessment = assess_receipt(receipt, config)
+    by_code = {line.code: format_cents(line.amount_cents) for line in receipt.tax_lines}
+    items = '; '.join(
+        f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
+        f"{f' [{item.tax_code}]' if item.tax_code else ''}"
+        for item in receipt.items
+    )
+    return [
+        submission.id, submission.status, device_name, received,
+        receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
+        receipt.vrn, receipt.tax_office, receipt.efd_serial, receipt.receipt_number,
+        receipt.z_number, receipt.receipt_verification_code, receipt.receipt_date,
+        receipt.receipt_time, format_cents(receipt.total_excl_tax_cents),
+        format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
+        format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
+        'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
+        receipt.category, receipt.extraction_source,
+        # Blank on everything TRA verified, which is by far the common case:
+        # only a photograph can be anything other than an EFD receipt.
+        receipt.document_type or '', items, submission.description,
+        raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id,
+        assessment.score, format_cents(assessment.input_vat_cents),
+        format_cents(assessment.recoverable_vat_cents),
+        format_cents(assessment.standard_rated_excl_cents),
+        format_cents(assessment.zero_or_exempt_cents),
+        assessment.claim_deadline.isoformat() if assessment.claim_deadline else '',
+        assessment.claim_days_left if assessment.claim_days_left is not None else '',
+        '; '.join(check.id for check in assessment.failed_checks),
+        '; '.join(assessment.recovery_blockers),
+        assessment.computed_category or '',
+        format_cents(assessment.wht_total_cents),
+    ]
+
 
 @app.route('/stream')
 @login_required
