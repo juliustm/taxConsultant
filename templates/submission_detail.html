@@ -22,7 +22,7 @@
                 </h1>
                 <p class="mt-1 text-sm text-gray-500">
                     Submitted {{ submission.received_at.strftime('%d %b %Y %H:%M') }} UTC
-                    by {{ submission.device.name if submission.device else 'an unknown device' }}
+                    by {% if submission.device %}<a class="peek" href="/?tab=processed&device={{ submission.device.id }}" data-peek="device:{{ submission.device.id }}">{{ submission.device.name }}</a>{% else %}an unknown device{% endif %}
                 </p>
             </div>
             <div class="mt-4 flex items-center gap-x-3 md:mt-0">

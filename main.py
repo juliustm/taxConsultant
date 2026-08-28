@@ -556,8 +556,68 @@ SORT_COLUMNS = {
     'receipt_date': Receipt.receipt_date,
 }
 
+# How many suppliers the filter panel offers as one-click selections, and how many
+# the insights column names. The panel is a picker and wants breadth; the insights
+# column is a finding and wants the few that matter.
+FACET_VENDOR_LIMIT = 12
+TOP_VENDOR_LIMIT = 6
+# Categories named individually in a breakdown before the tail is collapsed into one
+# 'other' row. Past this the bars are too short to compare and the list is a legend.
+BREAKDOWN_LIMIT = 8
+
+
+def _read_list(args, key, cast=None):
+    """
+    A repeatable query parameter, read as a list of distinct values.
+
+    Accepted both ways round - `category=fuel&category=meals` and `category=fuel,meals`
+    - because the first is what this page emits and the second is what somebody types by
+    hand or pastes into a chat. A value that will not cast is ignored rather than
+    rejected, the same way an unparseable date already is: a mangled link should show
+    the reader a table, not a 500, and the chips above it say what is actually applied.
+    """
+    values, seen = [], set()
+    for raw in args.getlist(key):
+        for part in str(raw).split(','):
+            part = part.strip()
+            if not part:
+                continue
+            if cast is not None:
+                try:
+                    part = cast(part)
+                except (TypeError, ValueError):
+                    continue
+            if part in seen:
+                continue
+            seen.add(part)
+            values.append(part)
+    return values
+
+
+def _selection(filters, key):
+    """
+    One filter's selected values, tolerant of a single value written as itself.
+
+    The multi-value filters are lists, but a filter dict can also be assembled by hand
+    - in a test, or by a caller that only ever meant one category - and a bare string
+    handed to an IN clause matches its own characters rather than itself.
+    """
+    value = filters.get(key)
+    if not value:
+        return []
+    return list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+
 def _read_filters(args):
-    """The table's filter state, read from a query string and normalised."""
+    """
+    The table's filter state, read from a query string and normalised.
+
+    Three of these are lists, and that is most of what lets the table answer a real
+    question. 'What did the two vans spend on fuel and repairs last quarter' is one
+    query with three selections in it; asked one value at a time it is six separate
+    looks and a total the reader has to add up themselves - which is the point at
+    which people stop asking.
+    """
     tab = args.get('tab', 'processed')
     sort = args.get('sort', 'received_at')
     return {
@@ -565,7 +625,15 @@ def _read_filters(args):
         'search': (args.get('search') or '').strip(),
         # Set by clicking a category anywhere it is shown, so 'what else is fuel?' is
         # one click rather than a search that would also match a vendor called Fuel.
-        'category': (args.get('category') or '').strip(),
+        # Repeatable now, and every single-value link ever shared still means what it did.
+        'category': _read_list(args, 'category'),
+        # Which phone or bot the receipt came in through. Same click-to-filter contract
+        # as the category chip, because 'show me everything off that device' is the
+        # question an admin asks the moment one of them starts producing bad scans.
+        'device': _read_list(args, 'device', cast=int),
+        # Vendor lookup keys ('tin:100147181'), the same key /vendors/<key> is addressed
+        # by - never the printed name, which one supplier spells three ways.
+        'vendor': _read_list(args, 'vendor'),
         'start_date': args.get('start_date', ''),
         'end_date': args.get('end_date', ''),
         'sort': sort if sort in SORT_COLUMNS else 'received_at',
@@ -617,8 +685,26 @@ def _filtered_submissions(filters, ordered=True):
             Submission.description.ilike(pattern),
         ))
 
-    if filters.get('category'):
-        query = query.filter(Receipt.category == filters['category'])
+    categories = _selection(filters, 'category')
+    if categories:
+        query = query.filter(Receipt.category.in_(categories))
+
+    devices = _selection(filters, 'device')
+    if devices:
+        query = query.filter(Submission.device_id.in_(devices))
+
+    vendor_keys = _selection(filters, 'vendor')
+    if vendor_keys:
+        # Matched on the vendor row, which is keyed on the TIN TRA issued, so selecting
+        # a supplier selects every spelling of them. The printed TIN is an OR rather
+        # than a fallback because a receipt read off a photograph can carry a TIN and
+        # still have no Vendor row behind it, and it is the same supplier either way.
+        matched = db.session.query(Vendor.id).filter(Vendor.lookup_key.in_(vendor_keys))
+        conditions = [Receipt.vendor_id.in_(matched)]
+        tins = [key.split(':', 1)[1] for key in vendor_keys if key.startswith('tin:')]
+        if tins:
+            conditions.append(Receipt.vendor_tin.in_(tins))
+        query = query.filter(db.or_(*conditions))
 
     start_date = _parse_date_arg(filters['start_date'])
     end_date = _parse_date_arg(filters['end_date'])
@@ -657,6 +743,10 @@ def _submissions_page(filters, page, per_page=DEFAULT_PAGE_SIZE):
         'has_next': paged.has_next,
         'has_prev': paged.has_prev,
         'insights': _filtered_insights(filters),
+        # What else could be selected, so the pickers and the chips that stand for an
+        # applied filter can both be drawn without a second round trip - and so a
+        # device or supplier that has been filtered down to nothing still has a name.
+        'facets': _filter_facets(filters),
         'tab_counts': _tab_counts(filters),
         'filters': filters,
     }
@@ -669,24 +759,43 @@ def _spending_only(query):
         Receipt.is_test.is_(False),
     )
 
+def _device_names():
+    """Every device's name by id. One query against a table with a handful of rows."""
+    return {device.id: device.name for device in Device.query.all()}
+
+
+def _share(cents, total_cents):
+    return round(cents * 100 / total_cents, 1) if total_cents else 0.0
+
+
 def _filtered_insights(filters):
     """
-    Totals across everything the filter matches, not just the page on screen.
+    Everything the filter matches, added up - not just the page on screen.
 
-    Summed by the database, so the figure does not change when you turn the page. Only
+    Summed by the database, so the figures do not change when you turn the page. Only
     completed, non-void receipts count: a queued submission is not yet money and a
     cancelled one never was.
+
+    The breakdowns underneath the totals are what make a multi-part filter worth
+    building. A total answers 'how much'; the split answers 'made of what, collected by
+    whom', which is the question that was actually being asked and previously took an
+    export and a pivot table to get at.
     """
     base = _filtered_submissions(filters, ordered=False)
+    spending = _spending_only(base)
 
-    count, total_cents, vat_cents = _spending_only(base).with_entities(
+    count, total_cents, vat_cents, largest_cents, first_date, last_date = spending.with_entities(
         db.func.count(Receipt.id),
         db.func.sum(Receipt.total_incl_tax_cents),
         db.func.sum(Receipt.total_tax_cents),
+        db.func.max(Receipt.total_incl_tax_cents),
+        db.func.min(Receipt.receipt_date),
+        db.func.max(Receipt.receipt_date),
     ).one()
+    count, total_cents, vat_cents = count or 0, total_cents or 0, vat_cents or 0
 
     top_vendors = (
-        _spending_only(base)
+        spending
         .with_entities(
             Receipt.vendor_name, Receipt.vendor_tin,
             db.func.count(Receipt.id), db.func.sum(Receipt.total_incl_tax_cents),
@@ -696,24 +805,170 @@ def _filtered_insights(filters):
         .filter(Receipt.vendor_id.isnot(None))
         .group_by(Receipt.vendor_id)
         .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc())
-        .limit(3).all()
+        .limit(TOP_VENDOR_LIMIT).all()
     )
 
+    by_category = (
+        spending
+        .with_entities(
+            Receipt.category, db.func.count(Receipt.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .group_by(Receipt.category)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc()).all()
+    )
+    by_device = (
+        spending
+        .with_entities(
+            Submission.device_id, db.func.count(Receipt.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .group_by(Submission.device_id)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc()).all()
+    )
+    names = _device_names()
+
     return {
-        'count': count or 0,
-        'total_cents': total_cents or 0,
-        'vat_cents': vat_cents or 0,
+        'count': count,
+        'total_cents': total_cents,
+        'vat_cents': vat_cents,
+        'average_cents': int(total_cents / count) if count else 0,
+        'largest_cents': largest_cents or 0,
+        # The stretch of calendar the figures cover, which is the denominator a reader
+        # needs before a total means anything - and is not the same as the dates asked
+        # for, since a range can be wider than the receipts inside it.
+        'first_date': first_date.isoformat() if first_date else None,
+        'last_date': last_date.isoformat() if last_date else None,
         'top_vendors': [
             {
                 'name': name or 'Unnamed vendor', 'tin': tin,
                 'count': vendor_count, 'cents': cents or 0,
-                # The same key /vendors/<key> and the hover cards use, built by the
-                # rule that owns it rather than reassembled by the browser.
+                'share_pct': _share(cents or 0, total_cents),
+                # The same key /vendors/<key>, the hover cards and the vendor filter
+                # use, built by the rule that owns it rather than reassembled here.
                 'key': Vendor.make_lookup_key(tin, name),
             }
             for name, tin, vendor_count, cents in top_vendors
         ],
+        'by_category': _capped_breakdown([
+            {
+                'key': category, 'label': (category or 'uncategorised').replace('_', ' '),
+                'count': category_count, 'cents': cents or 0,
+                'share_pct': _share(cents or 0, total_cents),
+            }
+            for category, category_count, cents in by_category
+        ], total_cents),
+        'by_device': [
+            {
+                'key': device_id, 'label': names.get(device_id, 'Unknown device'),
+                'count': device_count, 'cents': cents or 0,
+                'share_pct': _share(cents or 0, total_cents),
+            }
+            for device_id, device_count, cents in by_device
+        ],
     }
+
+
+def _capped_breakdown(rows, total_cents):
+    """
+    The largest few slices, with the tail collapsed into one honest 'other' row.
+
+    Collapsed rather than truncated: a list that silently stops at eight does not add
+    up to the total printed above it, and a reader who notices that has to distrust
+    every other figure on the panel to work out why.
+    """
+    if len(rows) <= BREAKDOWN_LIMIT:
+        return rows
+
+    head, tail = rows[:BREAKDOWN_LIMIT], rows[BREAKDOWN_LIMIT:]
+    rest_cents = sum(row['cents'] for row in tail)
+    return head + [{
+        'key': None, 'label': f'{len(tail)} more', 'count': sum(row['count'] for row in tail),
+        'cents': rest_cents, 'share_pct': _share(rest_cents, total_cents),
+    }]
+
+
+def _filter_facets(filters):
+    """
+    What there is to filter by, counted under everything except the pickers themselves.
+
+    That exclusion is what makes a second selection possible. Counted under the current
+    selection, choosing 'fuel' would empty the category list of every other category and
+    there would be no way to add 'meals' to it - the filter would be a series of
+    single choices wearing a multi-select's clothes. So the tab, the search and the
+    dates narrow the options; the three multi-value pickers do not narrow themselves.
+
+    Counted over submissions rather than over spending, so the device picker still
+    works on the Failed and Queued tabs, where by definition no money was recorded.
+    """
+    scope = {**filters, 'category': [], 'device': [], 'vendor': []}
+    base = _filtered_submissions(scope, ordered=False)
+
+    categories = (
+        base.with_entities(Receipt.category, db.func.count(Submission.id))
+        .filter(Receipt.category.isnot(None))
+        .group_by(Receipt.category)
+        .order_by(db.func.count(Submission.id).desc()).all()
+    )
+    device_counts = dict(
+        base.with_entities(Submission.device_id, db.func.count(Submission.id))
+        .group_by(Submission.device_id).all()
+    )
+    vendors = (
+        base.with_entities(
+            Receipt.vendor_name, Receipt.vendor_tin, db.func.count(Submission.id),
+            db.func.sum(Receipt.total_incl_tax_cents),
+        )
+        .filter(Receipt.vendor_id.isnot(None))
+        .group_by(Receipt.vendor_id)
+        .order_by(db.func.sum(Receipt.total_incl_tax_cents).desc())
+        .limit(FACET_VENDOR_LIMIT).all()
+    )
+
+    vendor_options = [
+        {
+            'key': Vendor.make_lookup_key(tin, name), 'label': name or 'Unnamed vendor',
+            'tin': tin, 'count': vendor_count,
+        }
+        for name, tin, vendor_count, _cents in vendors
+    ]
+    # A supplier chosen from a wider range, or from a vendor page, must stay listed
+    # once the dates move past their last receipt - otherwise the only way to remove
+    # a filter is to guess that it is still applied.
+    listed = {option['key'] for option in vendor_options}
+    missing = [key for key in _selection(filters, 'vendor') if key not in listed]
+    if missing:
+        for vendor in Vendor.query.filter(Vendor.lookup_key.in_(missing)).all():
+            vendor_options.append({
+                'key': vendor.lookup_key, 'label': vendor.name or 'Unnamed vendor',
+                'tin': vendor.tin, 'count': 0,
+            })
+            listed.add(vendor.lookup_key)
+        for key in missing:
+            if key not in listed:
+                vendor_options.append({
+                    'key': key, 'label': key.split(':', 1)[-1], 'tin': None, 'count': 0,
+                })
+
+    return {
+        'categories': [
+            {'key': category, 'label': category.replace('_', ' '), 'count': category_count}
+            for category, category_count in categories
+        ],
+        # Every device, including the ones with nothing in range: an admin looking for
+        # what a particular phone collected needs to see that the answer is none,
+        # which a list that quietly omits it cannot say.
+        'devices': sorted(
+            [
+                {'key': device.id, 'label': device.name,
+                 'count': device_counts.get(device.id, 0), 'status': device.status}
+                for device in Device.query.all()
+            ],
+            key=lambda option: (-option['count'], option['label'].lower()),
+        ),
+        'vendors': vendor_options,
+    }
+
 
 def _tab_counts(filters):
     """
@@ -748,24 +1003,11 @@ def submission_photo_name(submission):
     """
     The stored filename of this submission's photograph, or None if it has none.
 
-    Two columns hold one idea, for a reason that is historical rather than designed. A
-    photo submission keeps its image in input_data, because for a long time a photo was
-    the *only* thing such a submission had. A submission that carries both a QR code and
-    the picture it was read from keeps the picture in photo_filename, because input_data
-    is the URL and there is only one of it. Every reader wants the same answer - "is
-    there a photograph, and what is it called" - so it is worked out in one place.
-
-    photo_filename first: a photo submission never has one, so the order only decides
-    what happens to a row that somehow has both, and the explicit column is the newer
-    and more specific statement.
+    The rule itself lives on the row - see Submission.photo_name - because the hover
+    cards need the same answer and cannot import this module. This stays as the name
+    every caller here already uses, and tolerates a None submission.
     """
-    if submission is None:
-        return None
-    if getattr(submission, 'photo_filename', None):
-        return submission.photo_filename
-    if submission.input_type == 'photo' and submission.input_data:
-        return submission.input_data
-    return None
+    return submission.photo_name if submission is not None else None
 
 def submission_photo_path(submission):
     """
@@ -819,6 +1061,10 @@ def prepare_submissions_for_frontend(submissions, detailed=True):
             "description": sub.description, "location": sub.location,
             "error_message": sub.error_message, "is_duplicate": sub.status == 'duplicate',
             "receipt": receipt_data, "device_name": sub.device.name if sub.device else 'Unknown Device',
+            # The id as well as the name: the row's device chip is a filter link and a
+            # hover card, and both are addressed by id. A name is not an identity -
+            # two devices can be called 'Front desk' a year apart.
+            "device_id": sub.device_id,
             # What is known about a submission before - or without - a verified receipt
             # behind it, so a row that never resolves is still something to act on.
             "receipt_code": sub.receipt_code,
@@ -1796,11 +2042,101 @@ def receipt_detail(receipt_id):
         corrected_fields=json.loads(receipt.corrected_fields or '[]'),
     )
 
-# Windows the insights page can be run over. Bounded on purpose: every analysis there
-# needs the line items loaded, and "what is happening lately" is the question being
-# asked - a five-year sweep answers a different one, more slowly.
+# Windows the insights page can be run over. Kept only as an inbound alias now: the
+# page speaks the dashboard's own filter language (start_date/end_date and the three
+# multi-value pickers), and every link made before it did still has to mean what it
+# meant. Translated to a date range on the way in, never rendered back out.
 INSIGHT_WINDOWS = {'30': 30, '90': 90, '365': 365}
-DEFAULT_INSIGHT_WINDOW = '90'
+
+
+def _read_insight_filters(args):
+    """
+    The insights page reads the dashboard's filter, in exactly the same words.
+
+    One vocabulary across both pages is the whole point of the pickers living here: a
+    range narrowed on this page has to still mean that range when it is opened in the
+    ledger, and a supplier pinned from a receipt row has to survive the trip back. The
+    alternative - two filter languages that agree until they do not - is how a figure
+    quoted off one page ends up disagreeing with the table it was supposedly read from.
+    """
+    filters = _read_filters(args)
+    # Insights are about money that was actually recorded. Which tab a table happens to
+    # be standing on is not a question this page can be asked.
+    filters['tab'] = 'processed'
+
+    if not filters['start_date'] and not filters['end_date']:
+        window = args.get('window')
+        if window in INSIGHT_WINDOWS:
+            end = datetime.utcnow().date()
+            filters['start_date'] = (end - timedelta(days=INSIGHT_WINDOWS[window] - 1)).isoformat()
+            filters['end_date'] = end.isoformat()
+    return filters
+
+
+def _insight_linkers(filters):
+    """
+    The link builders the insights page draws its pickers with.
+
+    Every control on that page is an ordinary link carrying the whole filter with one
+    thing changed. No JavaScript, and - more to the point - every state the page can
+    reach is a URL somebody can bookmark, paste into a message, or hand to the ledger
+    and the CSV so all three are looking at the same rows. Handing the template
+    functions rather than pre-built URLs is what lets a facet of fifty values cost one
+    line of Jinja.
+    """
+    def carried(changes):
+        merged = {
+            'search': filters['search'],
+            'category': _selection(filters, 'category'),
+            'device': _selection(filters, 'device'),
+            'vendor': _selection(filters, 'vendor'),
+            'start_date': filters['start_date'],
+            'end_date': filters['end_date'],
+            **changes,
+        }
+        # Empty values are dropped rather than sent blank, so 'all time' is an address
+        # with no dates in it instead of one carrying two empty ones.
+        return {key: value for key, value in merged.items() if value not in ('', None, [])}
+
+    def link(**changes):
+        return url_for('insights', **carried(changes))
+
+    def toggle(key, value):
+        """The same list with this value added if it is missing, removed if it is not."""
+        current = _selection(filters, key)
+        remaining = [entry for entry in current if entry != value]
+        return link(**{key: remaining if len(remaining) != len(current) else [*current, value]})
+
+    return {
+        'filter_link': link,
+        'filter_toggle': toggle,
+        # The same filter, in the two other places it has to mean the same thing.
+        'ledger_url': url_for('index', **carried({})),
+        'csv_url': url_for('export_csv', **carried({})),
+    }
+
+
+def _insight_date_presets(today):
+    """
+    The date shortcuts, computed where the page is rendered.
+
+    The same five the dashboard's drawer used to offer, under the same names, because a
+    range people already reach for should not be renamed by having moved. Server-side
+    because this page deliberately has no JavaScript to compute them in - which also
+    makes them UTC, as every other date on it already is.
+    """
+    month_start = today.replace(day=1)
+    previous_end = month_start - timedelta(days=1)
+    return [
+        {'label': 'All time', 'start': '', 'end': ''},
+        {'label': 'Last 30 days', 'start': (today - timedelta(days=29)).isoformat(),
+         'end': today.isoformat()},
+        {'label': 'This month', 'start': month_start.isoformat(), 'end': today.isoformat()},
+        {'label': 'Last month', 'start': previous_end.replace(day=1).isoformat(),
+         'end': previous_end.isoformat()},
+        {'label': 'This year', 'start': today.replace(month=1, day=1).isoformat(),
+         'end': today.isoformat()},
+    ]
 
 @app.route('/insights')
 @login_required
@@ -1808,24 +2144,28 @@ def insights():
     """
     Everything the receipts say once you stop looking at them one at a time.
 
+    Also where the filter now lives. The dashboard used to carry the pickers and a
+    summary panel beside them, which meant the page you go to for a row was also the
+    page you go to for a question, and did neither well. The pickers moved here, where
+    the answer to changing one is the whole page rather than a column of it; the
+    dashboard kept the table, the tabs and the search.
+
     Ordered by what it costs to ignore: money that cannot be reclaimed first, then
     money about to become unreclaimable, then where it all went, then what has changed
     in what things cost. Rendered server-side - there is no state to keep here, and a
     page that reports figures should not be able to fail to a blank screen.
     """
-    window = request.args.get('window', DEFAULT_INSIGHT_WINDOW)
-    days = INSIGHT_WINDOWS.get(window, INSIGHT_WINDOWS[DEFAULT_INSIGHT_WINDOW])
+    filters = _read_insight_filters(request.args)
     today = datetime.utcnow().date()
-    start = today - timedelta(days=days - 1)
-
     config = get_instance_config()
+
+    # The same rows the dashboard's table and its CSV would hand back under this
+    # filter, narrowed to the ones that are money. Selected through a subquery rather
+    # than a list of ids so the filter stays one round trip at any size.
+    matched = _spending_only(_filtered_submissions(filters, ordered=False))
     receipts = (
-        Receipt.query.join(Submission, Receipt.submission_id == Submission.id)
-        .filter(
-            Submission.status == 'completed',
-            Receipt.receipt_date >= start,
-            Receipt.receipt_date <= today,
-        )
+        Receipt.query
+        .filter(Receipt.submission_id.in_(matched.with_entities(Submission.id)))
         .options(
             selectinload(Receipt.items), selectinload(Receipt.tax_lines),
             joinedload(Receipt.submission), joinedload(Receipt.vendor),
@@ -1835,19 +2175,47 @@ def insights():
         .all()
     )
 
-    # Every submission in the window, not just the ones that produced a receipt: a
-    # verification failure rate needs the attempts that failed as its numerator and
-    # the ones that worked as its denominator.
-    submissions = Submission.query.filter(Submission.received_at >= datetime.combine(start, datetime.min.time())).all()
+    # The stretch of calendar the figures actually cover. Not the same as the range
+    # asked for: 'all time' names no dates at all, and a range can be far wider than
+    # the receipts inside it. A total without its denominator is a number the reader
+    # has to trust rather than judge.
+    asked_start = _parse_date_arg(filters['start_date'])
+    asked_end = _parse_date_arg(filters['end_date'])
+    dated = [receipt.receipt_date for receipt in receipts if receipt.receipt_date]
+    start = asked_start or (min(dated) if dated else today)
+    end = asked_end or (max(dated) if dated else today)
+    days = max(1, (end - start).days + 1)
+
+    # Every submission over the same stretch, not just the ones that produced a
+    # receipt: a verification failure rate needs the attempts that failed as its
+    # numerator and the ones that worked as its denominator. Narrowed by device when
+    # the filter names one, since 'which phone is producing bad scans' is the question
+    # that section exists to answer.
+    attempts = Submission.query.filter(
+        Submission.received_at >= datetime.combine(start, datetime.min.time()),
+    )
+    if asked_end:
+        attempts = attempts.filter(
+            Submission.received_at < datetime.combine(end + timedelta(days=1), datetime.min.time()),
+        )
+    devices = _selection(filters, 'device')
+    if devices:
+        attempts = attempts.filter(Submission.device_id.in_(devices))
 
     return render_template(
         'insights.html',
-        reliability=analytics.verification_reliability(receipts, submissions),
+        reliability=analytics.verification_reliability(receipts, attempts.all()),
         failure_titles={reason: guidance['title'] for reason, guidance in FAILURE_GUIDANCE.items()},
-        window=window if window in INSIGHT_WINDOWS else DEFAULT_INSIGHT_WINDOW,
-        windows=INSIGHT_WINDOWS,
-        days=days, start=start, today=today,
+        days=days, start=start, end=end, today=today,
         receipt_count=len(receipts),
+        # The pickers, what there is to pick, and what the picking added up to - read
+        # by the same functions the dashboard reads them with, so the two pages cannot
+        # report different totals for the same filter.
+        filters=filters,
+        facets=_filter_facets(filters),
+        holds=_filtered_insights(filters),
+        date_presets=_insight_date_presets(today),
+        **_insight_linkers(filters),
         attention=_attention(receipts, config, today),
         categories=analytics.category_breakdown(receipts),
         regions=analytics.region_breakdown(receipts),
@@ -1855,7 +2223,7 @@ def insights():
         devices=analytics.device_breakdown(receipts),
         weekday=analytics.weekday_pattern(receipts),
         compliance_scoreboard=_compliance_scoreboard(receipts, config),
-        months=analytics.monthly_totals(receipts, months=min(12, max(2, days // 30)), today=today),
+        months=analytics.monthly_totals(receipts, months=min(12, max(2, days // 30)), today=end),
         price_movements=analytics.unit_price_movements(receipts),
         cheaper=analytics.cheaper_elsewhere(receipts),
         anomalies=analytics.spend_anomalies(receipts),
@@ -4073,39 +4441,47 @@ def uploaded_file(filename):
     response.headers['Cache-Control'] = 'private, max-age=31536000, immutable'
     return response
 
+# The spreadsheet's columns, named once. A row is built against this list rather than
+# in step with it, so a submission that never produced a receipt can be padded to the
+# same width and still line up under the columns it has nothing to say about.
+EXPORT_HEADER = [
+    'ID', 'Status', 'Device', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
+    'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
+    'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
+    'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
+    'Category', 'Source', 'Document Type', 'Items', 'LLM Description', 'Tax Analysis',
+    'Customer Name', 'Customer ID',
+    # Computed by utils/compliance, so a spreadsheet can be filtered on what is
+    # actually claimable rather than on what was merely spent.
+    'Compliance Score', 'Input VAT Charged', 'Input VAT Recoverable',
+    'Standard Rated Excl', 'Zero Rated Or Exempt', 'Claim Deadline',
+    'Days Left To Claim', 'Failed Checks', 'Recovery Blockers',
+    'Computed Category', 'WHT Estimate',
+]
+
+
 @app.route('/export/csv')
 @login_required
 def export_csv():
-    search_query = request.args.get('search', '').lower()
-    start_date_str = request.args.get('start_date', '')
-    end_date_str = request.args.get('end_date', '')
+    """
+    Everything the current filter matches, as a spreadsheet.
 
-    query = Receipt.query.join(Submission).filter(Submission.status == 'completed')
+    The same filter the table is showing - the tab, the search, the dates, and every
+    selected category, device and supplier - read by the same function the table reads
+    it with. An export that quietly means something broader than the screen it was
+    started from is worse than no export at all: the difference only surfaces after
+    somebody has filed the number.
 
-    try:
-        if start_date_str:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-            query = query.filter(Receipt.receipt_date >= start_date)
-        if end_date_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-            query = query.filter(Receipt.receipt_date <= end_date)
-    except ValueError:
-        flash('Invalid date format provided for export.', 'danger')
-        return redirect(url_for('index'))
-    
-    # --- MODIFIED: Added .options() for eager loading of the 'submission' relationship ---
-    query = query.options(joinedload(Receipt.submission), joinedload(Receipt.items), joinedload(Receipt.tax_lines))
-
-    receipts = query.order_by(Receipt.receipt_date.desc()).all()
-    
-    if search_query:
-        filtered_receipts = []
-        for receipt in receipts:
-            vendor_match = receipt.vendor_name and search_query in receipt.vendor_name.lower()
-            desc_match = receipt.submission.description and search_query in receipt.submission.description.lower()
-            if vendor_match or desc_match:
-                filtered_receipts.append(receipt)
-        receipts = filtered_receipts
+    Rows the filter matches that have no receipt behind them (a failure, a submission
+    still queued) are exported too, with their receipt columns empty. Filtering to
+    'Failed' and downloading an empty file would be a straight lie about what is there.
+    """
+    filters = _read_filters(request.args)
+    submissions = _filtered_submissions(filters).options(
+        joinedload(Submission.receipt).selectinload(Receipt.items),
+        joinedload(Submission.receipt).selectinload(Receipt.tax_lines),
+        joinedload(Submission.device),
+    ).all()
 
     # Read before the response starts streaming: generate() is consumed after the
     # request context has gone, so everything it touches has to be loaded by now.
@@ -4114,61 +4490,13 @@ def export_csv():
     def generate():
         data = io.StringIO()
         writer = csv.writer(data)
-        header = [
-            'ID', 'Status', 'Received At', 'Processed At', 'Vendor', 'Vendor TIN', 'VRN',
-            'Tax Office', 'EFD Serial', 'Receipt No', 'Z Number', 'Verification Code',
-            'Receipt Date', 'Receipt Time', 'Total Excl Tax', 'Total Tax', 'Total Incl Tax',
-            'Discount', *[f'Tax {code}' for code in TAX_CODES], 'Cancelled', 'Test',
-            'Category', 'Source', 'Document Type', 'Items', 'LLM Description', 'Tax Analysis',
-            'Customer Name', 'Customer ID',
-            # Computed by utils/compliance, so a spreadsheet can be filtered on what is
-            # actually claimable rather than on what was merely spent.
-            'Compliance Score', 'Input VAT Charged', 'Input VAT Recoverable',
-            'Standard Rated Excl', 'Zero Rated Or Exempt', 'Claim Deadline',
-            'Days Left To Claim', 'Failed Checks', 'Recovery Blockers',
-            'Computed Category', 'WHT Estimate',
-        ]
-        writer.writerow(header)
+        writer.writerow(EXPORT_HEADER)
         yield data.getvalue()
         data.seek(0)
         data.truncate(0)
 
-        # This will now work because receipt.submission was pre-loaded.
-        for receipt in receipts:
-            raw_response = json.loads(receipt.raw_llm_response or '{}')
-            assessment = assess_receipt(receipt, config)
-            by_code = {line.code: format_cents(line.amount_cents) for line in receipt.tax_lines}
-            items = '; '.join(
-                f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
-                f"{f' [{item.tax_code}]' if item.tax_code else ''}"
-                for item in receipt.items
-            )
-            row = [
-                receipt.submission_id, 'completed', receipt.submission.received_at.strftime('%Y-%m-%d %H:%M:%S'),
-                receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
-                receipt.vrn, receipt.tax_office, receipt.efd_serial, receipt.receipt_number,
-                receipt.z_number, receipt.receipt_verification_code, receipt.receipt_date,
-                receipt.receipt_time, format_cents(receipt.total_excl_tax_cents),
-                format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
-                format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
-                'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
-                receipt.category, receipt.extraction_source,
-                # Blank on everything TRA verified, which is by far the common case:
-                # only a photograph can be anything other than an EFD receipt.
-                receipt.document_type or '', items, receipt.submission.description,
-                raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id,
-                assessment.score, format_cents(assessment.input_vat_cents),
-                format_cents(assessment.recoverable_vat_cents),
-                format_cents(assessment.standard_rated_excl_cents),
-                format_cents(assessment.zero_or_exempt_cents),
-                assessment.claim_deadline.isoformat() if assessment.claim_deadline else '',
-                assessment.claim_days_left if assessment.claim_days_left is not None else '',
-                '; '.join(check.id for check in assessment.failed_checks),
-                '; '.join(assessment.recovery_blockers),
-                assessment.computed_category or '',
-                format_cents(assessment.wht_total_cents),
-            ]
-            writer.writerow(row)
+        for submission in submissions:
+            writer.writerow(_export_row(submission, config))
             yield data.getvalue()
             data.seek(0)
             data.truncate(0)
@@ -4176,8 +4504,58 @@ def export_csv():
     response = Response(generate(), mimetype='text/csv')
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     response.headers["Content-Disposition"] = f'attachment; filename="receipts_export_{timestamp}.csv"'
-    
+
     return response
+
+
+def _export_row(submission, config):
+    """One submission as a spreadsheet row, receipt or no receipt."""
+    device_name = submission.device.name if submission.device else ''
+    received = submission.received_at.strftime('%Y-%m-%d %H:%M:%S') if submission.received_at else ''
+    receipt = submission.receipt
+
+    if receipt is None:
+        # What is known about a submission with no receipt behind it, in the columns
+        # that are about the submission rather than about the receipt.
+        row = [''] * len(EXPORT_HEADER)
+        row[0], row[1], row[2], row[3] = submission.id, submission.status, device_name, received
+        row[EXPORT_HEADER.index('LLM Description')] = submission.description or ''
+        return row
+
+    raw_response = json.loads(receipt.raw_llm_response or '{}')
+    assessment = assess_receipt(receipt, config)
+    by_code = {line.code: format_cents(line.amount_cents) for line in receipt.tax_lines}
+    items = '; '.join(
+        f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
+        f"{f' [{item.tax_code}]' if item.tax_code else ''}"
+        for item in receipt.items
+    )
+    return [
+        submission.id, submission.status, device_name, received,
+        receipt.processed_at.strftime('%Y-%m-%d %H:%M:%S'), receipt.vendor_name, receipt.vendor_tin,
+        receipt.vrn, receipt.tax_office, receipt.efd_serial, receipt.receipt_number,
+        receipt.z_number, receipt.receipt_verification_code, receipt.receipt_date,
+        receipt.receipt_time, format_cents(receipt.total_excl_tax_cents),
+        format_cents(receipt.total_tax_cents), format_cents(receipt.total_incl_tax_cents),
+        format_cents(receipt.discount_cents), *[by_code.get(code, '') for code in TAX_CODES],
+        'yes' if receipt.is_cancelled else '', 'yes' if receipt.is_test else '',
+        receipt.category, receipt.extraction_source,
+        # Blank on everything TRA verified, which is by far the common case:
+        # only a photograph can be anything other than an EFD receipt.
+        receipt.document_type or '', items, submission.description,
+        raw_response.get('llm_tax_analysis', ''), receipt.customer_name, receipt.customer_id,
+        assessment.score, format_cents(assessment.input_vat_cents),
+        format_cents(assessment.recoverable_vat_cents),
+        format_cents(assessment.standard_rated_excl_cents),
+        format_cents(assessment.zero_or_exempt_cents),
+        assessment.claim_deadline.isoformat() if assessment.claim_deadline else '',
+        assessment.claim_days_left if assessment.claim_days_left is not None else '',
+        '; '.join(check.id for check in assessment.failed_checks),
+        '; '.join(assessment.recovery_blockers),
+        assessment.computed_category or '',
+        format_cents(assessment.wht_total_cents),
+    ]
+
 
 @app.route('/stream')
 @login_required

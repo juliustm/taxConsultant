@@ -402,7 +402,10 @@
                 <div class="space-y-4 px-6 py-5 text-sm">
                     <div class="flex justify-between gap-x-4">
                         <span class="text-gray-500">Submitted</span>
-                        <span class="text-gray-900">{{ submission.received_at.strftime('%Y-%m-%d %H:%M') }} UTC by {{ submission.device.name if submission.device else 'unknown device' }}</span>
+                        {# The device is a key like every other value on this page: it opens
+                           everything that phone has collected, and answers itself on hover. #}
+                        <span class="text-gray-900">{{ submission.received_at.strftime('%Y-%m-%d %H:%M') }} UTC by
+                            {% if submission.device %}<a class="peek" href="/?tab=processed&device={{ submission.device.id }}" data-peek="device:{{ submission.device.id }}">{{ submission.device.name }}</a>{% else %}unknown device{% endif %}</span>
                     </div>
                     {% if submission.location %}
                     <div class="flex justify-between gap-x-4">

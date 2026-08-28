@@ -167,6 +167,111 @@ def test_the_dashboard_component_initialises(dashboard_scripts, tmp_path):
     assert state['activeTab'] == 'processed'
 
 
+FILTER_DRIVER = """
+// The filter, driven. Nothing here touches the network: every one of these is a pure
+// transformation of the component's own state, which is exactly the part that decides
+// what the server is asked for.
+global.window = { matchMedia: () => ({ matches: false }) };
+
+const component = dashboard();
+const device = component.page.facets.devices[0].key;
+
+const beforeAnything = component.queryString();
+
+component.toggle('category', 'fuel');
+component.toggle('category', 'meals');
+component.toggle('device', device);
+const combined = component.queryString();
+
+// Selecting the same value again removes it, which is what makes a chip a toggle.
+component.toggle('category', 'fuel');
+const afterRemoval = component.selected('category');
+
+component.filters = { ...component.filters, search: 'plasco', start_date: '2026-01-01' };
+const chips = component.activeChips.map((chip) => `${chip.kind}=${chip.label}`);
+
+// A chip removes exactly its own value and leaves the rest of the selection alone.
+component.activeChips.find((chip) => chip.kind === 'device').remove();
+const devicesAfterChipRemoval = component.selected('device').length;
+
+// The row chip's link: everything already selected, plus the one thing it names.
+const href = component.hrefWith({ device: component.withValue('device', 42) });
+
+// The pickers live on Insights, so the link across has to carry the narrowing already
+// done - and only what that page reads, not the table's own sort order.
+const insightsUrl = component.insightsUrl;
+
+const summary = component.filterSummary;
+
+component.resetFilters();
+
+console.log(JSON.stringify({
+    device,
+    beforeAnything,
+    combined,
+    afterRemoval,
+    chips,
+    devicesAfterChipRemoval,
+    href,
+    insightsUrl,
+    summary,
+    anythingLeft: component.anyFilterApplied,
+    clearedQuery: component.queryString(),
+    clearedInsightsUrl: component.insightsUrl,
+}));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_the_filter_holds_several_values_and_says_which(dashboard_scripts, tmp_path):
+    """
+    The multi-value filter, executed.
+
+    Four things have to hold at once for it to be usable, and none of them are visible
+    in the HTML: a selection is repeated in the query string rather than joined, a chip
+    removes its own value and nothing else, the link to Insights carries the whole
+    selection across, and clearing puts the page back to the state it loads in. The last
+    one is the one that rots quietly - a filter key that 'clear all' does not know about
+    is a filter nobody can turn off.
+    """
+    bundle = tmp_path / 'filters.js'
+    bundle.write_text('\n'.join(dashboard_scripts) + FILTER_DRIVER)
+
+    result = subprocess.run(['node', str(bundle)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+
+    # Repeated, not comma-joined: the form that survives being pasted around.
+    assert 'category=fuel&category=meals' in state['combined']
+    assert f"device={state['device']}" in state['combined']
+
+    assert state['afterRemoval'] == ['meals']
+    assert 'category=meals' in state['chips']
+    assert 'matching=plasco' in state['chips']
+    assert 'from=2026-01-01' in state['chips']
+    # Named by the device's own name, taken from the options the server counted.
+    assert 'device=Test device' in state['chips']
+    assert state['devicesAfterChipRemoval'] == 0
+
+    assert state['href'].startswith('/?') and 'device=42' in state['href']
+
+    # The trip to the page that now holds the pickers is not a reset: everything
+    # narrowed here is in the link. The table's own sort order is not - Insights does
+    # not read it, and a filter that carries a stowaway is one nobody can reason about.
+    assert state['insightsUrl'].startswith('/insights?')
+    assert 'search=plasco' in state['insightsUrl']
+    assert 'category=meals' in state['insightsUrl']
+    assert 'start_date=' in state['insightsUrl']
+    assert 'sort=' not in state['insightsUrl'] and 'tab=' not in state['insightsUrl']
+
+    assert 'receipt' in state['summary']
+
+    # Cleared is genuinely cleared, and back to what the page loads with.
+    assert state['anythingLeft'] is False
+    assert state['clearedQuery'] == state['beforeAnything']
+    assert state['clearedInsightsUrl'] == '/insights'
+
+
 LIVE_DRIVER = """
 // The live feed, driven. EventSource does not exist in node, so it is stubbed with
 // something that records what the page attached to it and lets the test fire the

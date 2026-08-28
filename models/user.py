@@ -239,6 +239,29 @@ class Submission(db.Model):
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=False)
     device = db.relationship('Device', backref=db.backref('submissions', lazy=True))
 
+    @property
+    def photo_name(self):
+        """
+        The stored filename of this submission's photograph, or None if it has none.
+
+        Two columns hold one idea, for a reason that is historical rather than designed.
+        A photo submission keeps its image in input_data, because for a long time a photo
+        was the *only* thing such a submission had. A submission that carries both a QR
+        code and the picture it was read from keeps the picture in photo_filename,
+        because input_data is the URL and there is only one of it. Every reader wants the
+        same answer - "is there a photograph, and what is it called" - so it is worked
+        out here, on the row itself, rather than in each of them.
+
+        photo_filename first: a photo submission never has one, so the order only decides
+        what happens to a row that somehow has both, and the explicit column is the newer
+        and more specific statement.
+        """
+        if self.photo_filename:
+            return self.photo_filename
+        if self.input_type == 'photo' and self.input_data:
+            return self.input_data
+        return None
+
 class EventLog(db.Model):
     """
     Every live event the app has announced recently, in order.

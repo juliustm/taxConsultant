@@ -215,6 +215,267 @@ def test_tab_counts_respect_the_active_search(client, device):
     assert counts['processed'] == 1
 
 
+# --- Filtering by more than one thing at a time -----------------------------
+#
+# The table used to hold one category, one search and a date range. That answers 'what
+# is fuel', but not 'what did the two vans spend on fuel and repairs last quarter' -
+# which is the question an admin actually has, and which used to be six separate looks
+# and a total they had to add up in their head. These cover the filter holding several
+# values at once, the pickers still offering the rest, and the export meaning exactly
+# what the screen it was started from means.
+
+
+@pytest.fixture
+def second_device(app):
+    """A second phone, so 'which device' is a question with more than one answer."""
+    from models.user import Device
+
+    other = Device(name='Van two', api_key='van-key')
+    db.session.add(other)
+    db.session.commit()
+    return other
+
+
+def with_vendor(receipt, name=None, tin=None):
+    """Attaches the Vendor row the processing pipeline would have created."""
+    from models.user import Vendor
+
+    vendor = Vendor.upsert(tin=tin or receipt.vendor_tin, name=name or receipt.vendor_name)
+    db.session.flush()
+    receipt.vendor_id = vendor.id
+    db.session.commit()
+    return vendor
+
+
+def ids_in(payload):
+    return {row['id'] for row in payload['submissions']}
+
+
+def test_the_table_holds_more_than_one_category_at_a_time(client, device):
+    fuel, _ = store(device, category='fuel')
+    meals, _ = store(device, category='meals')
+    store(device, category='rent')
+
+    payload = client.get('/api/submissions?category=fuel&category=meals').get_json()
+
+    assert ids_in(payload) == {fuel.id, meals.id}
+
+
+def test_a_comma_separated_selection_means_the_same_as_a_repeated_one(client, device):
+    """Both forms exist in the wild: the page emits one, a person types the other."""
+    fuel, _ = store(device, category='fuel')
+    meals, _ = store(device, category='meals')
+    store(device, category='rent')
+
+    payload = client.get('/api/submissions?category=fuel,meals').get_json()
+
+    assert ids_in(payload) == {fuel.id, meals.id}
+
+
+def test_a_single_category_link_still_means_what_it_did(client, device):
+    """Every link ever shared, and every card's footer, names exactly one category."""
+    fuel, _ = store(device, category='fuel')
+    store(device, category='meals')
+
+    payload = client.get('/api/submissions?category=fuel').get_json()
+
+    assert ids_in(payload) == {fuel.id}
+    assert payload['filters']['category'] == ['fuel']
+
+
+def test_the_table_narrows_to_the_devices_selected(client, device, second_device):
+    mine, _ = store(device)
+    theirs, _ = store(second_device)
+
+    payload = client.get(f'/api/submissions?device={second_device.id}').get_json()
+
+    assert ids_in(payload) == {theirs.id}
+    assert mine.id not in ids_in(payload)
+
+
+def test_selecting_a_supplier_matches_every_spelling_of_their_name(client, device):
+    """
+    The vendor filter is keyed on the TIN TRA issued, not on the printed name.
+
+    'PLASCO LIMITED' and 'Plasco Ltd' are one supplier, and a filter that split them
+    would report half of what was spent with them - silently.
+    """
+    first, one = store(device, vendor='PLASCO LIMITED', tin='100147181')
+    second, two = store(device, vendor='Plasco Ltd', tin='100147181')
+    store(device, vendor='NMB BANK', tin='109876543')
+    with_vendor(one)
+    with_vendor(two)
+
+    payload = client.get('/api/submissions?vendor=tin:100147181').get_json()
+
+    assert ids_in(payload) == {first.id, second.id}
+
+
+def test_a_supplier_with_no_vendor_row_still_answers_to_their_tin(client, device):
+    """A receipt read off a photograph can carry a TIN and never have been linked."""
+    unlinked, _ = store(device, tin='100147181')
+
+    payload = client.get('/api/submissions?vendor=tin:100147181').get_json()
+
+    assert ids_in(payload) == {unlinked.id}
+
+
+def test_an_unreadable_device_id_is_ignored_rather_than_fatal(client, device):
+    """A mangled link shows a table, exactly as an unparseable date already does."""
+    kept, _ = store(device)
+
+    payload = client.get('/api/submissions?device=not-a-number').get_json()
+
+    assert ids_in(payload) == {kept.id}
+    assert payload['filters']['device'] == []
+
+
+def test_the_selections_combine_rather_than_replace_one_another(client, device, second_device):
+    """Every filter narrows what the ones before it left. That is the whole point."""
+    wanted, _ = store(device, category='fuel', when=date(2026, 5, 10))
+    store(device, category='meals', when=date(2026, 5, 10))
+    store(second_device, category='fuel', when=date(2026, 5, 10))
+    store(device, category='fuel', when=date(2025, 1, 1))
+
+    payload = client.get(
+        f'/api/submissions?category=fuel&category=rent&device={device.id}'
+        '&start_date=2026-01-01&end_date=2026-12-31'
+    ).get_json()
+
+    assert ids_in(payload) == {wanted.id}
+
+
+# --- What the selection adds up to ------------------------------------------
+
+def test_insights_break_the_selection_down_by_category_and_device(client, device, second_device):
+    store(device, category='fuel', total=300_00, tax=0)
+    store(device, category='meals', total=100_00, tax=0)
+    store(second_device, category='fuel', total=100_00, tax=0)
+
+    insights = client.get('/api/submissions').get_json()['insights']
+
+    by_category = {row['key']: row for row in insights['by_category']}
+    assert by_category['fuel']['cents'] == 400_00
+    assert by_category['fuel']['share_pct'] == 80.0
+    assert by_category['meals']['count'] == 1
+
+    by_device = {row['label']: row['cents'] for row in insights['by_device']}
+    assert by_device['Test device'] == 400_00
+    assert by_device['Van two'] == 100_00
+
+
+def test_insights_report_the_span_the_figures_actually_cover(client, device):
+    """
+    The dates asked for are not the dates that answered.
+
+    A total read without knowing the stretch of calendar behind it is a number the
+    reader has to trust rather than judge, so the panel is told what it is summing.
+    """
+    store(device, when=date(2026, 2, 3))
+    store(device, when=date(2026, 6, 20))
+
+    insights = client.get('/api/submissions?start_date=2026-01-01&end_date=2026-12-31').get_json()['insights']
+
+    assert insights['first_date'] == '2026-02-03'
+    assert insights['last_date'] == '2026-06-20'
+
+
+def test_insights_average_and_largest_describe_the_same_rows_as_the_total(client, device):
+    store(device, total=100_00, tax=0)
+    store(device, total=300_00, tax=0)
+
+    insights = client.get('/api/submissions').get_json()['insights']
+
+    assert insights['total_cents'] == 400_00
+    assert insights['average_cents'] == 200_00
+    assert insights['largest_cents'] == 300_00
+
+
+def test_an_uncategorised_receipt_is_named_rather_than_dropped(client, device):
+    """A blank slice that silently vanishes makes the bars stop adding up to the total."""
+    store(device, category=None, total=500_00, tax=0)
+
+    insights = client.get('/api/submissions').get_json()['insights']
+
+    assert [row['label'] for row in insights['by_category']] == ['uncategorised']
+    assert insights['by_category'][0]['cents'] == 500_00
+
+
+# --- The pickers ------------------------------------------------------------
+
+def test_the_pickers_keep_their_other_options_while_one_is_selected(client, device):
+    """
+    Counted under the current selection, choosing 'fuel' would empty the category list
+    of every other category and there would be no way to add 'meals' to it. The whole
+    multi-select would be a series of single choices wearing its clothes.
+    """
+    store(device, category='fuel')
+    store(device, category='meals')
+
+    facets = client.get('/api/submissions?category=fuel').get_json()['facets']
+
+    assert {option['key'] for option in facets['categories']} == {'fuel', 'meals'}
+
+
+def test_the_pickers_are_still_narrowed_by_the_dates_and_the_search(client, device):
+    """What the pickers do not narrow is themselves. Everything else still applies."""
+    store(device, category='fuel', when=date(2026, 5, 10))
+    store(device, category='meals', when=date(2020, 1, 1))
+
+    facets = client.get('/api/submissions?start_date=2026-01-01').get_json()['facets']
+
+    assert {option['key'] for option in facets['categories']} == {'fuel'}
+
+
+def test_every_device_is_offered_even_with_nothing_in_range(client, device, second_device):
+    """
+    'What did that phone collect?' is a question whose answer can be none.
+
+    A picker that quietly omits a device cannot say that; it just looks as though the
+    device never existed.
+    """
+    store(device)
+
+    devices = {option['label']: option['count']
+               for option in client.get('/api/submissions').get_json()['facets']['devices']}
+
+    assert devices == {'Test device': 1, 'Van two': 0}
+
+
+def test_the_device_picker_says_whether_each_one_can_still_submit(client, device):
+    facets = client.get('/api/submissions').get_json()['facets']
+    assert facets['devices'][0]['status'] == device.status
+
+
+def test_a_supplier_selected_out_of_range_stays_listed(client, device):
+    """
+    Otherwise the only way to remove a filter is to guess that it is still applied.
+
+    Narrow the dates past a supplier's last receipt and their chip would vanish while
+    still filtering the table down to nothing.
+    """
+    _, receipt = store(device, when=date(2020, 1, 1))
+    with_vendor(receipt)
+
+    facets = client.get(
+        '/api/submissions?vendor=tin:100147181&start_date=2026-01-01'
+    ).get_json()['facets']
+
+    listed = {option['key']: option for option in facets['vendors']}
+    assert listed['tin:100147181']['label'] == 'PLASCO LIMITED'
+    assert listed['tin:100147181']['count'] == 0
+
+
+def test_the_pickers_survive_a_tab_with_no_receipts_behind_it(client, device):
+    """Failed submissions have no receipt, but they were still collected by a device."""
+    store(device, status='failed', error='TraReceiptNotUploaded: not there yet')
+
+    facets = client.get('/api/submissions?tab=failed').get_json()['facets']
+
+    assert facets['categories'] == []
+    assert [option['count'] for option in facets['devices'] if option['label'] == 'Test device'] == [1]
+
+
 def test_every_row_carries_its_assessment(client, device):
     store(device)
     row = client.get('/api/submissions').get_json()['submissions'][0]
@@ -382,6 +643,52 @@ def test_csv_export_states_why_a_claim_is_blocked(client, device):
     body = client.get('/export/csv').get_data(as_text=True)
 
     assert 'it is not issued to your TIN' in body
+
+
+def test_the_export_carries_exactly_what_the_filter_matches(client, device, second_device):
+    """
+    The download and the screen it was started from have to mean the same thing.
+
+    They did not: the export read its own dates and its own search out of the query
+    string and ignored everything else, so a table narrowed to one category on one
+    device exported the whole ledger. That difference only surfaces after somebody has
+    filed the number.
+    """
+    store(device, category='fuel', vendor='WANTED LTD')
+    store(device, category='meals', vendor='WRONG CATEGORY LTD')
+    store(second_device, category='fuel', vendor='WRONG DEVICE LTD')
+
+    body = client.get(f'/export/csv?category=fuel&device={device.id}').get_data(as_text=True)
+
+    assert 'WANTED LTD' in body
+    assert 'WRONG CATEGORY LTD' not in body
+    assert 'WRONG DEVICE LTD' not in body
+
+
+def test_the_export_names_the_device_behind_each_row(client, device):
+    store(device)
+
+    body = client.get('/export/csv').get_data(as_text=True)
+
+    assert 'Device' in body.splitlines()[0]
+    assert 'Test device' in body.splitlines()[1]
+
+
+def test_the_export_still_reports_a_row_that_never_produced_a_receipt(client, device):
+    """
+    Filtering to Failed and downloading an empty file would be a straight lie.
+
+    The receipt columns are blank because there is no receipt, and the row is padded to
+    the header's width so it still lines up under the columns it has nothing to say about.
+    """
+    store(device, status='failed', description='blurred photo', error='TraReceiptNotUploaded')
+
+    lines = client.get('/export/csv?tab=failed').get_data(as_text=True).splitlines()
+
+    assert len(lines) == 2
+    assert lines[1].split(',')[1] == 'failed'
+    assert 'blurred photo' in lines[1]
+    assert len(lines[1].split(',')) == len(lines[0].split(','))
 
 
 # --- Vendors and the VAT ledger ---------------------------------------------
@@ -606,6 +913,75 @@ def test_insights_falls_back_on_a_nonsense_window(client, device):
     store(device)
     assert client.get('/insights?window=; DROP TABLE receipt').status_code == 200
     assert Receipt.query.count() == 1
+
+
+def test_insights_narrows_to_the_same_filter_the_dashboard_speaks(client, device, second_device):
+    """
+    The pickers moved off the dashboard and onto this page, so the filter has to mean
+    the same thing here. Every key the table reads is read here too, and by the same
+    function - two filter languages that agree until they don't is how a figure quoted
+    off one page ends up disagreeing with the table it was read from.
+    """
+    store(device, total=100_00, tax=0, category='fuel')
+    store(second_device, total=700_00, tax=0, category='fuel')
+    store(second_device, total=300_00, tax=0, category='travel')
+
+    everything = client.get('/insights').get_data(as_text=True)
+    assert '3 receipt(s) dated' in everything
+
+    one_device = client.get(f'/insights?device={second_device.id}').get_data(as_text=True)
+    assert '2 receipt(s) dated' in one_device
+
+    # Compound, as on the dashboard: this device, and only what it spent on fuel.
+    both = client.get(f'/insights?device={second_device.id}&category=fuel').get_data(as_text=True)
+    assert '1 receipt(s) dated' in both
+
+
+def test_insights_says_what_it_is_narrowed_by_and_can_undo_it(client, device):
+    """
+    No filter may be invisible. A page of figures narrowed by something the reader
+    cannot see is a page answering a question nobody asked, and the only symptom is a
+    number that looks a little small.
+    """
+    store(device, category='fuel')
+
+    body = client.get('/insights?category=fuel&search=plasco').get_data(as_text=True)
+
+    assert 'Showing only' in body
+    assert 'plasco' in body
+    # Each chip is a link back to the same page without that one value, so removing a
+    # filter never means retyping the rest of it.
+    assert 'search=plasco' in body and 'category=fuel' in body
+
+
+def test_insights_carries_its_filter_to_the_ledger_and_the_csv(client, device):
+    """
+    A filter has to be able to leave with you. Both links carry it: one to the rows
+    behind these figures, one to a spreadsheet of exactly those rows.
+    """
+    store(device, category='fuel')
+
+    body = client.get('/insights?category=fuel&start_date=2020-01-01').get_data(as_text=True)
+
+    assert '/export/csv?' in body
+    assert 'Open in ledger' in body
+    for link in ('/?', '/export/csv?'):
+        assert any(
+            line.count('category=fuel') and line.count('start_date=2020-01-01')
+            for line in body.splitlines() if link in line
+        ), link
+
+
+def test_insights_offers_the_filter_it_is_standing_in_rather_than_a_dead_end(client, device):
+    """A filter that matches nothing must still be visible, and still be removable."""
+    store(device, category='fuel')
+
+    body = client.get('/insights?category=travel').get_data(as_text=True)
+
+    assert 'No receipts dated in this period yet' in body
+    assert 'Nothing matches this filter' in body
+    # The pickers are still drawn, so widening is a click rather than a URL edit.
+    assert 'Showing only' in body
 
 
 def test_insights_breaks_spending_down_by_region(client, device):

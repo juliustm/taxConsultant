@@ -105,6 +105,12 @@
     }).then((response) => {
       if (!response.ok) throw new Error(response.status === 404 ? 'Nothing recorded for this yet.' : 'Could not load.');
       return response.json();
+    }).then((payload) => {
+      // A card that is a photograph is only as warm as its picture. Warming fetches the
+      // payload; without this the image starts downloading at the moment the card opens,
+      // which is the one moment the reader is waiting on it.
+      if (payload && payload.image) new Image().src = payload.image;
+      return payload;
     }).catch((error) => {
       // A failed lookup is not cached: the next hover should try again rather than
       // display a stale network error for the rest of the session.
@@ -188,6 +194,31 @@
       head.appendChild(badges);
     }
     node.appendChild(head);
+
+    /*
+     * The photograph, where the card is about one.
+     *
+     * `src` is set from a path this instance served us, never from anything printed on
+     * a receipt, which is what keeps this consistent with the rest of the file: no
+     * innerHTML, and nothing fetched that somebody else chose.
+     *
+     * Sized by max-height rather than a fixed box, because a receipt is a tall narrow
+     * strip and a square frame would letterbox it into illegibility. The card is
+     * re-placed when the image lands - see watch() - so a picture that arrives after
+     * the card opened does not push its own bottom half off the screen.
+     */
+    if (payload.image) {
+      const frame = el('div', 'flex justify-center border-b border-gray-100 bg-gray-100');
+      const picture = el('img');
+      picture.src = payload.image;
+      picture.alt = payload.title || 'Receipt photograph';
+      picture.decoding = 'async';
+      Object.assign(picture.style, {
+        display: 'block', maxHeight: '280px', maxWidth: '100%', objectFit: 'contain',
+      });
+      frame.appendChild(picture);
+      node.appendChild(frame);
+    }
 
     if (payload.stats && payload.stats.length) {
       // Wrapping row rather than equal columns: 'Total spend' can be 167,000.00 and

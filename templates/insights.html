@@ -27,36 +27,234 @@
     <p class="mt-1 text-sm text-gray-500">{{ subtitle }}</p>
 {% endmacro %}
 
+{#
+  A chip in one of the pickers. Every one of them is a link carrying the whole filter
+  with this single value flipped, which is what makes the selection compound: 'the two
+  vans, on fuel and repairs, last quarter' is one question, and asked a value at a time
+  it is six answers nobody adds up.
+#}
+{% macro chip(href, label, count=None, selected=False, dot=None) %}
+    <a href="{{ href }}"
+       class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium ring-1 ring-inset
+              {{ 'bg-indigo-600 text-white ring-indigo-600' if selected else 'bg-white text-gray-700 ring-gray-300 hover:bg-gray-50' }}">
+        {% if dot %}<span class="h-1.5 w-1.5 rounded-full {{ dot }}"></span>{% endif %}
+        <span class="max-w-[13rem] truncate">{{ label }}</span>
+        {% if count is not none %}<span class="tabular-nums opacity-60">{{ count }}</span>{% endif %}
+    </a>
+{% endmacro %}
+
+{% macro picker(title, cleared_href=None, note=None) %}
+    <div class="flex items-baseline justify-between gap-x-2">
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500">{{ title }}</h3>
+        {% if cleared_href %}<a href="{{ cleared_href }}" class="text-xs font-medium text-indigo-600 hover:text-indigo-500">clear</a>{% endif %}
+    </div>
+    {% if note %}<p class="mt-1 text-xs text-gray-400">{{ note }}</p>{% endif %}
+{% endmacro %}
+
+{% set device_dots = {'active': 'bg-green-500', 'awaiting_activation': 'bg-blue-400',
+                      'signed_out': 'bg-gray-300', 'revoked': 'bg-red-400'} %}
+
+{#
+  Every section on this page, in the order it is rendered, so the rail can offer them
+  as jump links and nothing can drift out of order between the two.
+#}
+{% set sections = [
+    ('lost', 'Why VAT is being lost', attention.reasons or attention.blocked),
+    ('expiring', 'Claim before they expire', attention.expiring),
+    ('compliance', 'Compliance scoreboard', compliance_scoreboard),
+    ('where', 'Where the money goes', true),
+    ('suppliers', 'Suppliers and devices', true),
+    ('prices', 'What things cost', price_movements or cheaper),
+    ('unusual', 'Worth a second look', anomalies or outliers or attention.restricted),
+    ('trouble', 'Receipts TRA had trouble with', reliability.vendors or reliability.unattributed),
+    ('late', 'Suppliers who upload late', uploaders),
+] %}
+
 {% block content %}
 
-<div class="md:flex md:items-start md:justify-between">
-    <div>
+<div class="md:flex md:items-start md:justify-between md:gap-x-6">
+    <div class="min-w-0">
         <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Insights</h1>
         <p class="mt-2 text-sm text-gray-500">
-            {{ receipt_count }} receipt(s) dated {{ start.strftime('%d %b %Y') }} to {{ today.strftime('%d %b %Y') }}.
+            {{ receipt_count }} receipt(s) dated {{ start.strftime('%d %b %Y') }} to {{ end.strftime('%d %b %Y') }}.
             Everything below is computed from them; nothing here is a model's opinion.
         </p>
     </div>
-    <form method="get" class="mt-4 md:mt-0">
-        <label for="window" class="sr-only">Period</label>
-        <select name="window" id="window" onchange="this.form.submit()"
-                class="rounded-md border-0 py-1.5 pl-3 pr-10 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-indigo-600 sm:text-sm">
-            <option value="30" {% if window == '30' %}selected{% endif %}>Last 30 days</option>
-            <option value="90" {% if window == '90' %}selected{% endif %}>Last 90 days</option>
-            <option value="365" {% if window == '365' %}selected{% endif %}>Last 12 months</option>
-        </select>
-    </form>
+    {# The filter has to be able to leave with you. Both of these carry it: one to the
+       rows behind these figures, one to a spreadsheet of exactly the same rows. #}
+    <div class="mt-4 flex flex-shrink-0 items-center gap-x-3 md:mt-1">
+        <a href="{{ ledger_url }}" class="inline-flex items-center gap-x-1.5 rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+            Open in ledger
+            <svg class="h-4 w-4 text-gray-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M3 10a.75.75 0 01.75-.75h10.638L10.23 5.29a.75.75 0 111.04-1.08l5.5 5.25a.75.75 0 010 1.08l-5.5 5.25a.75.75 0 11-1.04-1.08l4.158-3.96H3.75A.75.75 0 013 10z" clip-rule="evenodd" /></svg>
+        </a>
+        <a href="{{ csv_url }}" class="inline-flex items-center gap-x-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500">
+            Download CSV
+        </a>
+    </div>
 </div>
 
+{# What the filter holds, on one line rather than in a second row of cards: the money
+   at risk below is the headline, and these are the denominators it is read against. #}
+<dl class="mt-4 flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-gray-200 py-3">
+    {% for label, cents in [('Total spend', holds.total_cents), ('VAT charged', holds.vat_cents),
+                            ('Average receipt', holds.average_cents), ('Largest', holds.largest_cents)] %}
+    <div class="flex items-baseline gap-x-2">
+        <dt class="text-xs uppercase tracking-wide text-gray-400">{{ label }}</dt>
+        <dd class="font-mono text-sm font-semibold tabular-nums text-gray-900" title="{{ exact(cents) }} TZS">{{ money(cents) }}</dd>
+    </div>
+    {% endfor %}
+</dl>
+
+<div class="mt-6 grid grid-cols-1 gap-x-8 gap-y-6 lg:grid-cols-12">
+
+    {#
+      The pickers. They used to sit in a drawer on the dashboard beside a column of
+      totals, which put the controls for a question on the page you go to for a row.
+      Here, changing one answers with the whole page.
+    #}
+    <aside class="lg:col-span-3">
+        <div class="space-y-6 lg:sticky lg:top-6">
+
+            <form method="get" action="{{ url_for('insights') }}">
+                {# Carried as hidden fields: submitting a search must not silently drop
+                   the categories, devices, suppliers and dates already chosen. #}
+                {% for key in ['category', 'device', 'vendor'] %}
+                    {% for value in filters[key] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+                {% endfor %}
+                {% if filters.start_date %}<input type="hidden" name="start_date" value="{{ filters.start_date }}">{% endif %}
+                {% if filters.end_date %}<input type="hidden" name="end_date" value="{{ filters.end_date }}">{% endif %}
+                <label for="search" class="sr-only">Search</label>
+                <div class="relative rounded-md shadow-sm">
+                    <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clip-rule="evenodd" /></svg></div>
+                    <input type="search" name="search" id="search" value="{{ filters.search }}"
+                           placeholder="Vendor, TIN or code..."
+                           class="block w-full rounded-md border-0 py-1.5 pl-10 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
+                </div>
+            </form>
+
+            <div>
+                {{ picker('Dates', note='By the date printed on the receipt.') }}
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                    {% for preset in date_presets %}
+                        {{ chip(filter_link(start_date=preset.start, end_date=preset.end), preset.label,
+                                selected=(filters.start_date == preset.start and filters.end_date == preset.end)) }}
+                    {% endfor %}
+                </div>
+                <form method="get" action="{{ url_for('insights') }}" class="mt-3 grid grid-cols-2 gap-2">
+                    {% for key in ['category', 'device', 'vendor'] %}
+                        {% for value in filters[key] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+                    {% endfor %}
+                    {% if filters.search %}<input type="hidden" name="search" value="{{ filters.search }}">{% endif %}
+                    <div>
+                        <label for="start_date" class="block text-xs font-medium text-gray-500">From</label>
+                        <input type="date" name="start_date" id="start_date" value="{{ filters.start_date }}"
+                               class="mt-1 block w-full rounded-md border-0 py-1.5 text-sm text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600">
+                    </div>
+                    <div>
+                        <label for="end_date" class="block text-xs font-medium text-gray-500">To</label>
+                        <input type="date" name="end_date" id="end_date" value="{{ filters.end_date }}"
+                               class="mt-1 block w-full rounded-md border-0 py-1.5 text-sm text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600">
+                    </div>
+                    <button type="submit" class="col-span-2 rounded-md bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">Apply range</button>
+                </form>
+            </div>
+
+            <div>
+                {{ picker('Categories', cleared_href=filter_link(category=[]) if filters.category else None) }}
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                    {% for option in facets.categories %}
+                        {{ chip(filter_toggle('category', option.key), option.label, option.count, option.key in filters.category) }}
+                    {% else %}
+                        <p class="text-xs italic text-gray-500">Nothing categorised in this range yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div>
+                {{ picker('Devices', cleared_href=filter_link(device=[]) if filters.device else None) }}
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                    {# Whether the phone behind the name can still submit, said in the one
+                       place somebody is choosing between them. #}
+                    {% for option in facets.devices %}
+                        {{ chip(filter_toggle('device', option.key), option.label, option.count,
+                                option.key in filters.device, device_dots.get(option.status, 'bg-gray-300')) }}
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div>
+                {{ picker('Suppliers', cleared_href=filter_link(vendor=[]) if filters.vendor else None,
+                          note='The biggest in this range. Search by name or TIN to find anyone else, then pin them here.') }}
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                    {% for option in facets.vendors %}
+                        {{ chip(filter_toggle('vendor', option.key), option.label, option.count, option.key in filters.vendor) }}
+                    {% else %}
+                        <p class="text-xs italic text-gray-500">No suppliers in this range yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            {# A page of nine sections is a page nobody reads to the bottom of twice. #}
+            <div class="hidden border-t border-gray-200 pt-4 lg:block">
+                {{ picker('On this page') }}
+                <ul class="mt-2 space-y-1">
+                    {% for anchor, title, present in sections %}
+                    <li>
+                        <a href="#{{ anchor }}" class="block truncate text-xs {{ 'text-gray-600 hover:text-indigo-600' if present else 'text-gray-300 pointer-events-none' }}">{{ title }}</a>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+    </aside>
+
+    <div class="lg:col-span-9">
+
+    {# No filter may be invisible. A page of figures narrowed by something the reader
+       cannot see is a page reporting answers to a question nobody asked, and the only
+       symptom is a number that looks a bit small. #}
+    {% set applied = [] %}
+    {% if filters.search %}{% set _ = applied.append(('matching', filters.search, filter_link(search=''))) %}{% endif %}
+    {% if filters.start_date %}{% set _ = applied.append(('from', filters.start_date, filter_link(start_date=''))) %}{% endif %}
+    {% if filters.end_date %}{% set _ = applied.append(('to', filters.end_date, filter_link(end_date=''))) %}{% endif %}
+    {% for value in filters.category %}
+        {% set _ = applied.append(('category', value|replace('_', ' '), filter_toggle('category', value))) %}
+    {% endfor %}
+    {% for value in filters.device %}
+        {% set named = facets.devices|selectattr('key', 'equalto', value)|list %}
+        {% set _ = applied.append(('device', named[0].label if named else 'device ' ~ value, filter_toggle('device', value))) %}
+    {% endfor %}
+    {% for value in filters.vendor %}
+        {% set named = facets.vendors|selectattr('key', 'equalto', value)|list %}
+        {% set _ = applied.append(('supplier', named[0].label if named else value, filter_toggle('vendor', value))) %}
+    {% endfor %}
+    {% if applied %}
+    <div class="mb-6 flex flex-wrap items-center gap-2 border-b border-gray-100 pb-4">
+        <span class="text-sm text-gray-500">Showing only</span>
+        {% for kind, label, href in applied %}
+        <a href="{{ href }}" class="inline-flex items-center gap-x-1.5 rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20 hover:bg-indigo-100">
+            <span class="text-xs font-normal uppercase tracking-wide text-indigo-400">{{ kind }}</span>
+            <span class="max-w-[16rem] truncate">{{ label }}</span>
+            <span aria-hidden="true">&times;</span>
+            <span class="sr-only">Remove this filter</span>
+        </a>
+        {% endfor %}
+        <a href="{{ url_for('insights') }}" class="text-sm font-medium text-gray-500 underline underline-offset-2 hover:text-gray-700">Clear all</a>
+    </div>
+    {% endif %}
+
 {% if not receipt_count %}
-    <div class="mt-8 rounded-lg bg-white py-16 text-center shadow ring-1 ring-black ring-opacity-5">
+    <div class="rounded-lg bg-white py-16 text-center shadow ring-1 ring-black ring-opacity-5">
         <p class="text-sm text-gray-500">No receipts dated in this period yet.</p>
-        <p class="mt-1 text-sm text-gray-400">Insights need a few receipts before they can say anything worth acting on.</p>
+        <p class="mt-1 text-sm text-gray-400">
+            {% if applied %}Nothing matches this filter. Widen it on the left, or clear it and start again.
+            {% else %}Insights need a few receipts before they can say anything worth acting on.{% endif %}
+        </p>
     </div>
 {% else %}
 
 <!-- The headline: what this period costs you if you do nothing -->
-<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
     <div class="rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
         <dt class="text-sm font-medium text-gray-500">Input VAT recoverable</dt>
         <dd class="mt-1 text-2xl font-semibold text-green-700">{{ money(attention.recoverable_cents) }}</dd>
@@ -91,7 +289,7 @@
 
 <!-- 1. Money already lost, and why -->
 {% if attention.reasons %}
-<div class="mt-10">
+<div id="lost" class="scroll-mt-6 mt-10">
     {{ section('Why VAT is being lost', 'The reasons behind the ' ~ money(attention.blocked_cents) ~ ' above, most expensive first. One habit is usually behind most of it.') }}
     <div class="mt-4 space-y-3">
         {% for reason in attention.reasons %}
@@ -132,7 +330,7 @@
 
 <!-- 2. Money about to be lost -->
 {% if attention.expiring %}
-<div class="mt-10">
+<div id="expiring" class="scroll-mt-6 mt-10">
     {{ section('Claim these before they expire', 'Input tax has to be claimed within six months of the invoice date. After that the expense still counts, but the VAT on it is simply gone.') }}
     <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
         <ul class="divide-y divide-gray-100">
@@ -155,7 +353,7 @@
 
 <!-- 3. Compliance scoreboard -->
 {% if compliance_scoreboard %}
-<div class="mt-10">
+<div id="compliance" class="scroll-mt-6 mt-10">
     {{ section('Compliance scoreboard', 'Every check this app runs, tallied across every receipt in this period. Worst first - the check with the most failures is the one worth a look.') }}
     <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
         <table class="min-w-full divide-y divide-gray-200">
@@ -188,7 +386,7 @@
 {% endif %}
 
 <!-- 4. Where the money goes -->
-<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+<div id="where" class="scroll-mt-6 mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
     <div>
         {{ section('Where the money goes', 'By expense category, largest first.') }}
         <div class="mt-4 space-y-3 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
@@ -277,7 +475,7 @@
 </div>
 
 <!-- 5. Who you buy from, and how often -->
-<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-3">
+<div id="suppliers" class="scroll-mt-6 mt-10 grid grid-cols-1 gap-6 lg:grid-cols-3">
     <div>
         {{ section('Top suppliers', 'Spend per supplier, largest first.') }}
         <div class="mt-4 space-y-3 rounded-lg bg-white p-5 shadow ring-1 ring-black ring-opacity-5">
@@ -346,7 +544,7 @@
 
 <!-- 6. What things cost -->
 {% if price_movements or cheaper %}
-<div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+<div id="prices" class="scroll-mt-6 mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
     {% if price_movements %}
     <div>
         {{ section('Prices that have moved', 'The latest unit price against the average this supplier used to charge. Nothing is reported from fewer than two earlier purchases.') }}
@@ -399,7 +597,7 @@
 
 <!-- 7. What looks unusual -->
 {% if anomalies or outliers or attention.restricted %}
-<div class="mt-10">
+<div id="unusual" class="scroll-mt-6 mt-10">
     {{ section('Worth a second look', 'Patterns, not findings. Each of these has an innocent explanation as often as not - the point is that somebody should know about it.') }}
     <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
 
@@ -458,7 +656,7 @@
 
 <!-- 8. Which suppliers' receipts give TRA trouble -->
 {% if reliability.vendors or reliability.unattributed %}
-<div class="mt-10">
+<div id="trouble" class="scroll-mt-6 mt-10">
     {{ section('Receipts that gave TRA trouble',
                'Attributed by verification code, which is read off the submitted URL before the portal is ever contacted - so even a submission that never verified can be traced to a supplier, provided that receipt reached us some other way.') }}
 
@@ -524,7 +722,7 @@
 
 <!-- 9. Suppliers who make you wait -->
 {% if uploaders %}
-<div class="mt-10 mb-6">
+<div id="late" class="scroll-mt-6 mt-10 mb-6">
     {{ section('Suppliers who upload late', 'A retry proves the receipt was not on the TRA portal when we first looked. The wait shown is from that first check to the one that succeeded, so it is a lower bound - the receipt may have appeared at any point in between.') }}
     <div class="mt-4 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
         <table class="min-w-full divide-y divide-gray-200">
@@ -554,4 +752,7 @@
 {% endif %}
 
 {% endif %}
+
+    </div>
+</div>
 {% endblock %}
