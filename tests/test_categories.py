@@ -507,10 +507,10 @@ def test_categories_is_reached_from_settings_rather_than_the_top_bar(app, admin,
 
 def test_the_settings_form_is_not_shown_on_a_tab_that_only_links_out(app, admin):
     """
-    Both link-out tabs are listed in one place. A second one added as another '!==' is
+    Every link-out tab is listed in one place. Another one added as a second '!==' is
     how a Save button ends up on a page with nothing on it to save.
     """
     body = admin.get('/admin/configure').get_data(as_text=True)
 
-    assert "linksOut: ['devices', 'categories']" in body
+    assert "linksOut: ['devices', 'products', 'categories']" in body
     assert 'x-show="!linksOut.includes(activeTab)"' in body

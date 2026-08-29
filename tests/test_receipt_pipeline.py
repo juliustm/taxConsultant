@@ -115,7 +115,7 @@ def test_the_llm_is_never_asked_for_facts(app, device, config, submit, portal, m
     portal()
     seen = {}
 
-    def _capture(facts, cfg, user_note=None):
+    def _capture(facts, cfg, user_note=None, catalogue=None):
         seen['facts'] = facts
         return {'category': 'fuel', 'llm_tax_analysis': 'ok'}
 
@@ -440,7 +440,7 @@ def test_the_senders_note_reaches_the_judgment_call(
     portal()
     seen = {}
 
-    def _capture(facts, cfg, user_note=None):
+    def _capture(facts, cfg, user_note=None, catalogue=None):
         seen['note'] = user_note
         return {'category': 'fuel'}
 
@@ -477,7 +477,7 @@ def test_re_analysis_sends_the_senders_words_not_the_models_own(
 
     seen = {}
 
-    def _capture(facts, cfg, user_note=None):
+    def _capture(facts, cfg, user_note=None, catalogue=None):
         seen['note'] = user_note
         return {'category': 'utilities', 'llm_tax_analysis': 'Deductible.'}
 

@@ -59,6 +59,27 @@ Cite the rule you are relying on (e.g. "input VAT disallowed per Sec 17(2)"). Sa
 a human tax adviser should look at it. Be brief and specific; if the item description
 is too vague to judge (for example "SUMMARIZED SALE"), say so rather than inventing a
 purpose for it.
+
+You are also asked to name what was bought, which is a different question from what the
+receipt printed. Use `item_products` to give each printed line the plain name of the
+thing it is, and `note_items` for what the sender's note says was bought when the
+document itself does not say it - a mobile money line reading 'LIPA JOHN MWANGI' with a
+note reading 'Mayai x 6' bought six eggs, and the receipt is the only place that will
+ever record it.
+
+Naming rules, which matter more than they look:
+
+  * If the purchase is already in the known products list you are given, return that
+    name exactly as it is written there. That list is the catalogue; matching it is how
+    two receipts become one product's price history, and a near miss starts a second
+    catalogue entry that will never be compared with the first.
+  * Otherwise give the ordinary English name of the thing, singular and unqualified:
+    'Eggs', 'Cooking oil', 'Cement'. Not the brand, not the pack size, not the words the
+    receipt happened to use.
+  * Put the words actually used - the Swahili term, the abbreviation, the printed line -
+    in `aliases`. They are recorded against the product, so the same word is understood
+    without asking you again.
+  * Never invent a quantity. If the note or the line does not say how many, leave it out.
 """
 
 JUDGMENT_TOOLS = [
@@ -86,6 +107,43 @@ JUDGMENT_TOOLS = [
                     "requires_review": {
                         "type": "boolean",
                         "description": "True when a human tax adviser should look at this receipt before it is claimed.",
+                    },
+                    "item_products": {
+                        "type": "array",
+                        "description": "The plain name of what each printed line actually is. One "
+                                       "entry per line worth naming; skip a line that names no "
+                                       "product (a payment reference, 'SUMMARIZED SALE').",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "line_number": {"type": "integer", "description": "Which printed line this names, counting from 1."},
+                                "product": {"type": "string", "description": "The catalogue name, reused exactly if it already exists."},
+                                "aliases": {
+                                    "type": "array", "items": {"type": "string"},
+                                    "description": "Other words for the same thing - the printed text, the Swahili term.",
+                                },
+                            },
+                            "required": ["line_number", "product"],
+                        },
+                    },
+                    "note_items": {
+                        "type": "array",
+                        "description": "What the sender's note says was bought, when the document "
+                                       "does not itemise it. Empty when the note names no goods or "
+                                       "the printed lines already say what they were.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product": {"type": "string", "description": "The catalogue name, reused exactly if it already exists."},
+                                "quantity": {"type": "number", "description": "How many, only if the note says."},
+                                "unit": {"type": "string", "description": "The unit counted in, if the note gives one: kg, tray, pcs."},
+                                "aliases": {
+                                    "type": "array", "items": {"type": "string"},
+                                    "description": "The words the note itself used.",
+                                },
+                            },
+                            "required": ["product"],
+                        },
                     },
                 },
                 "required": ["category", "llm_extracted_description", "llm_tax_analysis"],
@@ -141,6 +199,12 @@ vehicle the diesel went into, whose lunch it was, what the job was for - and it 
 often the only thing that settles the category and the business purpose. It is not part
 of the receipt. Never transcribe a figure, a date, a TIN or a code out of it, and where
 it contradicts what is printed, what is printed wins.
+
+Where the note names goods the receipt does not itemise - 'Mayai x 6' beside a till slip
+printed as 'SUMMARIZED SALE' - put those in `note_items` and nowhere else. They are kept
+apart from the printed lines for exactly the reason above: `items` is what the paper
+says, `note_items` is what the buyer says, and the two are never mixed. See the naming
+rules under `product`.
 """
 
 TEXT_RECORD_SYSTEM_PROMPT = """
@@ -184,7 +248,25 @@ from the record itself. It says what the text cannot - which meter the token was
 what the transfer was paying - and it is often the only thing that settles the category
 and the business purpose. It is not part of the record: never transcribe a figure, a
 date or a reference out of it, and where it contradicts the record, the record wins.
+
+On this path the note usually carries the only description of the purchase there is. A
+mobile money confirmation says 'Umetuma TZS 3,500.00 kwa LIPA JACLINE NGILISHO MOLLEL',
+which names the person paid and says nothing about what the money bought; the note says
+'Mayai x 6', and that is the purchase. Record the payment line as the item it is, and put
+what the note says was bought in `note_items` - never merged into `items`, which is the
+record's own words. See the naming rules under `product`.
 """
+
+# Said the same way in three tool schemas, so it is written once. The instruction to
+# reuse a catalogue name verbatim is the load-bearing sentence: a product named a
+# second way is a second product, with its own price history that is never compared
+# with the first one's.
+PRODUCT_FIELD_DESCRIPTION = (
+    "The plain name of the thing bought. If it appears in the known products list you "
+    "were given, return that name exactly. Otherwise give the ordinary English name, "
+    "singular and unqualified - 'Eggs', 'Cooking oil', 'Cement' - not the brand, the "
+    "pack size or the words the receipt used. Omit for a line that names no product."
+)
 
 VISION_TOOLS = [
     {
@@ -239,12 +321,40 @@ VISION_TOOLS = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "description": {"type": "string"},
+                                "description": {"type": "string", "description": "The line exactly as printed."},
                                 "quantity": {"type": "number"},
                                 "amount": {"type": "number"},
                                 "tax_code": {"type": "string", "description": "A, B, C, SR or EX, if printed."},
+                                "product": {
+                                    "type": "string",
+                                    "description": PRODUCT_FIELD_DESCRIPTION,
+                                },
+                                "product_aliases": {
+                                    "type": "array", "items": {"type": "string"},
+                                    "description": "Other words for the same thing - the printed text "
+                                                   "itself, the Swahili term, the abbreviation.",
+                                },
                             },
                             "required": ["description"],
+                        },
+                    },
+                    "note_items": {
+                        "type": "array",
+                        "description": "What the sender's note says was bought, when the document "
+                                       "itself does not itemise it. Never a copy of `items`, and "
+                                       "empty when the note names no goods.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product": {"type": "string", "description": PRODUCT_FIELD_DESCRIPTION},
+                                "quantity": {"type": "number", "description": "How many, only if the note says."},
+                                "unit": {"type": "string", "description": "The unit counted in, if the note gives one: kg, tray, pcs."},
+                                "aliases": {
+                                    "type": "array", "items": {"type": "string"},
+                                    "description": "The words the note itself used.",
+                                },
+                            },
+                            "required": ["product"],
                         },
                     },
                     "is_cancelled": {"type": "boolean", "description": "True if the receipt is marked cancelled or void."},
@@ -971,7 +1081,7 @@ def _call_with_fallback(client, config, kind, messages, tools, expected_name):
         f"{', '.join(retired + garbled_by) or 'nothing'}. Set the model on the configure page."
     )
 
-def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
+def analyse_receipt(facts: dict, config, user_note: str = None, catalogue=None) -> dict:
     """
     Asks the model to categorise a receipt whose facts are already established.
 
@@ -988,6 +1098,7 @@ def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
         f"{json.dumps(facts, indent=None, separators=(',', ':'))}"
     )
     prompt += _note_block(user_note)
+    prompt += _catalogue_block(catalogue)
 
     messages = [
         {"role": "system", "content": JUDGMENT_SYSTEM_PROMPT},
@@ -1006,7 +1117,13 @@ def analyse_receipt(facts: dict, config, user_note: str = None) -> dict:
 
     # The model has no business returning facts; drop anything that looks like one so
     # a stray field can never reach the ledger.
-    allowed = {'category', 'llm_extracted_description', 'llm_tax_analysis', 'requires_review'}
+    #
+    # `item_products` and `note_items` are allowed through because they are not facts
+    # about the receipt: they are what the purchase should be called, which is the same
+    # kind of answer as the category beside them. Neither can alter a printed figure -
+    # the caller reads a name and a count out of them and nothing else.
+    allowed = {'category', 'llm_extracted_description', 'llm_tax_analysis', 'requires_review',
+               'item_products', 'note_items'}
     judgment = {key: value for key, value in judgment.items() if key in allowed}
 
     if judgment.get('category') not in EXPENSE_CATEGORIES:
@@ -1028,6 +1145,41 @@ TEXT_RECORD_MAX_CHARS = 4000
 USER_NOTE_MAX_CHARS = 600
 
 
+# How many catalogue names are worth sending. Every name costs input tokens on every
+# receipt read, and the value of the list falls away fast past the products actually
+# being bought this month - which is why Product.catalogue orders by last seen.
+CATALOGUE_MAX_ENTRIES = 80
+
+
+def _catalogue_block(catalogue):
+    """
+    The products already in the book, as a labelled block, or '' when there are none.
+
+    Sent so the model can answer the identity question with the answer the app has
+    already committed to. Without it every receipt is read in isolation and the model
+    picks a reasonable name each time - 'Eggs', then 'Egg', then 'Fresh eggs' - and the
+    catalogue grows a synonym per receipt, which is the failure this whole layer exists
+    to prevent. With it, the common case is the model returning a name that is already a
+    row, and the match costs nothing to make.
+
+    A fresh instance sends nothing at all, which is correct: there is no catalogue yet,
+    and an empty list would only invite the model to explain itself.
+    """
+    entries = [entry for entry in (catalogue or []) if entry.get('name')][:CATALOGUE_MAX_ENTRIES]
+    if not entries:
+        return ''
+
+    lines = []
+    for entry in entries:
+        also = [word for word in (entry.get('also') or []) if word]
+        lines.append(f"- {entry['name']}" + (f" (also: {', '.join(also)})" if also else ''))
+    return (
+        '\n\nKnown products, already in this business\'s catalogue. If what was bought is '
+        'one of these, use the name exactly as written here rather than a new wording:\n'
+        + '\n'.join(lines)
+    )
+
+
 def _note_block(user_note):
     """
     The sender's note as a labelled block, or '' when there is none.
@@ -1047,7 +1199,7 @@ def _note_block(user_note):
     )
 
 
-def extract_receipt_details(content, is_image, config, user_note=None):
+def extract_receipt_details(content, is_image, config, user_note=None, catalogue=None):
     """
     Reads a receipt the only way left: by having a model transcribe it.
 
@@ -1071,7 +1223,7 @@ def extract_receipt_details(content, is_image, config, user_note=None):
     if not config or not config.llm_api_key:
         raise ValueError("LLM API key is not configured.")
 
-    note = _note_block(user_note)
+    note = _note_block(user_note) + _catalogue_block(catalogue)
     if is_image:
         messages = [
             {"role": "system", "content": VISION_SYSTEM_PROMPT},

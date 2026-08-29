@@ -68,6 +68,22 @@ def _spending(receipts):
     return [receipt for receipt in receipts if receipt.is_expense]
 
 
+def _item_key(item):
+    """
+    What makes two lines the same purchase.
+
+    The catalogue's key where the line has been filed against one (models.user.Product),
+    which is the only thing that can tell that 'MAYAI TREI', 'eggs' and a note reading
+    'Mayai x 6' are one product with one price history. The normalised description is
+    the fallback, and was the whole answer before the catalogue existed: it still groups
+    a vendor's own repeated line correctly, it simply cannot cross a language.
+    """
+    product_id = getattr(item, 'product_id', None)
+    if product_id:
+        return f'product:{product_id}'
+    return normalise_description(item.description)
+
+
 def _unit_prices(receipts):
     """
     Every (item, vendor) observation with a usable unit price.
@@ -87,14 +103,17 @@ def _unit_prices(receipts):
             if not quantity or Decimal(quantity) <= 0 or not item.amount_cents:
                 continue
 
-            item_key = normalise_description(item.description)
+            item_key = _item_key(item)
             if not item_key:
                 continue
 
             observations[(item_key, vendor)].append({
                 'date': receipt.receipt_date,
                 'unit_cents': int(Decimal(item.amount_cents) / Decimal(quantity)),
-                'description': item.description,
+                # The catalogue's name where there is one, so a finding reads the same
+                # whichever language the last receipt was written in - the lines behind
+                # it may say 'mayay', 'Mayai' and 'Eggs' and are one product.
+                'description': getattr(item, 'label', None) or item.description,
                 'vendor_name': _vendor_name(receipt),
                 'receipt_id': receipt.id,
             })

@@ -7,8 +7,11 @@ from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, session, current_app, send_from_directory, Response, g, make_response
 
 from config import Config
-from models.user import db, InstanceConfig, Device, Receipt, ReceiptItem, ReceiptTaxLine, Submission, Vendor
-from utils import analytics, branding, classify, compliance, geo, peek, qr
+from models.user import (
+    db, InstanceConfig, Device, Product, Receipt, ReceiptItem, ReceiptTaxLine,
+    Submission, Vendor,
+)
+from utils import analytics, branding, classify, compliance, geo, peek, products, qr
 from utils.images import store_photo
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
@@ -130,6 +133,13 @@ PENDING_COLUMNS = {
         ('corrected_at', 'DATETIME'),
         ('corrected_fields', 'TEXT'),
     ),
+    'receipt_item': (
+        # Where the line came from - see ReceiptItem.source. Existing rows were all read
+        # off a document, so the default is right for every one of them and no backfill
+        # is needed.
+        ('source', "VARCHAR(10) NOT NULL DEFAULT 'printed'"),
+        ('product_id', 'INTEGER'),
+    ),
 }
 
 # Indexes on columns added above. create_all() only indexes tables it creates.
@@ -146,6 +156,8 @@ PENDING_INDEXES = (
     ('ix_receipt_is_test', 'receipt', 'is_test'),
     ('ix_receipt_category', 'receipt', 'category'),
     ('ix_device_last_seen_at', 'device', 'last_seen_at'),
+    ('ix_receipt_item_product_id', 'receipt_item', 'product_id'),
+    ('ix_receipt_item_source', 'receipt_item', 'source'),
 )
 
 # Kept apart from PENDING_INDEXES because SQLite cannot add a UNIQUE column with
@@ -533,6 +545,11 @@ def receipt_to_dict(receipt, config=None, detailed=True):
                 "line_number": item.line_number, "description": item.description,
                 "quantity": float(item.quantity) if item.quantity is not None else None,
                 "amount": _as_float(item.amount_cents), "tax_code": item.tax_code,
+                # 'printed' or 'note': whether the document carried this line or the
+                # sender's note did. A reader that cannot tell them apart would be
+                # presenting somebody's typing as a verified figure.
+                "source": item.source,
+                "product": item.product.name if item.product else None,
             }
             for item in receipt.items
         ],
@@ -1631,7 +1648,9 @@ def _receipt_from_photo(submission, config):
             return receipt
         print("[Photo] Portal would not confirm the decoded code; reading the photo instead.")
 
-    data = extract_receipt_details(photo_path, True, config, user_note=_sender_note(submission))
+    data = extract_receipt_details(
+        photo_path, True, config, user_note=_sender_note(submission),
+        catalogue=Product.catalogue())
 
     # Written before anything is done with it. Everything below this line can end in a
     # retry booked for tomorrow, and until this was stored that outcome took the whole
@@ -1702,7 +1721,8 @@ def _receipt_from_text(submission, config):
             return receipt
 
     data = extract_receipt_details(
-        submission.input_data, False, config, user_note=_sender_note(submission))
+        submission.input_data, False, config, user_note=_sender_note(submission),
+        catalogue=Product.catalogue())
 
     # Stored before anything acts on it, for the reason spelled out in
     # _receipt_from_photo: everything below can end in a retry booked for tomorrow, and
@@ -1724,6 +1744,27 @@ def _receipt_from_text(submission, config):
 
     return _receipt_from_transcription(
         submission, data, config, source='llm_text', default_document_type='other_receipt')
+
+
+def _naming_from_items(items):
+    """
+    The `product` a transcription put on each line, as the judgment path's shape.
+
+    The two prompts ask the same question in the place that suits each: a model reading a
+    photograph names the line while it is transcribing it, and a model given facts it did
+    not read names them by line number afterwards. Converted here so nothing downstream
+    has to know which happened.
+    """
+    naming = []
+    for index, item in enumerate(items or [], start=1):
+        if not isinstance(item, dict) or not (item.get('product') or '').strip():
+            continue
+        naming.append({
+            'line_number': index,
+            'product': item['product'].strip(),
+            'aliases': item.get('product_aliases') or [],
+        })
+    return naming
 
 
 def _receipt_from_transcription(submission, data, config, source='llm_vision',
@@ -1760,6 +1801,12 @@ def _receipt_from_transcription(submission, data, config, source='llm_vision',
         'llm_extracted_description': data.get('llm_extracted_description'),
         'llm_tax_analysis': data.get('llm_tax_analysis'),
         'document_type': document_type,
+        # Reshaped into the same two keys the verified-page path writes, so
+        # _product_hints has one thing to read whichever way the receipt arrived. On this
+        # path the naming rides along on the items themselves, because the model is
+        # transcribing and naming in the same answer.
+        'item_products': _naming_from_items(data.get('items')),
+        'note_items': data.get('note_items') or [],
     }
 
     # The paper says "VRN: NOT REGISTERED" when the supplier is not VAT registered,
@@ -1877,7 +1924,10 @@ def _judge_receipt(parsed, submission, config):
         return _unanalysed(parsed, 'no LLM provider is configured'), 'skipped'
 
     try:
-        return analyse_receipt(parsed.as_llm_facts(), config, user_note=_sender_note(submission)), 'ok'
+        return analyse_receipt(
+            parsed.as_llm_facts(), config, user_note=_sender_note(submission),
+            catalogue=Product.catalogue(),
+        ), 'ok'
     except LlmUnavailable as e:
         print(f"[LLM] Storing submission {submission.id} without analysis: {e}")
         return _unanalysed(parsed, f'the analysis step was unavailable ({e})'), 'unavailable'
@@ -1925,6 +1975,239 @@ def _register_duplicate(submission, verification_code, config):
     dispatch_event('submission.duplicate', payload, config)
     return True
 
+# --- PRODUCTS ---
+#
+# What was bought, as opposed to what was paid for.
+#
+# A mobile money receipt says `LIPA JACLINE NGILISHO MOLLEL - TZS 3,500`. That is a
+# complete record of a payment and tells you nothing about the purchase: not what it
+# was, not how many, not whether the same thing cost less last week. The only place that
+# information exists is the note the payer typed beside the camera - `Mayai x 6` - and
+# until now it was read for the category and then left as prose.
+#
+# So it is read for the goods as well, and the goods are filed against a catalogue
+# (models.user.Product). Three things have to be true for that catalogue to be worth
+# having, and each one is a rule below:
+#
+#   * A product is one row however it was written. `Mayai x 6` today, `eggs` next
+#     Tuesday and `mayay` from somebody in a hurry are one product with three names -
+#     otherwise the price history is three histories of one item each and says nothing.
+#     Resolution is Product.resolve; the model's contribution is the semantic hop that
+#     spelling cannot make, and every hop it makes is stored as an alias and never
+#     bought again.
+#   * A line read out of a note is never a line off the document. It is stored with
+#     source='note' and shown apart, because the difference between what TRA verified
+#     and what somebody typed on a phone is the difference this whole app is built on.
+#   * Nothing is invented. A count is stored only where a count was written, and an
+#     amount is put on a note line only in the one case where it cannot be wrong: a
+#     single product, a document that itemises nothing, and a total that therefore
+#     belongs entirely to it.
+#
+# Applied at _complete_submission, which is the one place a receipt is stored, so every
+# route that produces one - the queue, an admin keeping a transcription, a correction
+# verified against the portal - gets the same itemisation without knowing it exists.
+
+
+# An alias shorter than this is an abbreviation nobody can disambiguate, and letting one
+# into the table would quietly bind a common fragment to whichever product got there
+# first.
+MIN_ALIAS_LENGTH = 3
+
+
+def _product_hints(receipt):
+    """
+    The model's naming of this receipt, as stored beside its analysis.
+
+    Kept in raw_llm_response rather than in columns of its own because that is exactly
+    what it is: the model's answer, held where every other part of the model's answer is
+    held, and re-read from there when the receipt is re-analysed.
+    """
+    stored = json.loads(receipt.raw_llm_response or '{}')
+
+    by_line = {}
+    for entry in stored.get('item_products') or []:
+        if not isinstance(entry, dict) or not (entry.get('product') or '').strip():
+            continue
+        try:
+            by_line[int(entry['line_number'])] = entry
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    note_items = [
+        entry for entry in stored.get('note_items') or []
+        if isinstance(entry, dict) and (entry.get('product') or '').strip()
+    ]
+    return by_line, note_items
+
+
+def _usable_aliases(candidates):
+    """The words worth remembering a product by, out of whatever was offered."""
+    seen = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        text = ' '.join(candidate.split())
+        # 'goods', 'payment', 'item' - a word that names no product must never become
+        # the key that finds one, because alias keys are unique across the catalogue and
+        # the first product to claim one keeps it.
+        if len(text) < MIN_ALIAS_LENGTH or products.is_opaque(text):
+            continue
+        seen.append(text)
+    return seen
+
+
+def _name_printed_items(receipt, by_line):
+    """
+    Files each printed line against the catalogue.
+
+    The model's name for the line is preferred, because it is the one that can see that
+    'MAYAI TREI' and 'EGGS (TRAY)' are the same purchase. Failing that the printed text
+    names itself, which is enough for the common case of one vendor printing the same
+    line every week. A line that names no product at all - a payment reference, a
+    'SUMMARIZED SALE' - is left unfiled rather than founding a catalogue entry that means
+    nothing.
+    """
+    for item in receipt.printed_items:
+        hint = by_line.get(item.line_number) or {}
+        name = (hint.get('product') or '').strip() or None
+        aliases = _usable_aliases([*(hint.get('aliases') or []), item.description])
+
+        if name is None:
+            if not item.description or products.is_opaque(item.description):
+                continue
+            # The count belongs in `quantity`, which the document already filled in;
+            # only the name of the thing is wanted here.
+            name = products.parse_entry(item.description)[0]
+
+        item.product = Product.resolve(name, aliases=aliases)
+
+
+def _note_entries(receipt, note, note_items):
+    """
+    What the sender said they bought, as (name, quantity, unit, aliases).
+
+    The model's reading is used when there is one. When there is not - an outage, an
+    older receipt being re-analysed, a model that ignored the note - utils.products
+    reads the note itself, under two guards that between them keep prose out of the
+    catalogue:
+
+      * The document must itemise nothing. A receipt that lists its own lines does not
+        need the note to say what was on it, and a note beside one is commentary.
+      * The fragment must either carry a count ('Mayai x 6') or name something the
+        catalogue already knows. 'For the generator' does neither and is left as what it
+        is - a reason, not a purchase.
+
+    The model is under no such restriction, because it can tell a purchase from a reason
+    and is the whole point of asking it.
+    """
+    entries = []
+    for entry in note_items:
+        entries.append((
+            entry['product'].strip(),
+            entry.get('quantity'),
+            (entry.get('unit') or '').strip() or None,
+            _usable_aliases(entry.get('aliases') or []),
+        ))
+    if entries or not note or not _document_says_nothing(receipt):
+        return entries
+
+    for name, quantity, unit in products.parse_note(note):
+        if quantity is None and Product.lookup(name) is None and not products.seeded_name(name):
+            continue
+        entries.append((name, quantity, unit, []))
+    return entries
+
+
+def _document_says_nothing(receipt):
+    """Whether every printed line on this receipt describes the payment, not the goods."""
+    return all(products.is_opaque(item.description) for item in receipt.printed_items)
+
+
+def _itemise_from_note(receipt, note, note_items):
+    """
+    Records what the note says was bought, as lines of its own.
+
+    Two decisions are worth spelling out.
+
+    Entries that resolve to one product are folded together, counts included: a note
+    reading 'mayai 3, eggs 3' bought six eggs and should read as one line, not as two
+    that no report will ever add up.
+
+    An amount is put on a note line in exactly one situation - a single product, and a
+    document that itemised nothing, so the total is that product's price and nothing
+    else's. That single case is the one this feature exists for, and it is what turns
+    'Mayai x 6, TZS 3,500' into a unit price of 583 that utils/analytics can compare with
+    the next tray of eggs and with what the shop down the road charges. Anywhere else -
+    two products under one total, or a document that priced its own lines - the split is
+    unknowable, and the count is recorded with no amount beside it rather than a figure
+    somebody might file a return on.
+    """
+    # Rebuilt from scratch each time, so re-analysing a receipt cannot leave last
+    # reading's products beside this one's.
+    for stale in receipt.note_items:
+        receipt.items.remove(stale)
+        # Unhooked from the catalogue as well as from the receipt: a line dropped from
+        # one collection and left in the other is a row the next flush has two opinions
+        # about.
+        stale.product = None
+
+    entries = _note_entries(receipt, note, note_items)
+    if not entries:
+        return
+
+    folded = {}
+    for name, quantity, unit, aliases in entries:
+        product = Product.resolve(name, aliases=aliases, unit=unit)
+        if product is None:
+            continue
+        key = product.lookup_key
+        if key in folded:
+            existing = folded[key]
+            if quantity is not None:
+                existing['quantity'] = (existing['quantity'] or 0) + to_decimal(quantity)
+            continue
+        folded[key] = {
+            'product': product, 'description': products.display_name(name),
+            'quantity': to_decimal(quantity) if quantity is not None else None,
+        }
+
+    if not folded:
+        return
+
+    priced = (len(folded) == 1 and _document_says_nothing(receipt)
+              and receipt.total_incl_tax_cents)
+    line_number = max([item.line_number for item in receipt.printed_items] or [0])
+    for entry in folded.values():
+        line_number += 1
+        item = ReceiptItem(
+            line_number=line_number, description=entry['description'],
+            quantity=entry['quantity'],
+            amount_cents=receipt.total_incl_tax_cents if priced else None,
+            source='note', product=entry['product'],
+        )
+        receipt.items.append(item)
+        # Explicit, rather than left to cascade at the next flush: resolving the product
+        # of a later line runs a query, and a query autoflushes a session holding a line
+        # that has not been added to it.
+        db.session.add(item)
+
+
+def apply_products(receipt, note):
+    """
+    Files everything this receipt bought against the catalogue.
+
+    Idempotent, and safe to run again after a re-analysis: printed lines are re-filed
+    and note lines are rebuilt. Never raises - a receipt that could not be itemised is
+    still a receipt, and the ledger must not turn on whether a name could be worked out.
+    """
+    try:
+        by_line, note_items = _product_hints(receipt)
+        _name_printed_items(receipt, by_line)
+        _itemise_from_note(receipt, note, note_items)
+    except Exception as e:  # noqa: BLE001 - naming a purchase can never fail a receipt.
+        print(f"[Products] Could not file this receipt against the catalogue: {e}")
+
+
 def _complete_submission(submission, receipt, config):
     """Stores the receipt, marks the submission done and announces it."""
     description = json.loads(receipt.raw_llm_response or '{}').get('llm_extracted_description')
@@ -1932,6 +2215,12 @@ def _complete_submission(submission, receipt, config):
         submission.description = description
 
     db.session.add(receipt)
+    # After the add rather than before it, and here rather than in each builder. Here,
+    # because this is the one place every route that produces a receipt passes through,
+    # and the sender's note is what decides that a payment line bought six eggs. After,
+    # because filing a line against the catalogue runs a query, and a query autoflushes
+    # a session that would otherwise be holding a receipt it has not been told about.
+    apply_products(receipt, _sender_note(submission))
     submission.status = 'completed'
     db.session.commit()
 
@@ -3583,6 +3872,7 @@ def reanalyse_receipt(receipt_id):
         judgment = analyse_receipt(
             parsed.as_llm_facts(), config,
             user_note=_sender_note(receipt.submission),
+            catalogue=Product.catalogue(),
         )
     except LlmUnavailable as e:
         return jsonify({'error': f'The analysis step is unavailable: {e}'}), 503
@@ -3596,6 +3886,7 @@ def reanalyse_receipt(receipt_id):
         receipt.category = judgment.get('category')
     receipt.llm_status = 'ok'
     receipt.raw_llm_response = json.dumps(judgment)
+    apply_products(receipt, _sender_note(receipt.submission))
     db.session.commit()
 
     return jsonify({
@@ -3853,6 +4144,153 @@ def rename_category():
         ),
     }), 200
 
+# --- THE PRODUCT CATALOGUE (the page) ---
+#
+# The same page Categories is, for the same reason: what the app worked out on its own is
+# right most of the time, and the times it is not have to be repairable in one place by
+# somebody who is not going to open a database.
+#
+# Renaming is again the only operation, and again it is also the merge - type the name of
+# a product that already exists and the two become one. There is no second button for it
+# because there is no second decision behind it: an admin looking at 'Eggs' and 'Mayai'
+# has noticed one thing, not two, and should not have to work out which verb this app
+# files that under. What is different here is that the losing name survives as an alias
+# of the winner, so the word that created the duplicate row resolves to the surviving one
+# the next time somebody types it - a merge that the next receipt could undo would not be
+# a merge.
+
+
+def _product_rows():
+    """
+    Every product with what has been bought under it.
+
+    Cancelled and test receipts are excluded, as everywhere else money is totalled.
+    Amounts come out of the lines rather than the receipts, so a receipt holding three
+    products contributes each line to its own product and the page adds up to what was
+    spent rather than to three times it.
+    """
+    stats = db.session.query(
+        ReceiptItem.product_id,
+        db.func.count(ReceiptItem.id),
+        db.func.count(db.distinct(ReceiptItem.receipt_id)),
+        db.func.sum(ReceiptItem.amount_cents),
+        db.func.sum(db.case((ReceiptItem.source == 'note', 1), else_=0)),
+    ).join(Receipt, Receipt.id == ReceiptItem.receipt_id).filter(
+        ReceiptItem.product_id.isnot(None),
+        Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False),
+    ).group_by(ReceiptItem.product_id).all()
+
+    by_product = {row[0]: row for row in stats}
+    rows = []
+    for product in Product.query.order_by(Product.last_seen_at.desc()).all():
+        _, lines, receipts, cents, from_note = by_product.get(
+            product.id, (product.id, 0, 0, 0, 0))
+        rows.append({
+            'id': product.id, 'name': product.name, 'unit': product.unit,
+            'aliases': product.alias_names, 'lines': lines, 'receipts': receipts,
+            'total_cents': cents or 0, 'from_note': from_note or 0,
+            'last_seen': product.last_seen_at,
+        })
+    return rows
+
+
+def _unnamed_purchases():
+    """
+    Receipts that record a payment and never say what it bought.
+
+    The backlog this page exists to shrink. A mobile money line reading 'LIPA JACLINE
+    NGILISHO MOLLEL' with nothing typed beside it is a perfectly valid receipt and a dead
+    end for every question worth asking of one - what it was, whether it costs more than
+    it used to, whether somebody else sells it cheaper. Counted rather than listed,
+    because the repair is not on this page: it is a note on the next receipt, or a
+    correction on that one.
+    """
+    unnamed = 0
+    receipts = Receipt.query.options(selectinload(Receipt.items)).filter(
+        Receipt.is_cancelled.is_(False), Receipt.is_test.is_(False)).all()
+    for receipt in receipts:
+        if any(item.product_id for item in receipt.items):
+            continue
+        if all(products.is_opaque(item.description) for item in receipt.items):
+            unnamed += 1
+    return unnamed
+
+
+@app.route('/products')
+@login_required
+def manage_products():
+    """Everything the business buys, under one name each, and what it costs."""
+    rows = _product_rows()
+    total_cents = sum(row['total_cents'] for row in rows)
+    for row in rows:
+        row['share'] = _share(row['total_cents'], total_cents)
+
+    return render_template(
+        'products.html',
+        rows=[row for row in rows if row['lines']],
+        # A product with no lines behind it is one every receipt has moved away from -
+        # after a merge, or a rename that emptied it. Shown apart so the catalogue does
+        # not read as mostly empty, and kept rather than deleted because its aliases are
+        # still what stops the old word founding the row again.
+        unused=[row for row in rows if not row['lines']],
+        total_cents=total_cents,
+        unnamed=_unnamed_purchases(),
+    )
+
+
+@app.route('/products/rename', methods=['POST'])
+@login_required
+def rename_product():
+    """
+    Renames a product, which is also how two of them are merged into one.
+
+    The response says which of the two happened and how many lines moved, because those
+    are the two things that cannot be seen afterwards.
+    """
+    product = db.session.get(Product, request.form.get('id', type=int) or 0)
+    if product is None:
+        return jsonify({'error': 'No such product.'}), 404
+
+    typed = ' '.join((request.form.get('to') or '').split())
+    if not typed:
+        return jsonify({'error': 'Give the new name.'}), 400
+
+    # Resolved rather than taken as typed, which is what makes 'rename onto an existing
+    # name' work at all: 'eggs', 'Eggs' and 'mayai' all find the row that is already
+    # there, and only a genuinely new word creates one.
+    target = Product.lookup(typed)
+    if target is None or target.id == product.id:
+        # A new name for this product, or a rewording of the one it has. Either way no
+        # line moves - the row is the same row - and the name it is losing is kept as an
+        # alias, because receipts are still arriving with it. The order matters: the key
+        # has to change before the old name is remembered, or the old name is still this
+        # product's own key and remembering it does nothing.
+        old = product.name
+        product.name = products.display_name(typed)
+        product.lookup_key = products.normalise(typed)
+        product.remember(old, source='admin')
+        db.session.commit()
+        return jsonify({'id': product.id, 'name': product.name, 'moved': 0, 'merged': False,
+                        'message': f'{old} is now called {product.name}.'}), 200
+
+    moved = len(product.lines)
+
+    held = len(target.lines)
+    old = product.name
+    product.merge_into(target)
+    db.session.commit()
+    print(f"[Products] Merged '{old}' into '{target.name}' ({moved} line(s)).")
+
+    return jsonify({
+        'id': target.id, 'name': target.name, 'moved': moved, 'merged': True,
+        'message': (
+            f"{moved} line{'' if moved == 1 else 's'} moved into {target.name}, which "
+            f"already held {held}. '{old}' is now one of its names, so typing it again "
+            'finds this product.'
+        ),
+    }), 200
+
+
 @app.route('/admin/setup', methods=['GET', 'POST'])
 def setup():
     if get_instance_config():
@@ -4023,6 +4461,10 @@ def configure_instance():
         # what it owes a reader here is whether that page is worth opening.
         category_count=len(categories_in_use()),
         uncategorised=Receipt.query.filter(*_uncategorised()).count(),
+        # The same two numbers for the catalogue: how much it knows, and how much is
+        # still going unrecorded because a payment record was sent without a note.
+        product_count=Product.query.count(),
+        unnamed_purchases=_unnamed_purchases(),
     )
 
 # --- DEVICE MANAGEMENT ---
@@ -4996,6 +5438,11 @@ EXPORT_HEADER = [
     'Standard Rated Excl', 'Zero Rated Or Exempt', 'Claim Deadline',
     'Days Left To Claim', 'Failed Checks', 'Recovery Blockers',
     'Computed Category', 'WHT Estimate',
+    # What was bought, as the catalogue names it - including the lines read out of the
+    # sender's note, which on a mobile money record are the only description of the
+    # purchase there is. Appended rather than folded into 'Items', which stays what the
+    # document itself printed.
+    'Products',
 ]
 
 
@@ -5067,7 +5514,12 @@ def _export_row(submission, config):
     items = '; '.join(
         f"{item.description} x{item.quantity or 1} @ {format_cents(item.amount_cents)}"
         f"{f' [{item.tax_code}]' if item.tax_code else ''}"
-        for item in receipt.items
+        for item in receipt.printed_items
+    )
+    bought = '; '.join(
+        f"{item.label}{f' x{item.quantity:g}' if item.quantity else ''}"
+        f"{' (from note)' if item.from_note else ''}"
+        for item in receipt.items if item.label
     )
     return [
         submission.id, submission.status, device_name, received,
@@ -5093,6 +5545,7 @@ def _export_row(submission, config):
         '; '.join(assessment.recovery_blockers),
         assessment.computed_category or '',
         format_cents(assessment.wht_total_cents),
+        bought,
     ]
 
 

@@ -116,7 +116,7 @@ def vision(monkeypatch):
         }
         data.update(fields)
 
-        def _extract(content, is_image, config, user_note=None):
+        def _extract(content, is_image, config, user_note=None, catalogue=None):
             calls.append(content)
             notes.append(user_note)
             return data

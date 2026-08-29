@@ -392,7 +392,7 @@ def _split_by_rate(receipt, assessment):
     rates = _rates_by_code(receipt)
     standard = exempt = 0
 
-    for item in getattr(receipt, 'items', None) or []:
+    for item in _printed(receipt):
         amount = item.amount_cents or 0
         rate = rates.get((item.tax_code or '').strip().upper())
         if rate is not None and rate > 0:
@@ -461,7 +461,7 @@ def _check_tax_arithmetic(receipt, assessment):
         ))
         return True
 
-    items = getattr(receipt, 'items', None) or []
+    items = _printed(receipt)
     coded = [item for item in items if (item.tax_code or '').strip()]
     if not coded or len(coded) != len(items):
         assessment.checks.append(Check(
@@ -633,6 +633,22 @@ def _resolve_recovery(assessment, voided, buyer_ok, vendor_ok, window_ok, sums_o
     assessment.checks.append(Check('input_vat', 'Input VAT recoverable', status, detail))
 
 
+def _printed(receipt):
+    """
+    The lines the document itself carries.
+
+    Every check that recomputes something the paperwork asserts has to run on these
+    alone. A receipt can also hold lines read out of the sender's note - what the buyer
+    says they bought, on a payment record that itemises nothing - and those have no tax
+    code and never had one. Counted here they would report that a fully verified receipt
+    could not have its tax checked, the moment somebody typed what was in the bag.
+    """
+    printed = getattr(receipt, 'printed_items', None)
+    if printed is not None:
+        return list(printed)
+    return list(getattr(receipt, 'items', None) or [])
+
+
 def _read_line_items(receipt, assessment, capital_threshold_cents):
     """
     The judgments that belong to individual lines: category, capital, WHT, restrictions.
@@ -640,6 +656,13 @@ def _read_line_items(receipt, assessment, capital_threshold_cents):
     Kept separate from the checks above because these are about what was bought, not
     about whether the paperwork holds up.
     """
+    # Everything the receipt is known to have bought, which on a mobile money record is
+    # only ever what the sender's note said. Unlike the two checks above this one reads
+    # descriptions rather than recomputing a printed figure, and a line the payer wrote
+    # is a far better description of the purchase than 'LIPA JACLINE NGILISHO MOLLEL'.
+    # The amounts it also reads cannot double-count: a note line carries one only where
+    # the printed lines named nothing, and a line that names nothing matches none of the
+    # keywords that put an amount into a finding.
     items = getattr(receipt, 'items', None) or []
     assessment.computed_category = categorise_receipt(item.description for item in items)
 

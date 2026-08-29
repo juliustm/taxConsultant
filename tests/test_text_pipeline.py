@@ -86,7 +86,7 @@ def reader(monkeypatch):
         }
         data.update(fields)
 
-        def _extract(content, is_image, config, user_note=None):
+        def _extract(content, is_image, config, user_note=None, catalogue=None):
             calls.append((content, is_image))
             notes.append(user_note)
             return data

@@ -324,7 +324,7 @@
                         {% endfor %}
                     </dl>
 
-                    {% if receipt.items %}
+                    {% if receipt.printed_items %}
                     <table class="mt-6 w-full text-sm">
                         <thead>
                             <tr class="border-b border-gray-200 text-left text-xs uppercase tracking-wide text-gray-500">
@@ -335,11 +335,20 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for item in receipt.items %}
+                            {% for item in receipt.printed_items %}
                             <tr class="border-b border-gray-100">
                                 {# What this line has cost before, here and elsewhere, and what
                                    buying it implies for withholding tax and capital allowances. #}
-                                <td class="py-1.5 pr-2">{{ peek(item.description, 'item:' ~ receipt.id ~ ':' ~ item.line_number) }}</td>
+                                <td class="py-1.5 pr-2">
+                                    {{ peek(item.description, 'item:' ~ receipt.id ~ ':' ~ item.line_number) }}
+                                    {# The catalogue's name for this line, shown only when it is not
+                                       simply the line again - it is what makes this purchase the same
+                                       purchase as one printed differently somewhere else. #}
+                                    {% if item.product and item.product.name|lower != (item.description or '')|lower %}
+                                    <span class="ml-1 inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600"
+                                          title="Filed in the catalogue as this">{{ item.product.name }}</span>
+                                    {% endif %}
+                                </td>
                                 <td class="py-1.5 text-center text-gray-500">{{ item.quantity if item.quantity is not none else '' }}</td>
                                 <td class="py-1.5 text-right font-mono">{{ money(item.amount_cents) }}</td>
                                 <td class="py-1.5 pl-2 text-center text-xs text-gray-500">{{ item.tax_code or '' }}</td>
@@ -364,6 +373,49 @@
                     </table>
                 </div>
             </div>
+
+            <!-- What the sender said was in the bag -->
+            {#
+              Kept out of the receipt above rather than added to it, and that is the whole
+              design of this block. The card above is the document: what an EFD printed, or
+              what the portal confirmed. This is what somebody typed on a phone - the only
+              record that exists of what a mobile money payment actually bought, and never
+              evidence of it. Mixing the two would make a note indistinguishable from a
+              verified line, which is the one thing this app cannot allow.
+            #}
+            {% if receipt.note_items %}
+            <div class="mt-6 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">What was bought</h2>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Read from the note sent with this receipt, not from the document. The document
+                        {% if receipt.printed_items %}records the payment and not the goods{% else %}itemises nothing{% endif %}.
+                    </p>
+                </div>
+                <ul class="divide-y divide-gray-100">
+                    {% for item in receipt.note_items %}
+                    <li class="flex items-center justify-between px-6 py-3">
+                        <div>
+                            <a class="text-sm font-medium text-gray-900 hover:text-indigo-600"
+                               href="{{ url_for('manage_products') }}">{{ item.label }}</a>
+                            {% if item.description and item.product and item.description|lower != item.product.name|lower %}
+                            <span class="ml-1 text-xs text-gray-500">written as &lsquo;{{ item.description }}&rsquo;</span>
+                            {% endif %}
+                        </div>
+                        <div class="flex items-center gap-x-4 text-sm">
+                            <span class="text-gray-500">
+                                {%- if item.quantity %}{{ '{:g}'.format(item.quantity) }}{{ ' ' ~ item.product.unit if item.product and item.product.unit else '' }}
+                                {%- else %}no count given{% endif -%}
+                            </span>
+                            {# An amount is here only where it cannot be split wrongly: one product,
+                               and a document that priced nothing else. #}
+                            <span class="font-mono text-gray-900">{{ money(item.amount_cents) if item.amount_cents else '' }}</span>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
 
             <!-- What was bought, and what follows from it -->
             {% if assessment.wht_lines or assessment.capital_items or assessment.restrictions %}

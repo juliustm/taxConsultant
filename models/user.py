@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 
 from utils.money import from_cents
+from utils import products as product_text
 
 db = SQLAlchemy()
 
@@ -365,6 +366,197 @@ class Vendor(db.Model):
         vendor.last_seen_at = datetime.utcnow()
         return vendor
 
+class Product(db.Model):
+    """
+    One thing the business buys, however it was written down that day.
+
+    The catalogue exists because identity is what every question about buying needs and
+    no receipt supplies. 'Mayai x 6' typed beside a mobile money line, 'EGGS TRAY' printed
+    on an EFD, and 'mayay' typed by somebody in a hurry are one product bought three
+    times - and only once they are one row can the app say that eggs cost 12% more this
+    month, or that the shop across the road sells them cheaper.
+
+    Modelled on Vendor, which solves the same problem for suppliers: a stable key, the
+    display name refreshed from what was last seen, and the surface forms kept beside it.
+    The difference is that a vendor has a TIN and a product has nothing - no barcode, no
+    registry, nothing issued by anyone - so identity has to be built out of the words
+    themselves. Three layers do it, cheapest first:
+
+      1. The normalised name (utils.products.normalise), which collapses case,
+         punctuation and a trailing unit.
+      2. An alias, which is any other name this product has been seen under. Aliases are
+         how the expensive answers become free: the model works out once that 'mayai'
+         means eggs, and every later 'mayai' is a dictionary lookup.
+      3. A near match on spelling, for the typo that neither of the above catches.
+
+    An admin can always overrule all three - see the products page, where renaming one
+    product onto another's name merges them, exactly as it does for categories.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    lookup_key = db.Column(db.String(220), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    # The counting unit this is usually bought in - 'kg', 'tray', 'pcs' - remembered
+    # from the first line that named one, so a later line without it still reads right.
+    unit = db.Column(db.String(20), nullable=True)
+    first_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    @property
+    def alias_names(self):
+        """Every other word this product has been called, for display."""
+        return sorted({alias.alias for alias in self.aliases if alias.alias_key != self.lookup_key})
+
+    @classmethod
+    def lookup(cls, text):
+        """
+        The product this text names, or None. Never creates anything.
+
+        The three layers in order. Fuzzy matching is last and is run over the keys
+        already in the catalogue rather than over the seed list, because a catalogue
+        that has seen a word is better evidence than a list written in advance.
+        """
+        key = product_text.normalise(text)
+        if not key:
+            return None
+
+        found = cls.query.filter_by(lookup_key=key).first()
+        if found is not None:
+            return found
+
+        alias = ProductAlias.query.filter_by(alias_key=key).first()
+        if alias is not None:
+            return alias.product
+
+        near = product_text.best_match(key, [row[0] for row in db.session.query(cls.lookup_key)])
+        if near:
+            return cls.query.filter_by(lookup_key=near).first()
+
+        near = product_text.best_match(
+            key, [row[0] for row in db.session.query(ProductAlias.alias_key)])
+        if near:
+            alias = ProductAlias.query.filter_by(alias_key=near).first()
+            return alias.product if alias else None
+        return None
+
+    @classmethod
+    def resolve(cls, text, aliases=(), unit=None):
+        """
+        The product for this text, created on first sight.
+
+        `aliases` is everything else this purchase was called - the model's other name
+        for it, the words that were actually printed - and each one is written into the
+        alias table pointing at whatever product this resolves to. That is the whole
+        learning mechanism: it costs one row, and it turns the next occurrence of that
+        word into a lookup.
+
+        Ordinary text with nothing behind it goes through the seed list before it
+        becomes a new product, so a fresh instance's first 'Mayai x 6' lands under Eggs
+        rather than founding a catalogue entry the English word will never find again.
+        """
+        surface = product_text.display_name(text)
+        if not surface:
+            return None
+
+        found = cls.lookup(surface)
+        candidates = [surface, *[a for a in aliases if a]]
+        if found is None:
+            for candidate in candidates:
+                found = cls.lookup(candidate)
+                if found is not None:
+                    break
+
+        if found is None:
+            # Nothing in the catalogue knows this word. The seed list may still know
+            # what it means, in which case the product is created under the canonical
+            # name and the typed word is remembered as an alias of it.
+            seeded = next((product_text.seeded_name(candidate) for candidate in candidates
+                           if product_text.seeded_name(candidate)), None)
+            found = cls(
+                lookup_key=product_text.normalise(seeded or surface),
+                name=seeded or surface, unit=unit,
+            )
+            db.session.add(found)
+
+        found.unit = found.unit or unit
+        found.last_seen_at = datetime.utcnow()
+        for candidate in candidates:
+            found.remember(candidate)
+        return found
+
+    def remember(self, text, source='seen'):
+        """Records one more word for this product, if it is new and not its own name."""
+        key = product_text.normalise(text)
+        if not key or key == self.lookup_key:
+            return None
+        existing = ProductAlias.query.filter_by(alias_key=key).first()
+        if existing is not None:
+            return existing
+        alias = ProductAlias(
+            product=self, alias_key=key, alias=product_text.display_name(text), source=source)
+        db.session.add(alias)
+        return alias
+
+    def merge_into(self, other):
+        """
+        Folds this product into another, keeping every word both were known by.
+
+        The losing name survives as an alias of the winner rather than being deleted,
+        which is what stops the merge from being undone by the next receipt: the word
+        that created this row is exactly the word that would create it again.
+        """
+        if other is None or other.id == self.id:
+            return 0
+        moved = 0
+        for line in list(self.lines):
+            line.product = other
+            moved += 1
+        for alias in list(self.aliases):
+            alias.product = other
+        other.remember(self.name, source='merge')
+        other.first_seen_at = min(other.first_seen_at, self.first_seen_at)
+        other.last_seen_at = max(other.last_seen_at, self.last_seen_at)
+        db.session.delete(self)
+        return moved
+
+    @classmethod
+    def catalogue(cls, limit=80):
+        """
+        The catalogue as the model is shown it: recent names, with what else they are
+        called.
+
+        Bounded because it is sent with every receipt read. Ordered by when each product
+        was last bought, so an instance with a long tail still shows the model the names
+        this week's receipts are actually going to hit.
+        """
+        rows = cls.query.order_by(cls.last_seen_at.desc()).limit(limit).all()
+        return [
+            {'name': row.name, 'also': row.alias_names[:4]} if row.alias_names else {'name': row.name}
+            for row in rows
+        ]
+
+
+class ProductAlias(db.Model):
+    """
+    One word that means a product, other than the product's own name.
+
+    Unique on the key across the whole table, so a word can only ever mean one thing -
+    which is what makes resolution a lookup rather than a search, and what makes a merge
+    permanent.
+
+    `source` records who said so: 'seen' for a word that arrived on a receipt or in a
+    note, 'llm' for the model's own synonym, 'merge' for the name of a product folded
+    into this one, 'admin' for a word typed on the products page.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False, index=True)
+    product = db.relationship(
+        'Product', backref=db.backref('aliases', lazy=True, cascade='all, delete-orphan'))
+    alias_key = db.Column(db.String(220), unique=True, nullable=False, index=True)
+    alias = db.Column(db.String(200), nullable=False)
+    source = db.Column(db.String(10), nullable=True)
+    first_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
 class Receipt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
 
@@ -483,6 +675,23 @@ class Receipt(db.Model):
             return None
         return datetime.combine(self.receipt_date, self.receipt_time or datetime.min.time())
 
+    @property
+    def printed_items(self):
+        """
+        The lines that were actually on the document.
+
+        Every check that recomputes something the document asserts - the tax
+        cross-foot, the line-item tax codes - has to run on these and not on
+        `items`, which also holds what the sender said they bought. See
+        ReceiptItem.source.
+        """
+        return [item for item in self.items if item.source != 'note']
+
+    @property
+    def note_items(self):
+        """What the sender's note said was bought, when the document did not say."""
+        return [item for item in self.items if item.source == 'note']
+
 class ReceiptItem(db.Model):
     """
     One line of the purchased-items table.
@@ -504,9 +713,41 @@ class ReceiptItem(db.Model):
     # TRA's per-line tax class: A, B, C, SR or EX.
     tax_code = db.Column(db.String(5), nullable=True, index=True)
 
+    # Where this line came from, and it is the only thing separating a fact from a
+    # reading of one:
+    #
+    #   'printed' - it was on the document. Every line the parser read off TRA's
+    #               verified page, and every line a model transcribed off paper.
+    #   'note'    - nothing printed it. It is what the sender said they bought, read
+    #               out of the note beside the camera because the document itself said
+    #               only 'LIPA JACLINE NGILISHO MOLLEL'.
+    #
+    # Everything that recomputes tax from the document reads printed lines only (see
+    # Receipt.printed_items), because a note line has no tax code and never did - the
+    # alternative was a checked receipt reporting that its tax could not be checked the
+    # moment somebody typed what they bought into the box.
+    source = db.Column(db.String(10), nullable=False, default='printed', index=True)
+
+    # The catalogue entry this line is an instance of. Nullable throughout: a line
+    # nothing could identify is still a line, and every reader treats a missing product
+    # as 'not known' rather than as an error.
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=True, index=True)
+    product = db.relationship('Product', backref=db.backref('lines', lazy=True))
+
     @property
     def amount(self):
         return from_cents(self.amount_cents)
+
+    @property
+    def from_note(self):
+        return self.source == 'note'
+
+    @property
+    def label(self):
+        """What to call this line: the catalogue's name for it, or its own text."""
+        if self.product is not None:
+            return self.product.name
+        return self.description
 
 class ReceiptTaxLine(db.Model):
     """

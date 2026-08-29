@@ -113,7 +113,7 @@
                             ('insights', 'Insights', ['insights']),
                             ('vat_ledger', 'VAT Ledger', ['vat_ledger']),
                             ('vendors', 'Vendors', ['vendors']),
-                            ('configure_instance', 'Settings', ['configure_instance', 'manage_devices', 'manage_categories']),
+                            ('configure_instance', 'Settings', ['configure_instance', 'manage_devices', 'manage_categories', 'manage_products']),
                             ] %}
                             {% for endpoint, label, active_on in nav_items %}
                             <a href="{{ url_for(endpoint) }}" class="inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium
