@@ -810,8 +810,12 @@ def test_matching_amounts_from_different_vendors_are_not_duplicates(client, devi
     one = Vendor.upsert(tin='100147181', name='PLASCO LIMITED')
     two = Vendor.upsert(tin='100200300', name='NMB BANK')
     db.session.flush()
-    _, first = store(device, vendor_id=one.id, when=date(2026, 5, 4), total=118_00)
-    store(device, vendor_id=two.id, when=date(2026, 5, 4), total=118_00)
+    # Each receipt prints the TIN of the supplier it is filed under, which is the only
+    # state the pipeline can produce: Vendor.upsert is handed the receipt's own printed
+    # fields, so the row and the print never disagree. See Receipt.vendor_key.
+    _, first = store(device, vendor_id=one.id, tin='100147181', when=date(2026, 5, 4), total=118_00)
+    store(device, vendor_id=two.id, tin='100200300', vendor='NMB BANK',
+          when=date(2026, 5, 4), total=118_00)
 
     assert 'Possibly the same purchase' not in client.get(f'/receipts/{first.id}').get_data(as_text=True)
 

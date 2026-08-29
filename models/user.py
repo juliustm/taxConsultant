@@ -1,9 +1,11 @@
 # models/user.py
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
 import uuid
 from datetime import datetime
 
 from utils.money import from_cents
+from utils import fingerprint
 from utils import products as product_text
 
 db = SQLAlchemy()
@@ -242,6 +244,20 @@ class Submission(db.Model):
     # been near a network. A queued scan is retried until it is acknowledged, and
     # without this every dropped response would leave a duplicate behind.
     client_uuid = db.Column(db.String(64), nullable=True, unique=True)
+    # A hash of the evidence itself - the characters of a pasted record, the bytes of a
+    # stored photograph. See utils/fingerprint.
+    #
+    # Deliberately not client_uuid, which answers a different question. That one is
+    # minted on the phone and says 'this is the same *send* as the one you already
+    # acknowledged'; this one is computed from the content and says 'this is the same
+    # *thing*, however many times it has been submitted and from wherever'. The second
+    # is what catches the SMS somebody pastes again on Friday having forgotten they
+    # pasted it on Monday, and it catches it at intake, before a model is paid to read
+    # a receipt already in the ledger.
+    #
+    # NULL on a URL submission, whose identity is the verification code in receipt_code,
+    # and on a paste too slight to be an identity at all.
+    content_hash = db.Column(db.String(80), nullable=True, index=True)
     # When the person actually scanned it, as opposed to received_at, which is when
     # the server heard about it. Offline queuing puts days between the two.
     captured_at = db.Column(db.DateTime, nullable=True)
@@ -600,6 +616,21 @@ class Receipt(db.Model):
     is_cancelled = db.Column(db.Boolean, nullable=False, default=False, index=True)
     is_test = db.Column(db.Boolean, nullable=False, default=False, index=True)
 
+    # --- Is this the same purchase we already have? ---
+    # Two derived keys, both built by utils/fingerprint out of the columns above and
+    # both kept current by refresh_fingerprints, which runs on every insert and update.
+    # Derived rather than asked for: a receipt whose TIN or total was corrected by hand
+    # is a different purchase from the one it was a minute ago, and a key written once
+    # at intake would go on describing the reading somebody has just overruled.
+    #
+    # identity_key is an assertion - the same code, or the same reference and amount -
+    # and a submission matching one already stored is filed as a duplicate without ever
+    # reaching the model. near_key is an observation - the same supplier, day and total
+    # - and is only ever reported to a human. See utils/fingerprint for why the line is
+    # drawn there.
+    identity_key = db.Column(db.String(300), nullable=True, index=True)
+    near_key = db.Column(db.String(300), nullable=True, index=True)
+
     # --- System & Audit Fields ---
     # 'tra_html' when the facts were parsed from the verified page, 'llm_vision' when
     # a photo left no alternative to reading them out of the image.
@@ -691,6 +722,82 @@ class Receipt(db.Model):
     def note_items(self):
         """What the sender's note said was bought, when the document did not say."""
         return [item for item in self.items if item.source == 'note']
+
+    @property
+    def vendor_key(self):
+        """
+        Which supplier this receipt is one purchase from, as a string.
+
+        The same key the vendor row itself is filed under, computed from the same two
+        printed fields - so it is the TIN where there is one and the normalised trading
+        name otherwise, and 'PLASCO LIMITED' and 'Plasco Ltd' are one supplier here for
+        exactly the reason they are one row there.
+
+        Deliberately derived rather than read off vendor_id, which says the same thing.
+        A key is computed while a receipt is being flushed and also before it exists at
+        all - checking a transcription against the ledger happens before any of it is
+        stored - and the printed fields are the half of that pair which is always
+        already there.
+        """
+        return Vendor.make_lookup_key(self.vendor_tin, self.vendor_name)
+
+    def refresh_fingerprints(self):
+        """Recomputes the two duplicate-matching keys from what the receipt now says."""
+        vendor_key = self.vendor_key
+        self.identity_key = fingerprint.identity_key(
+            verification_code=self.receipt_verification_code,
+            reference=self.receipt_number,
+            vendor_key=vendor_key,
+            total_cents=self.total_incl_tax_cents,
+            on_date=self.receipt_date,
+        )
+        self.near_key = fingerprint.near_key(
+            vendor_key=vendor_key,
+            on_date=self.receipt_date,
+            total_cents=self.total_incl_tax_cents,
+        )
+        return self
+
+    @classmethod
+    def with_identity(cls, key):
+        """The stored receipt this key names, or None. The blocking duplicate check."""
+        if not key:
+            return None
+        return cls.query.filter_by(identity_key=key).first()
+
+    def possible_duplicates(self, limit=5):
+        """
+        Other receipts that look like the same purchase recorded twice.
+
+        Matching on identity catches the same document submitted twice - the same
+        verification code, or the same payment reference and amount. It cannot catch
+        the same purchase submitted once as a photograph and once as a TRA link, or a
+        handwritten chit photographed on two different days: neither copy carries
+        anything the other can be matched against exactly, so both are stored and the
+        expense is counted twice.
+
+        What that actually looks like is the same supplier, the same day, the same
+        total - which is a query, not a guess. Two genuinely separate purchases can
+        match, so this reports candidates and never merges anything.
+        """
+        if not self.near_key:
+            return []
+
+        query = Receipt.query.filter(Receipt.near_key == self.near_key)
+        if self.id is not None:
+            query = query.filter(Receipt.id != self.id)
+        return query.order_by(Receipt.id.asc()).limit(limit).all()
+
+
+# Derived columns, kept derived. Every path that stores a receipt goes through a flush -
+# the pipeline, an admin accepting a transcription, a correction typed on the receipt
+# page - and putting this on the mapper is what makes 'the keys match what the row says'
+# true by construction rather than by each of those paths remembering to say so.
+@event.listens_for(Receipt, 'before_insert')
+@event.listens_for(Receipt, 'before_update')
+def _refresh_receipt_fingerprints(_mapper, _connection, receipt):
+    receipt.refresh_fingerprints()
+
 
 class ReceiptItem(db.Model):
     """

@@ -190,6 +190,30 @@ def test_migration_adds_the_unique_indexes(legacy_database):
     assert Submission.query.count() == 2
 
 
+def test_migration_fingerprints_the_receipts_already_there(legacy_database):
+    """
+    A ledger's history has to be visible to the duplicate check on the first boot.
+
+    Without the backfill the keys exist only on receipts stored after the upgrade, so
+    the first thing submitted twice afterwards would be compared against nothing and
+    filed as new - which is the failure the check was added to prevent, silently
+    postponed by however long the ledger has been running.
+    """
+    import main
+    from models.user import Receipt
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    receipts = Receipt.query.order_by(Receipt.id).all()
+    assert [r.identity_key for r in receipts] == ['code:CODE1', 'code:CODE2']
+    # Both legacy rows are one supplier on one day, and their money was in the FLOAT
+    # columns until this same migration moved it - so a near key here also says the
+    # backfills ran in an order that leaves the amounts readable.
+    assert receipts[0].near_key == 'near:tin:100147181|2022-03-08|123456'
+    assert receipts[1].near_key == 'near:tin:100147181|2022-03-08|1010'
+
+
 def test_migration_keeps_an_existing_instance_configured(legacy_database):
     """
     Adding the business identity must not disturb the settings already there.

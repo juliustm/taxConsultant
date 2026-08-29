@@ -11,7 +11,7 @@ from models.user import (
     db, InstanceConfig, Device, Product, Receipt, ReceiptItem, ReceiptTaxLine,
     Submission, Vendor,
 )
-from utils import analytics, branding, classify, compliance, geo, peek, products, qr
+from utils import analytics, branding, classify, compliance, fingerprint, geo, peek, products, qr
 from utils.images import store_photo
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
@@ -99,6 +99,7 @@ PENDING_COLUMNS = {
         ('llm_draft', 'TEXT'),
         ('rebuild_declined', 'BOOLEAN NOT NULL DEFAULT 0'),
         ('user_note', 'TEXT'),
+        ('content_hash', 'VARCHAR(80)'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -132,6 +133,8 @@ PENDING_COLUMNS = {
         ('llm_status', 'VARCHAR(20)'),
         ('corrected_at', 'DATETIME'),
         ('corrected_fields', 'TEXT'),
+        ('identity_key', 'VARCHAR(300)'),
+        ('near_key', 'VARCHAR(300)'),
     ),
     'receipt_item': (
         # Where the line came from - see ReceiptItem.source. Existing rows were all read
@@ -158,6 +161,11 @@ PENDING_INDEXES = (
     ('ix_device_last_seen_at', 'device', 'last_seen_at'),
     ('ix_receipt_item_product_id', 'receipt_item', 'product_id'),
     ('ix_receipt_item_source', 'receipt_item', 'source'),
+    # The three duplicate checks, each one an equality on a key. Without these every
+    # submission scans the table it is being checked against.
+    ('ix_submission_content_hash', 'submission', 'content_hash'),
+    ('ix_receipt_identity_key', 'receipt', 'identity_key'),
+    ('ix_receipt_near_key', 'receipt', 'near_key'),
 )
 
 # Kept apart from PENDING_INDEXES because SQLite cannot add a UNIQUE column with
@@ -203,6 +211,7 @@ def apply_pending_migrations():
     _backfill_device_tokens()
     _backfill_photo_paths()
     _backfill_user_notes()
+    _backfill_fingerprints(columns_by_table.get('receipt', set()))
 
 def _backfill_money(receipt_columns):
     """
@@ -325,6 +334,24 @@ def _backfill_user_notes():
     if result.rowcount:
         print(f"[Migration] Moved {result.rowcount} sender note(s) to submission.user_note.")
     db.session.commit()
+
+def _backfill_fingerprints(receipt_columns):
+    """
+    Computes the duplicate-matching keys for receipts stored before they existed.
+
+    Runs once, on the boot that adds the columns, and never again - the keys are
+    maintained from there by the mapper event in models/user. Without it a ledger's
+    entire history is invisible to the check, and the first receipt to be submitted
+    twice after an upgrade would be compared against nothing at all.
+    """
+    if not receipt_columns or 'identity_key' in receipt_columns:
+        return  # A fresh database, or a run that has already done this.
+
+    receipts = Receipt.query.all()
+    for receipt in receipts:
+        receipt.refresh_fingerprints()
+    db.session.commit()
+    print(f"[Migration] Fingerprinted {len(receipts)} existing receipt(s).")
 
 # Create database tables and seed with dummy data for demo
 with app.app_context():
@@ -466,33 +493,12 @@ def find_possible_duplicates(receipt, limit=5):
     """
     Other receipts that look like the same purchase recorded twice.
 
-    Dedup on the verification code catches the same receipt submitted twice, because
-    the code is the receipt's primary key. It cannot catch the same purchase submitted
-    once as a photograph and once as a TRA link: the photo carries no code to match on,
-    so both are stored and the expense is counted twice.
-
-    What that actually looks like is the same supplier, the same day, the same total -
-    which is a query, not a guess. Two genuinely separate purchases can match, so this
-    reports candidates and never merges anything.
+    The rule itself lives on the receipt, because the same question is asked from three
+    places - this page, peek's code card, and the check run the moment a receipt is
+    stored - and three copies of 'what looks like the same purchase' is how they come to
+    disagree. See Receipt.possible_duplicates.
     """
-    if receipt.receipt_date is None or receipt.total_incl_tax_cents is None:
-        return []
-
-    query = Receipt.query.filter(
-        Receipt.id != receipt.id,
-        Receipt.receipt_date == receipt.receipt_date,
-        Receipt.total_incl_tax_cents == receipt.total_incl_tax_cents,
-    )
-    # Matched on the vendor row where there is one, and on the printed TIN otherwise,
-    # so a photographed receipt that never got a Vendor still finds its twin.
-    if receipt.vendor_id:
-        query = query.filter(Receipt.vendor_id == receipt.vendor_id)
-    elif receipt.vendor_tin:
-        query = query.filter(Receipt.vendor_tin == receipt.vendor_tin)
-    else:
-        return []
-
-    return query.order_by(Receipt.id.asc()).limit(limit).all()
+    return receipt.possible_duplicates(limit)
 
 def receipt_to_dict(receipt, config=None, detailed=True):
     """
@@ -1415,7 +1421,7 @@ def _receipt_from_tra_url(submission, config, url=None, on_exhausted=None):
     # at intake and it is the receipt's identity, so a receipt already in the ledger
     # can be recognised without spending a request against a rate-limited portal -
     # which matters most exactly when the queue is full of resubmissions.
-    if _register_duplicate(submission, submission.receipt_code, config):
+    if _duplicate_of_code(submission, submission.receipt_code, config):
         return None
 
     print(f"[Fetch] Attempt {(submission.retry_count or 0) + 1} for {url}")
@@ -1436,7 +1442,7 @@ def _receipt_from_tra_url(submission, config, url=None, on_exhausted=None):
         f"{len(parsed.items)} item(s), total {parsed.total_incl_tax}, tax {parsed.total_tax}{flags}"
     )
 
-    if _register_duplicate(submission, parsed.verification_code, config):
+    if _duplicate_of_code(submission, parsed.verification_code, config):
         return None
 
     return _receipt_from_parsed_page(submission, config, parsed, html)
@@ -1767,6 +1773,24 @@ def _naming_from_items(items):
     return naming
 
 
+def _identity_of_transcription(data):
+    """
+    The identity key for what a model just read, before any of it is stored.
+
+    Reads the same four fields out of the transcription that Receipt.refresh_fingerprints
+    reads off the stored row, so the key a submission is checked against is the key its
+    receipt will carry - which is the only way the second copy of a document can be
+    recognised as the second copy.
+    """
+    return fingerprint.identity_key(
+        verification_code=data.get('receipt_verification_code'),
+        reference=data.get('receipt_number'),
+        vendor_key=Vendor.make_lookup_key(data.get('vendor_tin'), data.get('vendor_name')),
+        total_cents=to_cents(data.get('total_amount')),
+        on_date=_parse_iso_date(data.get('receipt_date')),
+    )
+
+
 def _receipt_from_transcription(submission, data, config, source='llm_vision',
                                 default_document_type='tra_efd_receipt'):
     """
@@ -1792,7 +1816,13 @@ def _receipt_from_transcription(submission, data, config, source='llm_vision',
     """
     document_type = (data.get('document_type') or '').strip() or default_document_type
     verification_code = (data.get('receipt_verification_code') or '').strip() or None
-    if _register_duplicate(submission, verification_code, config):
+    if _duplicate_of_code(submission, verification_code, config):
+        return None
+
+    # Before the Receipt is built, not after. Assigning a vendor to a receipt puts it in
+    # the session by cascade, so a check made on the finished object would be a check
+    # made on a row already halfway to being stored.
+    if _duplicate_of_identity(submission, _identity_of_transcription(data), config):
         return None
 
     category = data.get('category')
@@ -1950,9 +1980,56 @@ def _describe(parsed):
     others = len(parsed.items) - 1
     return f'{first}{f" and {others} more item(s)" if others else ""} from {vendor}'
 
-def _register_duplicate(submission, verification_code, config):
+# --- DUPLICATES ---
+#
+# Three checks, run at three different moments, and the order is the whole design: each
+# one is cheaper than the one after it and settles a case the next one could not.
+#
+#   1. The content hash, at intake (see ingest_submission). The same SMS pasted twice is
+#      the same characters twice, and that costs a hash to notice - no model, no portal,
+#      no queue.
+#   2. The verification code, before the portal is asked. TRA's own primary key for the
+#      sale, read off the URL at intake, so a receipt we already hold never becomes a
+#      request.
+#   3. The identity key, once a model has read the document. The only one that needs a
+#      reading, and the only one that can recognise a purchase which never had a code:
+#      the LUKU token, the M-Pesa reference, the number off a receipt book. See
+#      utils/fingerprint for what is and is not allowed to block.
+#
+# What none of them do is merge. A duplicate is a submission with an outcome - it keeps
+# its row, its photograph and its note, and it says which submission it repeats - and
+# the receipt it points at is left exactly as it was.
+
+def _mark_duplicate(submission, original, because):
     """
-    Marks the submission as a duplicate if this receipt is already stored.
+    Writes the verdict onto the submission, without committing.
+
+    `original` is the submission this one repeats. `because` is the signal that matched,
+    and it is on the row rather than in a log because 'Duplicate of submission ID 12' is
+    a statement an admin has to be able to check - there are now several ways to be one,
+    and they are not equally strong.
+    """
+    submission.status = 'duplicate'
+    submission.error_message = f"Duplicate of submission ID {original} ({because})"
+
+def _announce_duplicate(submission, config):
+    """Tells the dashboard and the phone. The caller has already committed."""
+    print(f"[Duplicate] Submission {submission.id}: {submission.error_message}.")
+    dispatch_event('submission.duplicate', {
+        "submission_id": submission.id, "status": "duplicate",
+        "error_message": submission.error_message, "device_id": submission.device_id,
+    }, config)
+
+def _register_duplicate(submission, original, because, config):
+    """Marks, commits and announces, for the callers that are mid-pipeline."""
+    _mark_duplicate(submission, original, because)
+    db.session.commit()
+    _announce_duplicate(submission, config)
+    return True
+
+def _duplicate_of_code(submission, verification_code, config):
+    """
+    Marks the submission as a duplicate if TRA's own code for it is already stored.
 
     Runs before the LLM is called: a receipt we already hold is not worth a token.
     """
@@ -1963,17 +2040,34 @@ def _register_duplicate(submission, verification_code, config):
     if not existing:
         return False
 
-    print(f"[TaskSkip] Duplicate receipt {verification_code}. Original sub ID: {existing.submission_id}")
-    submission.status = 'duplicate'
-    submission.error_message = f"Duplicate of submission ID {existing.submission_id}"
-    db.session.commit()
+    return _register_duplicate(submission, existing.submission_id,
+                               'the same TRA verification code', config)
 
-    payload = {
-        "submission_id": submission.id, "status": "duplicate",
-        "error_message": submission.error_message, "device_id": submission.device_id,
-    }
-    dispatch_event('submission.duplicate', payload, config)
-    return True
+def _duplicate_of_identity(submission, key, config):
+    """
+    Marks the submission as a duplicate if some other document already asserted this
+    identity - the same payment reference and amount, or the same code.
+
+    The check that covers everything TRA never issued a code for, which is most of what
+    an organisation actually spends. Runs on what the model read, because the reference
+    is printed on the document and there is no other way to know it, and runs before the
+    receipt is built so that nothing is half-stored when it fires.
+    """
+    if not key:
+        return False
+
+    existing = Receipt.with_identity(key)
+    if existing is None:
+        return False
+
+    return _register_duplicate(
+        submission, existing.submission_id, _identity_reason(key), config)
+
+def _identity_reason(key):
+    """What to tell an admin about why two documents were called the same one."""
+    if key.startswith('code:'):
+        return 'the same TRA verification code'
+    return 'the same reference and amount'
 
 # --- PRODUCTS ---
 #
@@ -2754,6 +2848,7 @@ def insights():
         price_movements=analytics.unit_price_movements(receipts),
         cheaper=analytics.cheaper_elsewhere(receipts),
         anomalies=analytics.spend_anomalies(receipts),
+        double_records=analytics.double_records(receipts),
         outliers=analytics.location_outliers(receipts),
         uploaders=analytics.vendor_upload_behaviour(receipts),
         map_points=_map_points(receipts),
@@ -3337,8 +3432,8 @@ def keep_submission_extraction(submission_id):
     config = get_instance_config()
     receipt = _receipt_from_transcription(submission, draft, config)
     if receipt is None:
-        # _register_duplicate has already committed the submission as a duplicate of a
-        # receipt we hold, which is a real outcome and not a failure.
+        # The submission has already been committed as a duplicate of a receipt we hold,
+        # which is a real outcome and not a failure.
         db.session.commit()
         return jsonify({'submission_id': submission.id, 'status': submission.status,
                         'message': 'That receipt is already in the ledger, so this '
@@ -3647,13 +3742,8 @@ def verify_submission_now(submission, config, url):
         # not a duplicate, it is a receipt whose corrected code turned out to name
         # somebody else's row, and saying otherwise would take it out of the ledger.
         if existing is None:
-            submission.status = 'duplicate'
-            submission.error_message = f'Duplicate of submission ID {clash.submission_id}'
-            db.session.commit()
-            dispatch_event('submission.duplicate', {
-                'submission_id': submission.id, 'status': submission.status,
-                'error_message': submission.error_message, 'device_id': submission.device_id,
-            }, config)
+            _register_duplicate(submission, clash.submission_id,
+                                'the same TRA verification code', config)
         else:
             db.session.commit()
 
@@ -4902,7 +4992,7 @@ def scan_api_sync():
             'submission_id': submission.id,
             # 'duplicate' means we already had this exact scan, so the phone can drop
             # it from the outbox just as confidently as if it were new.
-            'status': 'accepted' if created else 'duplicate',
+            'status': _sync_status(submission, created),
         })
 
     # One wake-up for the whole batch. A device back from a day offline should not
@@ -4949,8 +5039,23 @@ def scan_api_sync_photo():
     return jsonify({
         'client_uuid': client_uuid,
         'submission_id': submission.id,
-        'status': 'accepted' if created else 'duplicate',
+        'status': _sync_status(submission, created),
     }), 200
+
+
+def _sync_status(submission, created):
+    """
+    What to tell the phone about one item of its outbox.
+
+    Two ways to be told 'duplicate' and they mean different things here, though not to
+    the phone, which drops the item from its outbox either way. `created` is False when
+    the same client_uuid was already acknowledged - the phone re-sent something we have.
+    A submission born with status 'duplicate' is a new send of evidence already in the
+    ledger, which is a thing the person did rather than a thing the network did.
+    """
+    if not created or submission.status == 'duplicate':
+        return 'duplicate'
+    return 'accepted'
 
 
 @app.route('/scan/api/submissions')
@@ -5187,6 +5292,11 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
     frontend_input_data = ''
     # The photograph filed beside a URL, when the scan carried both.
     photo_filename = None
+    # The evidence itself, hashed, so that the same thing submitted twice is recognised
+    # here rather than after a model has been paid to read it again. See Submission.
+    # content_hash; a URL submission has no need of one, because the code in it is a
+    # stronger identity and is already checked before the portal is asked.
+    content_hash = None
 
     if photo:
         filename = secure_filename(f"{datetime.utcnow().timestamp()}_{photo.filename}")
@@ -5199,7 +5309,9 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
         #
         # Reassigned, because a re-encode also settles the extension: what is stored is
         # the name of the file that actually exists, not the one that was uploaded.
-        photo_filename = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
+        stored = store_photo(photo, app.config['UPLOAD_FOLDER'], filename)
+        photo_filename = stored.filename
+        content_hash = fingerprint.photo_key(stored.digest)
 
     if url:
         # A URL wins the input_type even when a photograph came with it, and that
@@ -5234,6 +5346,8 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
         # silently truncated record beats a 500 on a receipt somebody is trying to file.
         db_input_data = text.strip()[:TEXT_SUBMISSION_MAX_CHARS]
         frontend_input_data = db_input_data
+        # Hashed after the truncation, so what is compared is what is stored.
+        content_hash = fingerprint.text_key(db_input_data)
 
     new_submission = Submission(
         device_id=device.id, input_type=input_type,
@@ -5246,7 +5360,17 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
         # Read before anything is queued. A submission that never verifies still has
         # its receipt's identity on it, which is what the admin needs to chase it.
         receipt_code=_code_from_url(db_input_data) if input_type == 'url' else None,
+        content_hash=content_hash,
     )
+
+    # Settled before the row is committed, not after: a submission that is born queued
+    # and marked a duplicate a moment later can be claimed by a runner tick in between,
+    # and then the thing this check exists to avoid - the model reading a document
+    # already in the ledger - has happened anyway.
+    original = _submission_with_content(content_hash)
+    if original is not None:
+        _mark_duplicate(new_submission, original.id, _content_reason(content_hash))
+
     db.session.add(new_submission)
     db.session.commit()
 
@@ -5260,8 +5384,37 @@ def ingest_submission(device, photo=None, url=None, text=None, description=None,
         "description": new_submission.description, "location": new_submission.location,
         "device_id": device.id,
     }
-    dispatch_event('submission.queued', payload, get_instance_config())
+    config = get_instance_config()
+    dispatch_event('submission.queued', payload, config)
+    if original is not None:
+        _announce_duplicate(new_submission, config)
     return new_submission, True
+
+
+def _submission_with_content(content_hash):
+    """
+    The submission this exact evidence was already filed as, or None.
+
+    'Already filed' deliberately excludes the ones that did not work out. A submission
+    that failed is one somebody is entitled to send again - re-pasting the SMS is how a
+    person retries a receipt the model could not be reached for - and answering that
+    with 'duplicate of the thing that failed' would leave them no way to file it at all.
+    A duplicate is not an original either, or a third copy would point at the second
+    rather than at the receipt.
+    """
+    if not content_hash:
+        return None
+    return Submission.query.filter(
+        Submission.content_hash == content_hash,
+        Submission.status.in_(('queued', 'processing', 'completed')),
+    ).order_by(Submission.id.asc()).first()
+
+
+def _content_reason(content_hash):
+    """What to tell an admin about two submissions carrying the same evidence."""
+    if (content_hash or '').startswith('photo:'):
+        return 'the same photograph, byte for byte'
+    return 'the same text, character for character'
 
 
 def wake_task_runner():
@@ -5303,7 +5456,13 @@ def receipt_endpoint():
     )
     wake_task_runner()
 
-    return jsonify({ "message": "Receipt accepted and queued for processing.", "submission_id": submission.id }), 202
+    # Same shape and same status either way - a bot built against this contract expects
+    # a 202 with a submission id - but a duplicate was not queued and saying it was
+    # would be the one thing on this response that is not true.
+    message = ("This receipt is already in the ledger, so it was recorded as a duplicate."
+               if submission.status == 'duplicate' else
+               "Receipt accepted and queued for processing.")
+    return jsonify({ "message": message, "submission_id": submission.id }), 202
 
 @app.route('/tasks/run', methods=['GET'])
 def run_tasks():

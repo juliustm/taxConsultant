@@ -253,6 +253,51 @@ def spend_anomalies(receipts, sigma=ANOMALY_SIGMA, min_history=MIN_ANOMALY_HISTO
     return findings[:limit]
 
 
+def double_records(receipts, limit=8):
+    """
+    Groups of receipts in this window that look like one purchase recorded twice.
+
+    Nothing here is a finding. Two people can pay one fundi the same amount on the same
+    day, and a supplier with two tills can print two receipts a minute apart - so the
+    check that *blocks* a duplicate wants a reference and an amount agreeing (see
+    utils/fingerprint), and this is the softer question the blocking one deliberately
+    refuses to answer.
+
+    It is worth a page of its own attention anyway, because it is the only place the
+    two copies are ever seen side by side: a duplicate expense reads as perfectly
+    ordinary one receipt at a time, and is only obvious when both are on the screen.
+
+    Grouped on the key the receipts already carry rather than recomputed here, so this
+    reports exactly what the receipt page reports and no more.
+    """
+    groups = defaultdict(list)
+    for receipt in _spending(receipts):
+        if receipt.near_key:
+            groups[receipt.near_key].append(receipt)
+
+    findings = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda receipt: receipt.id)
+        findings.append({
+            'receipts': group,
+            'vendor_name': _vendor_name(group[0]),
+            'on': group[0].receipt_date,
+            'amount_cents': group[0].total_incl_tax_cents or 0,
+            # What a second copy is costing if it is one: everything past the first.
+            'duplicated_cents': (group[0].total_incl_tax_cents or 0) * (len(group) - 1),
+            # Printed times, where there are any. Two receipts a minute apart are almost
+            # certainly one purchase; two hours apart are almost certainly not, and that
+            # is the fact a person needs to decide which of these it is.
+            'times': [receipt.receipt_time.strftime('%H:%M') for receipt in group
+                      if receipt.receipt_time],
+        })
+
+    findings.sort(key=lambda finding: finding['duplicated_cents'], reverse=True)
+    return findings[:limit]
+
+
 def vendor_upload_behaviour(receipts, limit=8):
     """
     Which suppliers keep us waiting for a receipt to appear on the TRA portal.

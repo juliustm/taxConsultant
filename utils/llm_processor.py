@@ -193,6 +193,14 @@ chit, a parking stub, a proforma invoice, a delivery note or a foreign till slip
 still a business document worth recording, but it is not an EFD receipt and must not
 be described as one - say which it is in `document_type`.
 
+Whatever the document is, record the number it was issued under in `receipt_number`:
+the number written at the top of a page from a receipt book, an invoice number, the
+transaction reference on a photographed payment confirmation. On a document with no
+verification code that number is the only thing identifying it, and it is what stops
+the same chit photographed twice from being filed as two purchases. Transcribe it as
+printed, and leave the field out where nothing was printed - an invented number
+identifies the wrong document, which is worse than identifying none.
+
 The photograph sometimes arrives with a note from the person who took it. Treat it the
 way you would treat them standing beside you: it says what the paper cannot - which
 vehicle the diesel went into, whose lunch it was, what the job was for - and it is
@@ -290,7 +298,14 @@ VISION_TOOLS = [
                                        "form. Half of the TRA verification address, so transcribe it "
                                        "exactly; omit it only if no time is printed at all.",
                     },
-                    "receipt_number": {"type": "string"},
+                    "receipt_number": {
+                        "type": "string",
+                        "description": "The number this document was issued under - the receipt "
+                                       "number on an EFD, the number written in a receipt book, an "
+                                       "invoice number, or the transaction reference of a payment "
+                                       "(a LUKU token, a mobile money id, a control number). "
+                                       "Transcribe it exactly and omit it if none is printed.",
+                    },
                     "z_number": {"type": "string"},
                     "efd_serial": {"type": "string", "description": "The EFD machine serial number, if printed."},
                     "uin": {"type": "string"},

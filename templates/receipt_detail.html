@@ -101,13 +101,14 @@
         <p class="text-sm font-medium text-amber-900">
             Possibly the same purchase as
             {% for duplicate in duplicates %}
-                <a href="{{ url_for('receipt_detail', receipt_id=duplicate.id) }}" class="underline">receipt #{{ duplicate.id }}</a>{{ ', ' if not loop.last }}
+                <a href="{{ url_for('receipt_detail', receipt_id=duplicate.id) }}" class="underline">receipt #{{ duplicate.id }}</a>{% if duplicate.receipt_time %}, timed {{ duplicate.receipt_time.strftime('%H:%M') }}{% endif %}{{ ', ' if not loop.last }}
             {% endfor %}.
         </p>
         <p class="mt-1 text-sm text-amber-800">
-            Same supplier, same date, same total. That is what one purchase submitted twice looks
-            like &mdash; once as a photograph and once as a TRA link, say, where the photo carries no
-            verification code to match on. If it is a duplicate, the expense is being counted twice.
+            Same supplier, same day, same total{% if receipt.receipt_time %}; this one is timed {{ receipt.receipt_time.strftime('%H:%M') }}{% endif %}.
+            Neither carries a code or a reference the other could be matched against exactly, so both
+            were kept. One purchase submitted twice looks like this &mdash; and so does the same fare
+            paid twice in a day. If it is a duplicate, the expense is being counted twice.
         </p>
     </div>
     {% endif %}
