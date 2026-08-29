@@ -41,8 +41,10 @@ moment nobody is watching - the device has been told the upload succeeded - whic
 the same reasoning that keeps a malformed URL acceptable at ingest.
 """
 import base64
+import hashlib
 import io
 import os
+from typing import NamedTuple
 
 from PIL import Image, ImageOps
 
@@ -84,12 +86,27 @@ JPEG_QUALITY = 88
 _ORIENTATION_TAG = 0x0112
 
 
+class StoredPhoto(NamedTuple):
+    """What was written, and what it was."""
+    filename: str
+    # The SHA-256 of the bytes on disk, as hex. The caller turns this into the
+    # submission's content_hash (see utils/fingerprint.photo_key), which is how the same
+    # picture submitted a second time is recognised at intake instead of being read
+    # again.
+    #
+    # Returned from here rather than computed by the caller because this is the only
+    # place those bytes exist: the upload's stream is consumed below, and the
+    # alternative is reading the file straight back off the disk it was just written to.
+    digest: str
+
+
 def store_photo(photo, folder, filename):
     """
-    Writes an uploaded photo into `folder`, bounded and upright.
+    Writes an uploaded photo into `folder`, bounded and upright, and returns a
+    StoredPhoto naming what was written.
 
-    Returns the filename actually written, which is not always the one passed in: a
-    re-encode produces JPEG bytes, and those must not be left sitting under a .png name.
+    The filename in it is not always the one passed in: a re-encode produces JPEG
+    bytes, and those must not be left sitting under a .png name.
     The name is what /uploads/<filename> serves the dashboard, and send_from_directory
     types the response off the extension - so a mismatch here is a Content-Type that
     contradicts the file, which browsers currently sniff their way past and which there
@@ -104,9 +121,13 @@ def store_photo(photo, folder, filename):
     if prepared is not None:
         filename = os.path.splitext(filename)[0] + '.jpg'
 
+    stored = prepared if prepared is not None else raw
     with open(os.path.join(folder, filename), 'wb') as handle:
-        handle.write(prepared if prepared is not None else raw)
-    return filename
+        handle.write(stored)
+    # The bytes as kept, not as uploaded: two sends of one photograph are only the same
+    # file if what ends up on disk is the same, and the re-encode above is deterministic
+    # for identical input.
+    return StoredPhoto(filename, hashlib.sha256(stored).hexdigest())
 
 
 def _bounded_jpeg(raw, max_edge=STORED_MAX_EDGE, quality=JPEG_QUALITY):

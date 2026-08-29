@@ -240,6 +240,19 @@
                                                @click="applyOnClick($event, { category: withValue('category', sub.receipt.category) })"
                                                :data-peek="`category:${sub.receipt.category}`"
                                                x-text="(sub.receipt.category || '').replace(/_/g, ' ')"></a>
+                                            <!-- A stored receipt that nothing could categorise. Marked, because
+                                                 the alternative is the state it was in before: a row with one
+                                                 fewer chip than its neighbours, indistinguishable from a receipt
+                                                 that was categorised correctly, and so never fixed. Links to the
+                                                 receipt rather than filtering, since the thing to do about it is
+                                                 to set one. Never on a cancelled or test receipt: those
+                                                 are meant to have no category, and the badge beside the
+                                                 amount already says which they are. -->
+                                            <a x-show="sub.receipt.receipt_id && !sub.receipt.category && sub.receipt.is_expense !== false"
+                                               :href="`/receipts/${sub.receipt.receipt_id}`"
+                                               class="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-600/20 hover:bg-amber-100">
+                                                Uncategorised
+                                            </a>
                                             <span x-show="sub.receipt.items?.length > 1" class="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" x-text="`${sub.receipt.items.length} items`"></span>
                                             <!-- The paper behind the figures. A scan whose QR code the phone
                                                  read files the photograph alongside it now, so this is on

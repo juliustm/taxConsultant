@@ -71,7 +71,7 @@
                             ('Receipt time', receipt_time),
                             ('Submitted by', submission.device.name if submission.device else None),
                             ('Submitted at', submission.received_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC'),
-                            ('Note from the sender', submission.description),
+                            ('Note from the sender', submission.user_note or submission.description),
                             ('Location', submission.location),
                             ('Region', (region ~ ' (approximate)') if region else None),
                         ] %}

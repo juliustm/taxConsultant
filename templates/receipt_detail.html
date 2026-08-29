@@ -101,13 +101,14 @@
         <p class="text-sm font-medium text-amber-900">
             Possibly the same purchase as
             {% for duplicate in duplicates %}
-                <a href="{{ url_for('receipt_detail', receipt_id=duplicate.id) }}" class="underline">receipt #{{ duplicate.id }}</a>{{ ', ' if not loop.last }}
+                <a href="{{ url_for('receipt_detail', receipt_id=duplicate.id) }}" class="underline">receipt #{{ duplicate.id }}</a>{% if duplicate.receipt_time %}, timed {{ duplicate.receipt_time.strftime('%H:%M') }}{% endif %}{{ ', ' if not loop.last }}
             {% endfor %}.
         </p>
         <p class="mt-1 text-sm text-amber-800">
-            Same supplier, same date, same total. That is what one purchase submitted twice looks
-            like &mdash; once as a photograph and once as a TRA link, say, where the photo carries no
-            verification code to match on. If it is a duplicate, the expense is being counted twice.
+            Same supplier, same day, same total{% if receipt.receipt_time %}; this one is timed {{ receipt.receipt_time.strftime('%H:%M') }}{% endif %}.
+            Neither carries a code or a reference the other could be matched against exactly, so both
+            were kept. One purchase submitted twice looks like this &mdash; and so does the same fare
+            paid twice in a day. If it is a duplicate, the expense is being counted twice.
         </p>
     </div>
     {% endif %}
@@ -209,18 +210,59 @@
                     </div>
                     {% endif %}
 
+                    {#
+                      Two of these fields name something this database probably already
+                      holds, so they are typed against it rather than into a blank box.
+                      Suppliers are grouped on the TIN TRA issued (see Vendor.lookup_key),
+                      which makes a supplier typed in slightly differently not a cosmetic
+                      difference but a second supplier - one receipt, no TIN, and every
+                      total that supplier appears in quietly split in two. Picking the
+                      existing one instead brings their TIN and VRN with it, which is the
+                      half of this form nobody can read off a creased photograph anyway.
+                    #}
                     <div class="mt-4 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
                         {% for attribute, label, kind, hint in correctable %}
-                        <div>
+                        {% set suggests_vendors = attribute in ('vendor_name', 'vendor_tin') %}
+                        <div {% if suggests_vendors %}class="relative"{% endif %}>
                             <label for="fix-{{ attribute }}" class="block text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</label>
                             <input id="fix-{{ attribute }}" type="text" x-model="values.{{ attribute }}"
                                    spellcheck="false" autocomplete="off"
+                                   {% if suggests_vendors %}
+                                   @focus="openVendors('{{ attribute }}')"
+                                   @input="openVendors('{{ attribute }}')"
+                                   @keydown.escape="vendorField = null"
+                                   {# Closed as soon as the field loses focus. The options
+                                      themselves fire on mousedown, which happens first, so
+                                      choosing one is not lost to the list closing out from
+                                      under the pointer. #}
+                                   @blur="vendorField = null"
+                                   {% endif %}
                                    {% if kind == 'date' %}placeholder="YYYY-MM-DD"{% elif kind == 'time' %}placeholder="HH:MM:SS"{% endif %}
                                    class="mt-1 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm {{ 'font-mono' if kind in ('money', 'date', 'time') or attribute in ('vendor_tin', 'vrn', 'receipt_verification_code') }}">
+                            {% if suggests_vendors %}
+                            <div x-show="vendorField === '{{ attribute }}' && vendorMatches.length" x-cloak
+                                 class="absolute z-10 mt-1 max-h-64 w-full overflow-auto rounded-md bg-white py-1 shadow-lg ring-1 ring-black ring-opacity-5">
+                                <template x-for="vendor in vendorMatches" :key="vendor.key">
+                                    <button type="button" @mousedown.prevent="useVendor(vendor)"
+                                            class="block w-full px-3 py-2 text-left hover:bg-indigo-50">
+                                        <span class="block truncate text-sm font-medium text-gray-900" x-text="vendor.name || 'Unnamed supplier'"></span>
+                                        <span class="block truncate font-mono text-xs text-gray-500">
+                                            <span x-text="vendor.tin ? `TIN ${vendor.tin}` : 'no TIN'"></span>
+                                            <span x-show="vendor.vrn" x-text="` · VRN ${vendor.vrn}`"></span>
+                                            <span x-text="` · ${vendor.count} receipt${vendor.count === 1 ? '' : 's'}`"></span>
+                                        </span>
+                                    </button>
+                                </template>
+                            </div>
+                            {% endif %}
                             {% if hint %}<p class="mt-1 text-xs text-gray-500">{{ hint }}</p>{% endif %}
                         </div>
                         {% endfor %}
                     </div>
+                    <p x-show="vendorPicked" x-cloak class="mt-2 rounded-md bg-indigo-50 p-2 text-xs text-indigo-900">
+                        Filled in from the supplier we already hold<span x-text="vendorPicked ? ` (${vendorPicked.count} receipt${vendorPicked.count === 1 ? '' : 's'})` : ''"></span>.
+                        Saving files this receipt under them rather than starting a second supplier.
+                    </p>
 
                     {# The point of the whole form. With a code and a time the portal can be
                        asked, and if it answers, every value typed above is thrown away in
@@ -283,7 +325,7 @@
                         {% endfor %}
                     </dl>
 
-                    {% if receipt.items %}
+                    {% if receipt.printed_items %}
                     <table class="mt-6 w-full text-sm">
                         <thead>
                             <tr class="border-b border-gray-200 text-left text-xs uppercase tracking-wide text-gray-500">
@@ -294,11 +336,20 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for item in receipt.items %}
+                            {% for item in receipt.printed_items %}
                             <tr class="border-b border-gray-100">
                                 {# What this line has cost before, here and elsewhere, and what
                                    buying it implies for withholding tax and capital allowances. #}
-                                <td class="py-1.5 pr-2">{{ peek(item.description, 'item:' ~ receipt.id ~ ':' ~ item.line_number) }}</td>
+                                <td class="py-1.5 pr-2">
+                                    {{ peek(item.description, 'item:' ~ receipt.id ~ ':' ~ item.line_number) }}
+                                    {# The catalogue's name for this line, shown only when it is not
+                                       simply the line again - it is what makes this purchase the same
+                                       purchase as one printed differently somewhere else. #}
+                                    {% if item.product and item.product.name|lower != (item.description or '')|lower %}
+                                    <span class="ml-1 inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600"
+                                          title="Filed in the catalogue as this">{{ item.product.name }}</span>
+                                    {% endif %}
+                                </td>
                                 <td class="py-1.5 text-center text-gray-500">{{ item.quantity if item.quantity is not none else '' }}</td>
                                 <td class="py-1.5 text-right font-mono">{{ money(item.amount_cents) }}</td>
                                 <td class="py-1.5 pl-2 text-center text-xs text-gray-500">{{ item.tax_code or '' }}</td>
@@ -323,6 +374,49 @@
                     </table>
                 </div>
             </div>
+
+            <!-- What the sender said was in the bag -->
+            {#
+              Kept out of the receipt above rather than added to it, and that is the whole
+              design of this block. The card above is the document: what an EFD printed, or
+              what the portal confirmed. This is what somebody typed on a phone - the only
+              record that exists of what a mobile money payment actually bought, and never
+              evidence of it. Mixing the two would make a note indistinguishable from a
+              verified line, which is the one thing this app cannot allow.
+            #}
+            {% if receipt.note_items %}
+            <div class="mt-6 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">What was bought</h2>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Read from the note sent with this receipt, not from the document. The document
+                        {% if receipt.printed_items %}records the payment and not the goods{% else %}itemises nothing{% endif %}.
+                    </p>
+                </div>
+                <ul class="divide-y divide-gray-100">
+                    {% for item in receipt.note_items %}
+                    <li class="flex items-center justify-between px-6 py-3">
+                        <div>
+                            <a class="text-sm font-medium text-gray-900 hover:text-indigo-600"
+                               href="{{ url_for('manage_products') }}">{{ item.label }}</a>
+                            {% if item.description and item.product and item.description|lower != item.product.name|lower %}
+                            <span class="ml-1 text-xs text-gray-500">written as &lsquo;{{ item.description }}&rsquo;</span>
+                            {% endif %}
+                        </div>
+                        <div class="flex items-center gap-x-4 text-sm">
+                            <span class="text-gray-500">
+                                {%- if item.quantity %}{{ '{:g}'.format(item.quantity) }}{{ ' ' ~ item.product.unit if item.product and item.product.unit else '' }}
+                                {%- else %}no count given{% endif -%}
+                            </span>
+                            {# An amount is here only where it cannot be split wrongly: one product,
+                               and a document that priced nothing else. #}
+                            <span class="font-mono text-gray-900">{{ money(item.amount_cents) if item.amount_cents else '' }}</span>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
 
             <!-- What was bought, and what follows from it -->
             {% if assessment.wht_lines or assessment.capital_items or assessment.restrictions %}
@@ -380,17 +474,106 @@
                     </button>
                 </div>
                 <div class="px-6 py-5">
-                    {% if receipt.category %}
-                    <a class="peek peek-chip mb-3 inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
-                       href="{{ url_for('index', tab='processed', category=receipt.category) }}"
-                       data-peek="category:{{ receipt.category }}">{{ receipt.category.replace('_', ' ') }}</a>
-                    {% endif %}
-                    {% if assessment.computed_category and assessment.computed_category != receipt.category %}
-                    <span class="mb-3 ml-1 inline-flex items-center rounded-md bg-yellow-50 px-2 py-0.5 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20"
-                          title="The line items read as this instead">
-                        items read as {{ assessment.computed_category.replace('_', ' ') }}
-                    </span>
-                    {% endif %}
+                    {#
+                      The category, and the one control on this page that works on every
+                      receipt including the verified ones. The numbers beside it are TRA's
+                      and are not ours to revise; which expense they were is a judgment the
+                      model made, and a person with the context beats it - 'diesel for the
+                      generator, not the van' is not on the paper and never will be.
+                    #}
+                    <div class="mb-3 flex flex-wrap items-center gap-2">
+                        {# Rendered by Jinja rather than by Alpine, like every other value
+                           on this page: the chip is a peekable key, and a key that only
+                           exists once JavaScript has run is one a reader with a slow
+                           connection - or a test - is told this page no longer has. The
+                           editor below is the part that needs Alpine. #}
+                        <span x-show="!categorising" class="flex flex-wrap items-center gap-2">
+                            {% if receipt.category %}
+                            <a class="peek peek-chip inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+                               href="{{ url_for('index', tab='processed', category=receipt.category) }}"
+                               data-peek="category:{{ receipt.category }}">{{ receipt.category.replace('_', ' ') }}</a>
+                            {% else %}
+                            <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-600/20">
+                                Uncategorised
+                            </span>
+                            {% endif %}
+                            {% if assessment.computed_category and assessment.computed_category != receipt.category %}
+                            {# The keyword classifier's own reading of the line items - offline,
+                               free and unchanged since the receipt was stored. Where the model
+                               returned nothing at all it is the best answer anybody has, so it
+                               is a button rather than a remark: that is the whole of the work
+                               on an uncategorised receipt, done in one press. #}
+                            {% if receipt.category %}
+                            <span class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-0.5 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20"
+                                  title="The line items read as this instead">
+                                items read as {{ assessment.computed_category.replace('_', ' ') }}
+                            </span>
+                            {% else %}
+                            <button type="button" :disabled="savingCategory"
+                                    @click="saveCategory('{{ assessment.computed_category }}')"
+                                    title="What the line items read as, filed in one click"
+                                    class="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                                File as {{ assessment.computed_category.replace('_', ' ') }}
+                            </button>
+                            {% endif %}
+                            {% endif %}
+                            {% if receipt.category_corrected_at %}
+                            <span class="text-xs text-gray-500"
+                                  title="Re-analysis will not overwrite it">set by hand on {{ receipt.category_corrected_at.strftime('%d %b %Y') }}</span>
+                            {% endif %}
+                            <button @click="startCategorising()" type="button"
+                                    class="text-xs font-semibold text-indigo-600 hover:text-indigo-500">
+                                {{ 'Change' if receipt.category else 'Set a category' }}
+                            </button>
+                        </span>
+
+                        {#
+                          Type to narrow, click to file. The list is every category already
+                          in use, so the ordinary way to categorise a receipt is to pick the
+                          bucket its neighbours are already in; typing a name that is not on
+                          the list is allowed and is resolved against it on the server, which
+                          is what keeps 'Fuel' and 'fuel costs' from becoming two lines in
+                          the same report. See main.set_receipt_category.
+                        #}
+                        <div x-show="categorising" x-cloak class="w-full" @keydown.escape="categorising = false">
+                            <input x-model="categoryQuery" x-ref="categoryInput" type="text"
+                                   @keydown.enter.prevent="commitTyped()"
+                                   placeholder="Search or name a category"
+                                   autocomplete="off" spellcheck="false"
+                                   class="block w-full rounded-md border-0 py-1.5 text-sm text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600">
+                            <div class="mt-2 flex flex-wrap gap-1.5">
+                                <template x-for="option in matchingCategories" :key="option.key">
+                                    <button type="button" @click="saveCategory(option.key)" :disabled="savingCategory"
+                                            class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset disabled:opacity-50"
+                                            :class="option.key === category
+                                                    ? 'bg-indigo-600 text-white ring-indigo-600'
+                                                    : 'bg-white text-gray-700 ring-gray-300 hover:bg-gray-50'">
+                                        <span x-text="option.label"></span>
+                                        <span x-show="option.count" class="text-gray-400"
+                                              :class="option.key === category ? 'text-indigo-200' : ''"
+                                              x-text="option.count"></span>
+                                    </button>
+                                </template>
+                                <button x-show="isNewName" type="button" @click="saveCategory(categoryQuery)" :disabled="savingCategory"
+                                        class="inline-flex items-center rounded-md bg-white px-2 py-1 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-300 hover:bg-indigo-50 disabled:opacity-50">
+                                    Use &ldquo;<span x-text="categoryQuery"></span>&rdquo; as a new category
+                                </button>
+                                <span x-show="!matchingCategories.length && !isNewName" class="text-xs text-gray-500">
+                                    Nothing matches. Keep typing to name a new one.
+                                </span>
+                            </div>
+                            <div class="mt-2 flex items-center gap-3 text-xs">
+                                <button x-show="category" type="button" @click="saveCategory('')" :disabled="savingCategory"
+                                        class="font-medium text-gray-500 hover:text-gray-700">Clear it</button>
+                                <button type="button" @click="categorising = false" :disabled="savingCategory"
+                                        class="font-medium text-gray-500 hover:text-gray-700">Cancel</button>
+                                <a href="{{ url_for('manage_categories') }}" class="ml-auto font-medium text-indigo-600 hover:text-indigo-500">Manage categories &rarr;</a>
+                            </div>
+                        </div>
+                    </div>
+                    <p x-show="categoryMessage" x-cloak class="mb-3 rounded-md p-2 text-sm"
+                       :class="categoryFailed ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-900'"
+                       x-text="categoryMessage"></p>
                     <p class="text-sm text-gray-900">{{ llm_analysis or 'No analysis recorded.' }}</p>
                     <p x-show="freshAnalysis" class="mt-3 rounded bg-green-50 p-3 text-sm text-green-900" x-text="freshAnalysis"></p>
                 </div>
@@ -409,6 +592,17 @@
                         <span class="text-gray-900">{{ submission.received_at.strftime('%Y-%m-%d %H:%M') }} UTC by
                             {% if submission.device %}<a class="peek" href="/?tab=processed&device={{ submission.device.id }}" data-peek="device:{{ submission.device.id }}">{{ submission.device.name }}</a>{% else %}unknown device{% endif %}</span>
                     </div>
+                    {% if sender_note %}
+                    {# What the person who scanned it typed, kept apart from the model's own
+                       summary above. It is shown because it is an input to that summary and
+                       to the category beside it: a reader who cannot see the note has no way
+                       to tell why this was filed where it was. #}
+                    <div>
+                        <span class="text-gray-500">Note from the sender</span>
+                        <p class="mt-1 rounded-md bg-gray-50 p-3 text-gray-900 ring-1 ring-inset ring-gray-200">{{ sender_note }}</p>
+                        <p class="mt-1 text-xs text-gray-500">Sent to the model with the receipt.</p>
+                    </div>
+                    {% endif %}
                     {% if submission.location %}
                     <div class="flex justify-between gap-x-4">
                         <span class="text-gray-500">Location</span>
@@ -544,6 +738,136 @@ function receiptPage() {
             } finally {
                 this.analysing = false;
             }
+        },
+
+        // --- The category ---
+        // Rendered on every receipt, verified or not. Everything else on this page that
+        // can be edited is a printed fact; this is the one judgment, and it is the only
+        // thing here a person is better placed to decide than the pipeline.
+        categories: {{ categories|tojson }},
+        // Read only: the chip itself is rendered by Jinja and redrawn by the reload
+        // below. This is here so the picker can show which one is already applied.
+        category: {{ (receipt.category or '')|tojson }},
+        categorising: false,
+        categoryQuery: '',
+        savingCategory: false,
+        categoryMessage: '',
+        categoryFailed: false,
+
+        /* Mirrors utils.classify.normalise_category and category_key. Only ever decides
+           what this picker offers - the server resolves the name it is actually sent,
+           and a name that turns out to be one already in use is filed there whatever
+           was offered here. */
+        categorySlug(text) {
+            return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_+|_+$/g, '').slice(0, 50);
+        },
+        categoryKey(slug) {
+            return (slug || '').split('_').map(word => {
+                if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+                if (word.length > 4 && /(ses|xes|zes|ches|shes)$/.test(word)) return word.slice(0, -2);
+                if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
+                return word;
+            }).join('');
+        },
+
+        get matchingCategories() {
+            const query = this.categoryQuery.trim().toLowerCase();
+            const matches = query
+                ? this.categories.filter(option => option.label.includes(query) || option.key.includes(query))
+                : this.categories;
+            return matches.slice(0, 14);
+        },
+        // Whether what has been typed names something we do not already hold. Compared
+        // on the same key the server matches on, so 'Fuel costs' does not offer to
+        // create a second 'staff costs' - it is already one.
+        get isNewName() {
+            const slug = this.categorySlug(this.categoryQuery);
+            if (!slug) return false;
+            const key = this.categoryKey(slug);
+            return !this.categories.some(option => this.categoryKey(option.key) === key);
+        },
+        /* What Enter means: the first category on the list, or the name typed when
+           nothing matched it. Never a clear - an empty box means the picker has only
+           just been opened, and Enter on that should do nothing at all rather than
+           uncategorise the receipt. */
+        commitTyped() {
+            if (!this.categoryQuery.trim()) return;
+            const first = this.matchingCategories[0];
+            this.saveCategory(first ? first.key : this.categoryQuery);
+        },
+        startCategorising() {
+            this.categorising = true;
+            this.categoryQuery = '';
+            this.categoryMessage = '';
+            this.$nextTick(() => this.$refs.categoryInput?.focus());
+        },
+        async saveCategory(value) {
+            this.savingCategory = true;
+            this.categoryFailed = false;
+            this.categoryMessage = '';
+            try {
+                const body = new FormData();
+                body.append('category', value ?? '');
+                const response = await fetch('{{ url_for('set_receipt_category', receipt_id=receipt.id) }}',
+                                             { method: 'POST', body });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'That category was refused.');
+
+                this.category = payload.category || '';
+                this.categorising = false;
+                this.categoryMessage = payload.message;
+                // The chip, the 'items read as' mismatch beside it and the mark saying a
+                // human decided this are all rendered server-side, so the redraw is a
+                // reload - the same ending the correction form below has, for the same
+                // reason. Delayed just long enough for the message to be read.
+                setTimeout(() => window.location.reload(), 1200);
+            } catch (error) {
+                this.categoryFailed = true;
+                this.categoryMessage = error.message;
+                this.savingCategory = false;
+            }
+        },
+
+        // --- Typing a supplier we already hold ---
+        // See the note above the form. The list is fetched rather than embedded because
+        // an instance can hold thousands of suppliers, and the two fields it hangs off
+        // are the two a receipt is identified by.
+        vendorField: null,
+        vendorMatches: [],
+        vendorPicked: null,
+        vendorTimer: null,
+
+        openVendors(field) {
+            this.vendorField = field;
+            clearTimeout(this.vendorTimer);
+            // Debounced, so typing a supplier's name is one request rather than eleven.
+            this.vendorTimer = setTimeout(() => this.fetchVendors(this.values[field]), 200);
+        },
+        async fetchVendors(query) {
+            try {
+                const response = await fetch(
+                    `{{ url_for('api_vendor_suggest') }}?q=${encodeURIComponent(query || '')}`);
+                if (!response.ok) return;
+                const payload = await response.json();
+                this.vendorMatches = payload.vendors || [];
+            } catch (error) {
+                // A supplier list that will not load is not a reason to block the form:
+                // every field it fills in can still be typed.
+                this.vendorMatches = [];
+            }
+        },
+        useVendor(vendor) {
+            this.values.vendor_name = vendor.name || this.values.vendor_name;
+            // Taken wholesale, blanks included. The point of choosing an existing
+            // supplier is that what we hold about them outranks what can be made out on
+            // this particular photograph - and a supplier we know has no VRN is exactly
+            // the case where a VRN read off a crease would be worst.
+            this.values.vendor_tin = vendor.tin || '';
+            this.values.vrn = vendor.vrn || '';
+            this.vendorPicked = vendor;
+            this.vendorMatches = [];
+            this.vendorField = null;
         },
 
         // --- Correcting what the model read ---

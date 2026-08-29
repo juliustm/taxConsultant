@@ -305,3 +305,94 @@ def deductibility_flags(description):
 # Guards the two lists against drifting apart: a category invented here would be
 # written to receipt.category and then never match anything the model can produce.
 assert {category for category, _ in CATEGORY_RULES} <= set(EXPENSE_CATEGORIES)
+
+
+# --- Naming a category --------------------------------------------------------------
+#
+# EXPENSE_CATEGORIES above is the set both automatic routes to a category are held to,
+# and for them that is the end of it. An admin re-categorising by hand needs one thing
+# more: a bucket this list does not have - a levy only one trade pays, a project the
+# receipts are being collected against - without that freedom turning into three
+# spellings of one category by the end of the quarter.
+#
+# So a typed category is never stored as typed. It is reduced to a slug, and the slug is
+# matched against the categories that already exist on a key that ignores the
+# differences nobody means: case, punctuation, and English plurals. 'Office Supplies',
+# 'office-supply' and 'OFFICE SUPPLIES' are one category, and it is the one already in
+# use rather than a fourth spelling of it.
+
+# models.user.Receipt.category is VARCHAR(50); a longer slug would be silently cut by
+# SQLite on write and stop matching the one already stored.
+CATEGORY_MAX_LENGTH = 50
+
+# Never a category of its own. 'uncategorised' is what the dashboard calls the receipts
+# that have none, so a real category by that name would filter to the opposite of
+# itself.
+RESERVED_CATEGORIES = frozenset({'uncategorised', 'uncategorized', 'none', 'null'})
+
+
+def category_label(category):
+    """A category as it is written on screen. Matches the chips already rendered."""
+    return category.replace('_', ' ') if category else 'Uncategorised'
+
+
+def normalise_category(text):
+    """Free text as a category slug, or None when nothing usable was typed."""
+    slug = re.sub(r'[^a-z0-9]+', '_', (text or '').lower()).strip('_')
+    return slug[:CATEGORY_MAX_LENGTH].strip('_') or None
+
+
+def _singular(word):
+    """One word with an English plural ending taken off. For comparison only."""
+    if len(word) > 4 and word.endswith('ies'):
+        return f'{word[:-3]}y'
+    if len(word) > 4 and word.endswith(('ses', 'xes', 'zes', 'ches', 'shes')):
+        return word[:-2]
+    if len(word) > 3 and word.endswith('s') and not word.endswith('ss'):
+        return word[:-1]
+    return word
+
+
+def category_key(category):
+    """
+    What two spellings of the same category have in common.
+
+    Only ever used to decide whether something typed already exists. Never stored, and
+    never shown - it is not a name, it is a comparison.
+    """
+    return ''.join(_singular(word) for word in (category or '').split('_'))
+
+
+def resolve_category(text, known=()):
+    """
+    (category, existed) for a category name an admin typed.
+
+    `existed` True means the text turned out to name a category already in use, which
+    is the answer that keeps the set from growing a synonym per correction. The fixed
+    set is always considered to exist, whether or not any receipt carries it yet, so
+    typing 'Fuel' can only ever land on the bucket everything else is filed under.
+
+    (None, False) when the text does not name a category at all.
+    """
+    slug = normalise_category(text)
+    if slug is None or slug in RESERVED_CATEGORIES:
+        return None, False
+
+    # The fixed set first: where an instance has invented something that collapses onto
+    # a canonical name, the canonical one is the one to keep.
+    candidates = list(EXPENSE_CATEGORIES) + [name for name in known if name not in EXPENSE_CATEGORIES]
+    if slug in candidates:
+        return slug, True
+
+    key = category_key(slug)
+    for candidate in candidates:
+        if category_key(candidate) == key:
+            return candidate, True
+    return slug, False
+
+
+# The fixed set has to survive its own matching rules: two canonical categories that
+# collapse onto one comparison key would make resolve_category return whichever came
+# first, and a reserved word among them would make one of them unselectable.
+assert not (set(EXPENSE_CATEGORIES) & RESERVED_CATEGORIES)
+assert len({category_key(category) for category in EXPENSE_CATEGORIES}) == len(EXPENSE_CATEGORIES)

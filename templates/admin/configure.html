@@ -3,12 +3,17 @@
 {#
   Settings.
 
-  Four tabs, one responsibility each: who you are to TRA (Business), what judges your
-  receipts (AI Provider), where processed data also goes (Integrations), and what's
-  allowed to submit to you (Devices, which outgrew a tab long ago and just links out
-  to its own page - see admin/devices.html). Every text/password input on the page
-  shares one style, and every secret gets the same show/hide affordance already used
-  for a device's API key on that page, so the interaction is learned once.
+  One responsibility per tab: who you are to TRA (Business), what judges your receipts
+  (AI Provider), where processed data also goes (Integrations), what a stranger sees at
+  '/' (Front page), what is allowed to submit to you (Devices), and what receipts are
+  filed under (Categories). The last two are not settings at all - they are pages of
+  their own that outgrew a form, and their tabs say what is there and hand over. They
+  live here rather than in the top bar because both are somewhere you go when something
+  needs tidying, not a view of the book you open daily.
+
+  Every text/password input on the page shares one style, and every secret gets the same
+  show/hide affordance already used for a device's API key on that page, so the
+  interaction is learned once.
 #}
 
 {% macro text_field(name, value, label, placeholder='', help='', span='sm:col-span-6', mono=false) %}
@@ -40,7 +45,7 @@
     <!-- Page title -->
     <div class="px-4 sm:px-6 lg:px-0 mb-6">
         <h1 class="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">Settings</h1>
-        <p class="mt-2 text-sm text-gray-500">Your business identity, the AI provider, export destinations, and the devices allowed to submit receipts.</p>
+        <p class="mt-2 text-sm text-gray-500">Your business identity, the AI provider, export destinations, the devices allowed to submit receipts, and what those receipts are filed under.</p>
     </div>
 
     <div class="lg:grid lg:grid-cols-12 lg:gap-x-8">
@@ -67,6 +72,14 @@
                      <svg :class="getIconClass('devices')" class="-ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" /></svg>
                     <span class="truncate">Devices</span>
                 </button>
+                <button @click="switchTab('products')" :class="getTabClass('products')" class="w-full group flex items-center rounded-md px-3 py-2 text-sm font-medium">
+                    <svg :class="getIconClass('products')" class="-ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                    <span class="truncate">Products</span>
+                </button>
+                <button @click="switchTab('categories')" :class="getTabClass('categories')" class="w-full group flex items-center rounded-md px-3 py-2 text-sm font-medium">
+                    <svg :class="getIconClass('categories')" class="-ml-1 mr-3 h-6 w-6 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M6 6h.008v.008H6V6z" /></svg>
+                    <span class="truncate">Categories</span>
+                </button>
             </nav>
         </aside>
 
@@ -74,7 +87,7 @@
         <div class="space-y-6 sm:px-6 lg:col-span-9 lg:px-0">
 
             <!-- Business / AI Provider / Integrations form -->
-            <form x-show="activeTab !== 'devices'" id="config-form" method="POST" action="{{ url_for('configure_instance') }}" class="shadow sm:overflow-hidden sm:rounded-md">
+            <form x-show="!linksOut.includes(activeTab)" id="config-form" method="POST" action="{{ url_for('configure_instance') }}" class="shadow sm:overflow-hidden sm:rounded-md">
                 <input type="hidden" name="active_tab" :value="activeTab">
 
                 <div x-show="activeTab === 'business'" class="bg-white py-6 px-4 sm:p-6">
@@ -321,15 +334,73 @@
                     </a>
                 </div>
             </div>
+
+            {# Categories, same arrangement as Devices above: a tab that says what is
+               there and hands over to the page that does the work. It belongs in
+               Settings rather than in the top bar because it is somewhere you go when
+               something needs tidying - a receipt nothing categorised, two names that
+               turned out to mean one thing - and not one of the daily views of the book.
+               The two counts are here so that whether it needs a visit is answerable
+               without paying one. #}
+            {# The catalogue's own tab, next to Categories and for the same reason: what
+               was bought is worked out by the model and a normaliser, either of which can
+               be wrong, and the repair is a page rather than a field. The two counts say
+               whether it is worth opening. #}
+            <div x-show="activeTab === 'products'" class="shadow sm:rounded-md">
+                <div class="bg-white py-6 px-4 sm:p-6">
+                    <h3 class="text-base font-semibold leading-6 text-gray-900">Products</h3>
+                    <p class="mt-1 text-sm text-gray-500">
+                        What was bought, as opposed to who was paid. A mobile money record names
+                        only the payee, so the note sent with it &mdash; &lsquo;Mayai x 6&rsquo; &mdash;
+                        is read for the goods and filed against a catalogue, in whatever language
+                        and spelling it arrived in.
+                    </p>
+                    <p class="mt-4 text-sm text-gray-500">
+                        {{ product_count }} product{{ '' if product_count == 1 else 's' }} in the catalogue{% if unnamed_purchases %},
+                        and <span class="font-medium text-amber-700">{{ unnamed_purchases }} receipt{{ '' if unnamed_purchases == 1 else 's' }}</span>
+                        recording a payment and nothing else{% endif %}.
+                    </p>
+                    <a href="{{ url_for('manage_products') }}"
+                       class="mt-4 inline-flex items-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700">
+                        Manage products
+                    </a>
+                </div>
+            </div>
+
+            <div x-show="activeTab === 'categories'" class="shadow sm:rounded-md">
+                <div class="bg-white py-6 px-4 sm:p-6">
+                    <h3 class="text-base font-semibold leading-6 text-gray-900">Categories</h3>
+                    <p class="mt-1 text-sm text-gray-500">
+                        What every receipt is filed under. A category is the one thing on a receipt
+                        that no source settles &mdash; the classifier and the model each have a go,
+                        and either can be wrong or silent &mdash; so it is renamed, merged and set
+                        by hand on its own page.
+                    </p>
+                    <p class="mt-4 text-sm text-gray-500">
+                        {{ category_count }} categor{{ 'y' if category_count == 1 else 'ies' }} in use{% if uncategorised %},
+                        and <span class="font-medium text-amber-700">{{ uncategorised }} receipt{{ '' if uncategorised == 1 else 's' }}</span>
+                        carrying none{% endif %}.
+                    </p>
+                    <a href="{{ url_for('manage_categories') }}"
+                       class="mt-4 inline-flex items-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700">
+                        Manage categories
+                    </a>
+                </div>
+            </div>
         </div>
     </div>
 </div>
 
 <script>
 function settingsPage(initialTab) {
-    const knownTabs = ['business', 'ai-provider', 'integrations', 'front-page', 'devices'];
+    const knownTabs = ['business', 'ai-provider', 'integrations', 'front-page', 'devices', 'products', 'categories'];
     return {
         activeTab: knownTabs.includes(initialTab) ? initialTab : 'business',
+        // The tabs whose content is a page of its own rather than part of the settings
+        // form. Named as a group because the form below is shown on every tab that is
+        // not one of them - and a new one of these arriving as a second '!==' is how
+        // the Save button ends up on a page with nothing to save.
+        linksOut: ['devices', 'products', 'categories'],
         // Whether a secret field is showing plaintext, keyed by its input name. Starts
         // hidden for all of them; nothing here is ever pre-revealed on page load.
         revealed: {},

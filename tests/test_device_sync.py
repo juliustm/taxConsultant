@@ -608,6 +608,11 @@ def test_the_original_api_key_endpoint_still_works(app, device, monkeypatch):
     assert response.status_code == 202
     submission = Submission.query.one()
     assert submission.description == 'Fuel'
+    # Written to both columns at intake. They are the same words now and diverge later:
+    # `description` becomes the model's own summary once a receipt lands, and `user_note`
+    # goes on being what the sender said - which is what gets sent to the model on every
+    # attempt and every re-analysis after this one.
+    assert submission.user_note == 'Fuel'
     assert submission.receipt_code == '58E41A514'
     # A bot has no outbox, so it supplies no uuid and none is invented for it.
     assert submission.client_uuid is None

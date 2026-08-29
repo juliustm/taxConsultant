@@ -65,7 +65,7 @@
     ('where', 'Where the money goes', true),
     ('suppliers', 'Suppliers and devices', true),
     ('prices', 'What things cost', price_movements or cheaper),
-    ('unusual', 'Worth a second look', anomalies or outliers or attention.restricted),
+    ('unusual', 'Worth a second look', anomalies or outliers or attention.restricted or double_records),
     ('trouble', 'Receipts TRA had trouble with', reliability.vendors or reliability.unattributed),
     ('late', 'Suppliers who upload late', uploaders),
 ] %}
@@ -596,10 +596,10 @@
 {% endif %}
 
 <!-- 7. What looks unusual -->
-{% if anomalies or outliers or attention.restricted %}
+{% if anomalies or outliers or attention.restricted or double_records %}
 <div id="unusual" class="scroll-mt-6 mt-10">
     {{ section('Worth a second look', 'Patterns, not findings. Each of these has an innocent explanation as often as not - the point is that somebody should know about it.') }}
-    <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
 
         <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
             <p class="border-b border-gray-100 px-5 py-3 text-sm font-medium text-gray-900">Unusually large</p>
@@ -647,6 +647,29 @@
                 </li>
                 {% else %}
                 <li class="px-5 py-3 text-xs text-gray-500">Nothing restricted.</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        {#
+          The only place two copies of one purchase are ever seen together. A duplicated
+          expense reads as perfectly ordinary one receipt at a time; it is obvious the
+          moment both are on the screen, which is the entire reason this card exists.
+        #}
+        <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <p class="border-b border-gray-100 px-5 py-3 text-sm font-medium text-gray-900">Possibly recorded twice</p>
+            <ul class="divide-y divide-gray-100">
+                {% for finding in double_records %}
+                <li class="px-5 py-3">
+                    <p class="text-sm text-gray-900">{{ finding.vendor_name }}</p>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                        {{ exact(finding.amount_cents) }} on {{ finding.on.strftime('%d %b %Y') if finding.on }}, recorded
+                        {{ finding.receipts|length }} times{% if finding.times %} ({{ finding.times|join(', ') }}){% endif %} &mdash;
+                        {% for receipt in finding.receipts %}<a href="{{ url_for('receipt_detail', receipt_id=receipt.id) }}" class="text-indigo-600 hover:underline">#{{ receipt.id }}</a>{{ ', ' if not loop.last }}{% endfor %}
+                    </p>
+                </li>
+                {% else %}
+                <li class="px-5 py-3 text-xs text-gray-500">Nothing recorded twice.</li>
                 {% endfor %}
             </ul>
         </div>

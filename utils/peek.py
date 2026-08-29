@@ -887,21 +887,8 @@ def _load(query, limit):
 
 
 def _duplicates(receipt, limit=3):
-    """Other receipts that look like the same purchase. Mirrors main.find_possible_duplicates."""
-    if receipt.receipt_date is None or receipt.total_incl_tax_cents is None:
-        return []
-    query = Receipt.query.filter(
-        Receipt.id != receipt.id,
-        Receipt.receipt_date == receipt.receipt_date,
-        Receipt.total_incl_tax_cents == receipt.total_incl_tax_cents,
-    )
-    if receipt.vendor_id:
-        query = query.filter(Receipt.vendor_id == receipt.vendor_id)
-    elif receipt.vendor_tin:
-        query = query.filter(Receipt.vendor_tin == receipt.vendor_tin)
-    else:
-        return []
-    return query.limit(limit).all()
+    """Other receipts that look like the same purchase. See Receipt.possible_duplicates."""
+    return receipt.possible_duplicates(limit)
 
 
 def _unit_price(item):

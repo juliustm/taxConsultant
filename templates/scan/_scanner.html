@@ -469,8 +469,18 @@
 
                 <label for="confirm-note" class="mt-5 block text-sm font-medium text-white/60">Note (optional)</label>
                 <textarea id="confirm-note" x-model="noteText" rows="3" maxlength="200"
-                          placeholder="e.g. fuel, client lunch, office supplies"
+                          placeholder="e.g. Mayai x 6 - fuel for the van - client lunch"
                           class="mt-1.5 w-full resize-none rounded-xl border-0 bg-white/10 px-3.5 py-3 text-base text-white placeholder:text-white/30 focus:ring-2 focus:ring-indigo-500"></textarea>
+                {# The placeholder now leads with a count, and this line says why. A mobile
+                   money record names the person paid and nothing else, so what is typed
+                   here is the only description of the purchase that will ever exist - and
+                   it is read for the goods, not just for the category. Whatever language
+                   or spelling it arrives in, it is filed under the same product as the
+                   last time the same thing was bought. #}
+                <p class="mt-1.5 text-xs text-white/40">
+                    Naming what was bought and how many &mdash; &lsquo;Mayai x 6&rsquo; &mdash; is enough.
+                    Swahili or English, either way it files under the same product.
+                </p>
 
                 <template x-if="confirmError">
                     <p class="mt-3 rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-200">

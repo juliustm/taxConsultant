@@ -22,7 +22,10 @@ def submit(app, device):
     """Queues a TRA URL submission and returns it."""
     def _submit(url='https://verify.tra.go.tz/58E41A514_092022', description=None):
         submission = Submission(
-            device_id=device.id, input_type='url', input_data=url, description=description,
+            device_id=device.id, input_type='url', input_data=url,
+            # Both, as main.ingest_submission writes them: the sender's note lands in
+            # each, and only `description` is overwritten once a receipt is stored.
+            description=description, user_note=description,
         )
         db.session.add(submission)
         db.session.commit()
@@ -112,7 +115,7 @@ def test_the_llm_is_never_asked_for_facts(app, device, config, submit, portal, m
     portal()
     seen = {}
 
-    def _capture(facts, cfg, user_note=None):
+    def _capture(facts, cfg, user_note=None, catalogue=None):
         seen['facts'] = facts
         return {'category': 'fuel', 'llm_tax_analysis': 'ok'}
 
@@ -411,3 +414,75 @@ def test_unparsable_page_fails_the_submission_instead_of_guessing(app, device, c
     assert Receipt.query.count() == 0
     assert submission.status == 'failed'
     assert 'Could not parse the TRA receipt page' in submission.error_message
+
+
+# --- What the sender said about it ------------------------------------------
+
+@pytest.fixture
+def admin(app, config):
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session['admin_logged_in'] = True
+    return client
+
+
+def test_the_senders_note_reaches_the_judgment_call(
+        app, device, config, submit, portal, monkeypatch):
+    """
+    A verified receipt has exact facts and no reason behind them.
+
+    TRA's page says a hardware shop was paid 118,000 shillings; whether that was a
+    repair to the office or plant for a site is not on it and never will be. The note
+    is the only place that answer exists, so it goes with the facts.
+    """
+    import main
+
+    portal()
+    seen = {}
+
+    def _capture(facts, cfg, user_note=None, catalogue=None):
+        seen['note'] = user_note
+        return {'category': 'fuel'}
+
+    monkeypatch.setattr(main, 'analyse_receipt', _capture)
+    monkeypatch.setattr(config.__class__, 'is_configured', lambda self: True)
+
+    main.process_submission(submit(description='Generator service, Mwanza site'))
+
+    assert seen['note'] == 'Generator service, Mwanza site'
+
+
+def test_re_analysis_sends_the_senders_words_not_the_models_own(
+        app, device, config, admin, submit, portal, monkeypatch):
+    """
+    The second look gets the same note the first one did.
+
+    `description` becomes the model's own summary the moment the receipt is stored, so
+    reading the note from there sent the model its previous answer back labelled as a
+    person's note - a wrong category, restated, reading as though somebody had confirmed
+    it. The note is kept in a column of its own precisely so that cannot happen.
+    """
+    import main
+
+    portal()
+    monkeypatch.setattr(main, 'analyse_receipt', lambda *a, **k: {
+        'category': 'other', 'llm_extracted_description': 'Water supply purchase.',
+        'llm_tax_analysis': 'Deductible.',
+    })
+    monkeypatch.setattr(config.__class__, 'is_configured', lambda self: True)
+
+    submission = submit(description='Site water for the Mwanza job')
+    main.process_submission(submission)
+    assert submission.description == 'Water supply purchase.'
+
+    seen = {}
+
+    def _capture(facts, cfg, user_note=None, catalogue=None):
+        seen['note'] = user_note
+        return {'category': 'utilities', 'llm_tax_analysis': 'Deductible.'}
+
+    monkeypatch.setattr(main, 'analyse_receipt', _capture)
+    receipt = Receipt.query.one()
+    assert admin.post(f'/receipts/{receipt.id}/reanalyse').status_code == 200
+
+    assert seen['note'] == 'Site water for the Mwanza job'

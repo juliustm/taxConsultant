@@ -68,6 +68,22 @@ def _spending(receipts):
     return [receipt for receipt in receipts if receipt.is_expense]
 
 
+def _item_key(item):
+    """
+    What makes two lines the same purchase.
+
+    The catalogue's key where the line has been filed against one (models.user.Product),
+    which is the only thing that can tell that 'MAYAI TREI', 'eggs' and a note reading
+    'Mayai x 6' are one product with one price history. The normalised description is
+    the fallback, and was the whole answer before the catalogue existed: it still groups
+    a vendor's own repeated line correctly, it simply cannot cross a language.
+    """
+    product_id = getattr(item, 'product_id', None)
+    if product_id:
+        return f'product:{product_id}'
+    return normalise_description(item.description)
+
+
 def _unit_prices(receipts):
     """
     Every (item, vendor) observation with a usable unit price.
@@ -87,14 +103,17 @@ def _unit_prices(receipts):
             if not quantity or Decimal(quantity) <= 0 or not item.amount_cents:
                 continue
 
-            item_key = normalise_description(item.description)
+            item_key = _item_key(item)
             if not item_key:
                 continue
 
             observations[(item_key, vendor)].append({
                 'date': receipt.receipt_date,
                 'unit_cents': int(Decimal(item.amount_cents) / Decimal(quantity)),
-                'description': item.description,
+                # The catalogue's name where there is one, so a finding reads the same
+                # whichever language the last receipt was written in - the lines behind
+                # it may say 'mayay', 'Mayai' and 'Eggs' and are one product.
+                'description': getattr(item, 'label', None) or item.description,
                 'vendor_name': _vendor_name(receipt),
                 'receipt_id': receipt.id,
             })
@@ -231,6 +250,51 @@ def spend_anomalies(receipts, sigma=ANOMALY_SIGMA, min_history=MIN_ANOMALY_HISTO
             })
 
     findings.sort(key=lambda finding: finding['deviations'], reverse=True)
+    return findings[:limit]
+
+
+def double_records(receipts, limit=8):
+    """
+    Groups of receipts in this window that look like one purchase recorded twice.
+
+    Nothing here is a finding. Two people can pay one fundi the same amount on the same
+    day, and a supplier with two tills can print two receipts a minute apart - so the
+    check that *blocks* a duplicate wants a reference and an amount agreeing (see
+    utils/fingerprint), and this is the softer question the blocking one deliberately
+    refuses to answer.
+
+    It is worth a page of its own attention anyway, because it is the only place the
+    two copies are ever seen side by side: a duplicate expense reads as perfectly
+    ordinary one receipt at a time, and is only obvious when both are on the screen.
+
+    Grouped on the key the receipts already carry rather than recomputed here, so this
+    reports exactly what the receipt page reports and no more.
+    """
+    groups = defaultdict(list)
+    for receipt in _spending(receipts):
+        if receipt.near_key:
+            groups[receipt.near_key].append(receipt)
+
+    findings = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda receipt: receipt.id)
+        findings.append({
+            'receipts': group,
+            'vendor_name': _vendor_name(group[0]),
+            'on': group[0].receipt_date,
+            'amount_cents': group[0].total_incl_tax_cents or 0,
+            # What a second copy is costing if it is one: everything past the first.
+            'duplicated_cents': (group[0].total_incl_tax_cents or 0) * (len(group) - 1),
+            # Printed times, where there are any. Two receipts a minute apart are almost
+            # certainly one purchase; two hours apart are almost certainly not, and that
+            # is the fact a person needs to decide which of these it is.
+            'times': [receipt.receipt_time.strftime('%H:%M') for receipt in group
+                      if receipt.receipt_time],
+        })
+
+    findings.sort(key=lambda finding: finding['duplicated_cents'], reverse=True)
     return findings[:limit]
 
 

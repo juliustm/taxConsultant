@@ -564,3 +564,84 @@ def test_the_receipt_page_offers_the_pencil_only_where_it_is_allowed(
     body = admin.get(f'/receipts/{verified.id}').get_data(as_text=True)
     assert 'Correct by hand' not in body
     assert 'As TRA printed it' in body
+
+
+# --- Typing a supplier we already hold ---------------------------------------
+#
+# The one field on the correction form where the right answer is nearly always already
+# in the database. Suppliers are grouped on the TIN TRA issued, so a name typed
+# differently is not a spelling difference - it is a second supplier with one receipt
+# and no TIN, and every total the real one appears in is quietly short from then on.
+
+
+def test_the_suggestions_match_a_supplier_on_their_name(app, admin, photo_receipt):
+    body = admin.get('/api/vendors/suggest?q=EFRA').get_json()
+
+    assert [vendor['tin'] for vendor in body['vendors']] == ['10347036']
+    assert body['vendors'][0]['count'] == 1
+
+
+def test_the_suggestions_match_on_the_tin_as_well(app, admin, photo_receipt):
+    """Both are printed on the paper, and whichever is legible is what gets typed."""
+    body = admin.get('/api/vendors/suggest?q=103470').get_json()
+
+    assert [vendor['name'] for vendor in body['vendors']] == ['EFRA1M M0TORS']
+
+
+def test_an_empty_box_offers_the_suppliers_with_the_most_behind_them(app, admin, photo_receipt, device):
+    """
+    So that opening the field is useful before a character is typed. Ordered by how many
+    receipts each supplier has, because that is the order a receipt is likely to be from.
+    """
+    quiet = Vendor.upsert(tin='999999999', name='ONE-OFF HARDWARE')
+    db.session.commit()
+
+    names = [vendor['name'] for vendor in admin.get('/api/vendors/suggest').get_json()['vendors']]
+
+    assert names == ['EFRA1M M0TORS', 'ONE-OFF HARDWARE']
+    assert quiet.tin == '999999999'
+
+
+def test_the_suggestion_carries_what_the_photograph_cannot_show(app, admin, photo_receipt):
+    """
+    The point of choosing an existing supplier rather than typing one: their TIN and VRN
+    come with them. Those are the two fields worst served by a creased thermal print and
+    the two whose misreading costs the most - a TIN splits the supplier, a wrong VRN
+    claims input VAT that is not there.
+    """
+    Vendor.upsert(tin='100147181', name='PLASCO LIMITED', vrn='10007206H',
+                  tax_office='MEDIUM TAXPAYERS DIVISION')
+    db.session.commit()
+
+    matched = admin.get('/api/vendors/suggest?q=PLASCO').get_json()['vendors'][0]
+
+    assert matched['tin'] == '100147181'
+    assert matched['vrn'] == '10007206H'
+    assert matched['tax_office'] == 'MEDIUM TAXPAYERS DIVISION'
+    assert matched['href'] == '/vendors/tin:100147181'
+
+
+def test_the_suggestions_are_admin_only(app):
+    """Every supplier this instance buys from, so it is behind the same door as the rest."""
+    client = app.test_client()
+
+    response = client.get('/api/vendors/suggest?q=a')
+
+    assert response.status_code in (302, 401, 403)
+
+
+def test_correcting_onto_a_suggested_supplier_files_the_receipt_under_them(app, admin, photo_receipt):
+    """
+    The end of the whole exercise. Picking the existing supplier fills the form with
+    their details, and saving it moves the receipt onto their vendor row rather than
+    leaving a second supplier behind.
+    """
+    real = Vendor.upsert(tin='103470361', name='EFRAIM MOTORS', vrn='40404040A')
+    db.session.commit()
+
+    admin.post(f'/receipts/{photo_receipt.id}/correct', data={
+        'vendor_name': 'EFRAIM MOTORS', 'vendor_tin': '103470361', 'vrn': '40404040A',
+    })
+
+    assert photo_receipt.vendor_id == real.id
+    assert photo_receipt.vendor.name == 'EFRAIM MOTORS'

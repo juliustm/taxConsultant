@@ -1,9 +1,12 @@
 # models/user.py
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
 import uuid
 from datetime import datetime
 
 from utils.money import from_cents
+from utils import fingerprint
+from utils import products as product_text
 
 db = SQLAlchemy()
 
@@ -147,7 +150,21 @@ class Submission(db.Model):
     status = db.Column(db.String(20), nullable=False, default='queued', index=True)
     input_type = db.Column(db.String(10), nullable=False)
     input_data = db.Column(db.String(1024), nullable=False)
+    # What this submission is *about*, in one line. Written by whoever submitted it and
+    # then, once a receipt lands, overwritten with the model's own one-sentence summary
+    # - which is what the dashboard row and the CSV export both read.
     description = db.Column(db.Text, nullable=True)
+    # What the person who submitted it said about it, kept apart from `description`
+    # because that column stops being their words the moment the receipt is stored.
+    #
+    # It is the only thing on a submission that no automation can derive: 'diesel for
+    # the generator, not the van', 'client lunch - Mwanza tender'. A photograph shows
+    # what was bought and never why, and the why is what decides the category and half
+    # the deductibility question. So it goes to the model with the photograph, the
+    # pasted SMS and the verified facts alike (see main._sender_note), and it has to
+    # still be here on the retry tomorrow and the re-analysis next month - which it was
+    # not, while the LLM's summary was landing on top of it.
+    user_note = db.Column(db.Text, nullable=True)
     location = db.Column(db.String(255), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     # The exception class behind the last failure, stored as its own field rather than
@@ -227,6 +244,20 @@ class Submission(db.Model):
     # been near a network. A queued scan is retried until it is acknowledged, and
     # without this every dropped response would leave a duplicate behind.
     client_uuid = db.Column(db.String(64), nullable=True, unique=True)
+    # A hash of the evidence itself - the characters of a pasted record, the bytes of a
+    # stored photograph. See utils/fingerprint.
+    #
+    # Deliberately not client_uuid, which answers a different question. That one is
+    # minted on the phone and says 'this is the same *send* as the one you already
+    # acknowledged'; this one is computed from the content and says 'this is the same
+    # *thing*, however many times it has been submitted and from wherever'. The second
+    # is what catches the SMS somebody pastes again on Friday having forgotten they
+    # pasted it on Monday, and it catches it at intake, before a model is paid to read
+    # a receipt already in the ledger.
+    #
+    # NULL on a URL submission, whose identity is the verification code in receipt_code,
+    # and on a paste too slight to be an identity at all.
+    content_hash = db.Column(db.String(80), nullable=True, index=True)
     # When the person actually scanned it, as opposed to received_at, which is when
     # the server heard about it. Offline queuing puts days between the two.
     captured_at = db.Column(db.DateTime, nullable=True)
@@ -351,6 +382,197 @@ class Vendor(db.Model):
         vendor.last_seen_at = datetime.utcnow()
         return vendor
 
+class Product(db.Model):
+    """
+    One thing the business buys, however it was written down that day.
+
+    The catalogue exists because identity is what every question about buying needs and
+    no receipt supplies. 'Mayai x 6' typed beside a mobile money line, 'EGGS TRAY' printed
+    on an EFD, and 'mayay' typed by somebody in a hurry are one product bought three
+    times - and only once they are one row can the app say that eggs cost 12% more this
+    month, or that the shop across the road sells them cheaper.
+
+    Modelled on Vendor, which solves the same problem for suppliers: a stable key, the
+    display name refreshed from what was last seen, and the surface forms kept beside it.
+    The difference is that a vendor has a TIN and a product has nothing - no barcode, no
+    registry, nothing issued by anyone - so identity has to be built out of the words
+    themselves. Three layers do it, cheapest first:
+
+      1. The normalised name (utils.products.normalise), which collapses case,
+         punctuation and a trailing unit.
+      2. An alias, which is any other name this product has been seen under. Aliases are
+         how the expensive answers become free: the model works out once that 'mayai'
+         means eggs, and every later 'mayai' is a dictionary lookup.
+      3. A near match on spelling, for the typo that neither of the above catches.
+
+    An admin can always overrule all three - see the products page, where renaming one
+    product onto another's name merges them, exactly as it does for categories.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    lookup_key = db.Column(db.String(220), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    # The counting unit this is usually bought in - 'kg', 'tray', 'pcs' - remembered
+    # from the first line that named one, so a later line without it still reads right.
+    unit = db.Column(db.String(20), nullable=True)
+    first_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    @property
+    def alias_names(self):
+        """Every other word this product has been called, for display."""
+        return sorted({alias.alias for alias in self.aliases if alias.alias_key != self.lookup_key})
+
+    @classmethod
+    def lookup(cls, text):
+        """
+        The product this text names, or None. Never creates anything.
+
+        The three layers in order. Fuzzy matching is last and is run over the keys
+        already in the catalogue rather than over the seed list, because a catalogue
+        that has seen a word is better evidence than a list written in advance.
+        """
+        key = product_text.normalise(text)
+        if not key:
+            return None
+
+        found = cls.query.filter_by(lookup_key=key).first()
+        if found is not None:
+            return found
+
+        alias = ProductAlias.query.filter_by(alias_key=key).first()
+        if alias is not None:
+            return alias.product
+
+        near = product_text.best_match(key, [row[0] for row in db.session.query(cls.lookup_key)])
+        if near:
+            return cls.query.filter_by(lookup_key=near).first()
+
+        near = product_text.best_match(
+            key, [row[0] for row in db.session.query(ProductAlias.alias_key)])
+        if near:
+            alias = ProductAlias.query.filter_by(alias_key=near).first()
+            return alias.product if alias else None
+        return None
+
+    @classmethod
+    def resolve(cls, text, aliases=(), unit=None):
+        """
+        The product for this text, created on first sight.
+
+        `aliases` is everything else this purchase was called - the model's other name
+        for it, the words that were actually printed - and each one is written into the
+        alias table pointing at whatever product this resolves to. That is the whole
+        learning mechanism: it costs one row, and it turns the next occurrence of that
+        word into a lookup.
+
+        Ordinary text with nothing behind it goes through the seed list before it
+        becomes a new product, so a fresh instance's first 'Mayai x 6' lands under Eggs
+        rather than founding a catalogue entry the English word will never find again.
+        """
+        surface = product_text.display_name(text)
+        if not surface:
+            return None
+
+        found = cls.lookup(surface)
+        candidates = [surface, *[a for a in aliases if a]]
+        if found is None:
+            for candidate in candidates:
+                found = cls.lookup(candidate)
+                if found is not None:
+                    break
+
+        if found is None:
+            # Nothing in the catalogue knows this word. The seed list may still know
+            # what it means, in which case the product is created under the canonical
+            # name and the typed word is remembered as an alias of it.
+            seeded = next((product_text.seeded_name(candidate) for candidate in candidates
+                           if product_text.seeded_name(candidate)), None)
+            found = cls(
+                lookup_key=product_text.normalise(seeded or surface),
+                name=seeded or surface, unit=unit,
+            )
+            db.session.add(found)
+
+        found.unit = found.unit or unit
+        found.last_seen_at = datetime.utcnow()
+        for candidate in candidates:
+            found.remember(candidate)
+        return found
+
+    def remember(self, text, source='seen'):
+        """Records one more word for this product, if it is new and not its own name."""
+        key = product_text.normalise(text)
+        if not key or key == self.lookup_key:
+            return None
+        existing = ProductAlias.query.filter_by(alias_key=key).first()
+        if existing is not None:
+            return existing
+        alias = ProductAlias(
+            product=self, alias_key=key, alias=product_text.display_name(text), source=source)
+        db.session.add(alias)
+        return alias
+
+    def merge_into(self, other):
+        """
+        Folds this product into another, keeping every word both were known by.
+
+        The losing name survives as an alias of the winner rather than being deleted,
+        which is what stops the merge from being undone by the next receipt: the word
+        that created this row is exactly the word that would create it again.
+        """
+        if other is None or other.id == self.id:
+            return 0
+        moved = 0
+        for line in list(self.lines):
+            line.product = other
+            moved += 1
+        for alias in list(self.aliases):
+            alias.product = other
+        other.remember(self.name, source='merge')
+        other.first_seen_at = min(other.first_seen_at, self.first_seen_at)
+        other.last_seen_at = max(other.last_seen_at, self.last_seen_at)
+        db.session.delete(self)
+        return moved
+
+    @classmethod
+    def catalogue(cls, limit=80):
+        """
+        The catalogue as the model is shown it: recent names, with what else they are
+        called.
+
+        Bounded because it is sent with every receipt read. Ordered by when each product
+        was last bought, so an instance with a long tail still shows the model the names
+        this week's receipts are actually going to hit.
+        """
+        rows = cls.query.order_by(cls.last_seen_at.desc()).limit(limit).all()
+        return [
+            {'name': row.name, 'also': row.alias_names[:4]} if row.alias_names else {'name': row.name}
+            for row in rows
+        ]
+
+
+class ProductAlias(db.Model):
+    """
+    One word that means a product, other than the product's own name.
+
+    Unique on the key across the whole table, so a word can only ever mean one thing -
+    which is what makes resolution a lookup rather than a search, and what makes a merge
+    permanent.
+
+    `source` records who said so: 'seen' for a word that arrived on a receipt or in a
+    note, 'llm' for the model's own synonym, 'merge' for the name of a product folded
+    into this one, 'admin' for a word typed on the products page.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False, index=True)
+    product = db.relationship(
+        'Product', backref=db.backref('aliases', lazy=True, cascade='all, delete-orphan'))
+    alias_key = db.Column(db.String(220), unique=True, nullable=False, index=True)
+    alias = db.Column(db.String(200), nullable=False)
+    source = db.Column(db.String(10), nullable=True)
+    first_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
 class Receipt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
 
@@ -394,6 +616,21 @@ class Receipt(db.Model):
     is_cancelled = db.Column(db.Boolean, nullable=False, default=False, index=True)
     is_test = db.Column(db.Boolean, nullable=False, default=False, index=True)
 
+    # --- Is this the same purchase we already have? ---
+    # Two derived keys, both built by utils/fingerprint out of the columns above and
+    # both kept current by refresh_fingerprints, which runs on every insert and update.
+    # Derived rather than asked for: a receipt whose TIN or total was corrected by hand
+    # is a different purchase from the one it was a minute ago, and a key written once
+    # at intake would go on describing the reading somebody has just overruled.
+    #
+    # identity_key is an assertion - the same code, or the same reference and amount -
+    # and a submission matching one already stored is filed as a duplicate without ever
+    # reaching the model. near_key is an observation - the same supplier, day and total
+    # - and is only ever reported to a human. See utils/fingerprint for why the line is
+    # drawn there.
+    identity_key = db.Column(db.String(300), nullable=True, index=True)
+    near_key = db.Column(db.String(300), nullable=True, index=True)
+
     # --- System & Audit Fields ---
     # 'tra_html' when the facts were parsed from the verified page, 'llm_vision' when
     # a photo left no alternative to reading them out of the image.
@@ -423,6 +660,15 @@ class Receipt(db.Model):
     # answered is "which of these numbers is still the model's?".
     corrected_fields = db.Column(db.Text, nullable=True)
     category = db.Column(db.String(50), nullable=True, index=True)
+    # When an admin last set the category by hand.
+    #
+    # Kept apart from corrected_fields, which is about the printed facts on the receipt
+    # panel, because the category is not one of those: it is a judgment, it is the
+    # model's on every receipt including the ones TRA verified, and it is the one thing
+    # here a person may overrule on any receipt at all. Its presence is also an
+    # instruction - re-analysis leaves a hand-set category alone rather than replacing
+    # somebody's decision with a fresh guess. See main.set_receipt_category.
+    category_corrected_at = db.Column(db.DateTime, nullable=True)
     # 'ok', 'unavailable' (the model could not be reached) or 'skipped'.
     llm_status = db.Column(db.String(20), nullable=True)
     processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
@@ -460,6 +706,99 @@ class Receipt(db.Model):
             return None
         return datetime.combine(self.receipt_date, self.receipt_time or datetime.min.time())
 
+    @property
+    def printed_items(self):
+        """
+        The lines that were actually on the document.
+
+        Every check that recomputes something the document asserts - the tax
+        cross-foot, the line-item tax codes - has to run on these and not on
+        `items`, which also holds what the sender said they bought. See
+        ReceiptItem.source.
+        """
+        return [item for item in self.items if item.source != 'note']
+
+    @property
+    def note_items(self):
+        """What the sender's note said was bought, when the document did not say."""
+        return [item for item in self.items if item.source == 'note']
+
+    @property
+    def vendor_key(self):
+        """
+        Which supplier this receipt is one purchase from, as a string.
+
+        The same key the vendor row itself is filed under, computed from the same two
+        printed fields - so it is the TIN where there is one and the normalised trading
+        name otherwise, and 'PLASCO LIMITED' and 'Plasco Ltd' are one supplier here for
+        exactly the reason they are one row there.
+
+        Deliberately derived rather than read off vendor_id, which says the same thing.
+        A key is computed while a receipt is being flushed and also before it exists at
+        all - checking a transcription against the ledger happens before any of it is
+        stored - and the printed fields are the half of that pair which is always
+        already there.
+        """
+        return Vendor.make_lookup_key(self.vendor_tin, self.vendor_name)
+
+    def refresh_fingerprints(self):
+        """Recomputes the two duplicate-matching keys from what the receipt now says."""
+        vendor_key = self.vendor_key
+        self.identity_key = fingerprint.identity_key(
+            verification_code=self.receipt_verification_code,
+            reference=self.receipt_number,
+            vendor_key=vendor_key,
+            total_cents=self.total_incl_tax_cents,
+            on_date=self.receipt_date,
+        )
+        self.near_key = fingerprint.near_key(
+            vendor_key=vendor_key,
+            on_date=self.receipt_date,
+            total_cents=self.total_incl_tax_cents,
+        )
+        return self
+
+    @classmethod
+    def with_identity(cls, key):
+        """The stored receipt this key names, or None. The blocking duplicate check."""
+        if not key:
+            return None
+        return cls.query.filter_by(identity_key=key).first()
+
+    def possible_duplicates(self, limit=5):
+        """
+        Other receipts that look like the same purchase recorded twice.
+
+        Matching on identity catches the same document submitted twice - the same
+        verification code, or the same payment reference and amount. It cannot catch
+        the same purchase submitted once as a photograph and once as a TRA link, or a
+        handwritten chit photographed on two different days: neither copy carries
+        anything the other can be matched against exactly, so both are stored and the
+        expense is counted twice.
+
+        What that actually looks like is the same supplier, the same day, the same
+        total - which is a query, not a guess. Two genuinely separate purchases can
+        match, so this reports candidates and never merges anything.
+        """
+        if not self.near_key:
+            return []
+
+        query = Receipt.query.filter(Receipt.near_key == self.near_key)
+        if self.id is not None:
+            query = query.filter(Receipt.id != self.id)
+        return query.order_by(Receipt.id.asc()).limit(limit).all()
+
+
+# Derived columns, kept derived. Every path that stores a receipt goes through a flush -
+# the pipeline, an admin accepting a transcription, a correction typed on the receipt
+# page - and putting this on the mapper is what makes 'the keys match what the row says'
+# true by construction rather than by each of those paths remembering to say so.
+@event.listens_for(Receipt, 'before_insert')
+@event.listens_for(Receipt, 'before_update')
+def _refresh_receipt_fingerprints(_mapper, _connection, receipt):
+    receipt.refresh_fingerprints()
+
+
 class ReceiptItem(db.Model):
     """
     One line of the purchased-items table.
@@ -481,9 +820,41 @@ class ReceiptItem(db.Model):
     # TRA's per-line tax class: A, B, C, SR or EX.
     tax_code = db.Column(db.String(5), nullable=True, index=True)
 
+    # Where this line came from, and it is the only thing separating a fact from a
+    # reading of one:
+    #
+    #   'printed' - it was on the document. Every line the parser read off TRA's
+    #               verified page, and every line a model transcribed off paper.
+    #   'note'    - nothing printed it. It is what the sender said they bought, read
+    #               out of the note beside the camera because the document itself said
+    #               only 'LIPA JACLINE NGILISHO MOLLEL'.
+    #
+    # Everything that recomputes tax from the document reads printed lines only (see
+    # Receipt.printed_items), because a note line has no tax code and never did - the
+    # alternative was a checked receipt reporting that its tax could not be checked the
+    # moment somebody typed what they bought into the box.
+    source = db.Column(db.String(10), nullable=False, default='printed', index=True)
+
+    # The catalogue entry this line is an instance of. Nullable throughout: a line
+    # nothing could identify is still a line, and every reader treats a missing product
+    # as 'not known' rather than as an error.
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=True, index=True)
+    product = db.relationship('Product', backref=db.backref('lines', lazy=True))
+
     @property
     def amount(self):
         return from_cents(self.amount_cents)
+
+    @property
+    def from_note(self):
+        return self.source == 'note'
+
+    @property
+    def label(self):
+        """What to call this line: the catalogue's name for it, or its own text."""
+        if self.product is not None:
+            return self.product.name
+        return self.description
 
 class ReceiptTaxLine(db.Model):
     """
