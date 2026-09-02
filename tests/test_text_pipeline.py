@@ -271,3 +271,232 @@ def test_a_pasted_record_with_no_note_sends_none(app, configured, record, reader
     main.process_submission(record())
 
     assert reader.notes == [None]
+
+
+# --- Through the real scanner ----------------------------------------------
+#
+# The `reader` fixture above replaces main.extract_receipt_details wholesale, which is
+# right for the tests about routing - they are asking which path a submission takes, not
+# what the model said. It also steps straight over the deterministic scan and the
+# reconciliation that live inside that function, so the tests below stub one level deeper.
+
+# The SMS that prompted all of this, as the gateway sent it: en dashes, doubled spaces.
+TTCL_SMS = (
+    'You have paid 55000 TZS for  KELSIA BUSINESS  CONSULTANCY LIMITED – 994944252324 – '
+    'TANZANIA TELECOMMUNICATION CORPORATION. 17-07-2026 12:17:40. New Balance  44,202.04 . '
+    'TransID MP260717.1217.W74283.'
+)
+
+# What the model actually returned for it, field for field. The vendor is the subscriber,
+# the receipt number is the account number, and the VAT is 18% of a total no tax was
+# charged on.
+TTCL_MODEL_ANSWER = {
+    'vendor_name': 'KELSIA BUSINESS CONSULTANCY LIMITED',
+    'receipt_date': '2026-07-17',
+    'receipt_number': '994944252324',
+    'total_amount': 55000,
+    'vat_amount': 8474.58,
+    'document_type': 'other_receipt',
+    'category': 'telecom',
+    'items': [{'description': 'Payment to KELSIA BUSINESS CONSULTANCY LIMITED - 994944252324 '
+                              '- TANZANIA TELECOMMUNICATION CORPORATION', 'amount': 55000}],
+    'llm_extracted_description': 'Payment for telecom services.',
+    'llm_tax_analysis': 'Subject to 18% VAT; approx 8,474 TZS claimable as input tax.',
+}
+
+
+@pytest.fixture
+def raw_reader(monkeypatch):
+    """
+    The model's answer, stubbed below extract_receipt_details rather than instead of it.
+
+    So the prompt is really built, the record is really scanned, and the answer really
+    passes through reconciliation - which is the seam these tests exist to cover.
+    """
+    from utils import llm_processor
+
+    sent = []
+
+    def _stub(answer):
+        def _call(client, config, kind, messages, tools=None, expected_name=None):
+            sent.append(messages)
+            return dict(answer)
+        monkeypatch.setattr(llm_processor, '_call_with_fallback', _call)
+        monkeypatch.setattr(llm_processor, 'get_llm_client', lambda config: object())
+        return sent
+    return _stub
+
+
+def test_the_scanner_corrects_the_model_on_who_was_paid(
+        app, configured, record, raw_reader, portal, judgment):
+    """
+    The whole point, end to end.
+
+    The model read the subscriber as the supplier, the account number as the receipt
+    number, the balance-shaped arithmetic as VAT. The record says otherwise in every case,
+    and the record is what gets stored.
+    """
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    submission = record(text=TTCL_SMS)
+    main.process_submission(submission)
+
+    receipt = Receipt.query.one()
+    assert receipt.vendor_name == 'TANZANIA TELECOMMUNICATION CORPORATION'
+    assert receipt.customer_name == 'KELSIA BUSINESS  CONSULTANCY LIMITED'
+    assert receipt.receipt_number == 'MP260717.1217.W74283'
+    assert receipt.total_incl_tax_cents == 5_500_000
+    assert receipt.total_tax_cents is None
+
+
+def test_the_record_is_scanned_before_the_model_is_asked(
+        app, configured, record, raw_reader, portal, judgment):
+    """The facts reach the model as facts, the way a verified receipt's already do."""
+    import main
+
+    sent = raw_reader(TTCL_MODEL_ANSWER)
+    main.process_submission(record(text=TTCL_SMS))
+
+    prompt = sent[0][1]['content']
+    assert 'Payee, i.e. the vendor: TANZANIA TELECOMMUNICATION CORPORATION' in prompt
+    assert 'Account holder, i.e. the customer: KELSIA BUSINESS  CONSULTANCY LIMITED' in prompt
+    assert 'transaction id: MP260717.1217.W74283' in prompt
+    assert 'It is not an amount on this document.' in prompt
+
+
+def test_the_identifiers_are_stored_under_the_kind_each_one_is(
+        app, configured, record, raw_reader, portal, judgment):
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    main.process_submission(record(text=TTCL_SMS))
+
+    references = {r.kind: r.value for r in Receipt.query.one().references}
+    assert references == {
+        'transaction_id': 'MP260717.1217.W74283',
+        'account_no': '994944252324',
+    }
+
+
+def test_what_the_scanner_overruled_is_kept_on_the_submission(
+        app, configured, record, raw_reader, portal, judgment):
+    """A correction nobody can see is indistinguishable from a bug."""
+    import json
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    submission = record(text=TTCL_SMS)
+    main.process_submission(submission)
+
+    report = json.loads(submission.record_scan)
+    assert report['scan']['template'] == 'bill_payment_three_part'
+    assert report['llm_before']['vendor_name'] == 'KELSIA BUSINESS CONSULTANCY LIMITED'
+    assert {a['rule'] for a in report['adjustments']} >= {'R1', 'R2', 'R4', 'R5'}
+
+
+def test_the_stored_draft_is_the_corrected_answer(
+        app, configured, record, raw_reader, portal, judgment):
+    """
+    An admin accepting the draft must not re-introduce what was just corrected.
+
+    accept_submission_extraction builds a receipt straight from llm_draft, so the draft
+    has to be the answer as reconciled rather than as the model gave it.
+    """
+    import json
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    submission = record(text=TTCL_SMS)
+    main.process_submission(submission)
+
+    draft = json.loads(submission.llm_draft)
+    assert draft['vendor_name'] == 'TANZANIA TELECOMMUNICATION CORPORATION'
+    assert '_record_scan' not in draft
+
+
+def test_the_fabricated_withholding_finding_is_gone(
+        app, configured, record, raw_reader, portal, judgment):
+    """
+    2,750.00 of withholding tax on an internet bill, from the word CONSULTANCY in a
+    payee's trading name. It was rendered on the receipt page as a thing to go and do.
+    """
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    main.process_submission(record(text=TTCL_SMS))
+
+    assessment = main.assess_receipt(Receipt.query.one())
+    assert assessment.wht_lines == []
+    assert assessment.wht_total_cents == 0
+
+
+def test_the_receipt_page_shows_the_references_and_what_was_corrected(
+        app, configured, record, raw_reader, portal, judgment):
+    """
+    The page has to say what it did.
+
+    Rendered at the highest density, because the provenance panel is where the question
+    'why does this row say that' is answered eighteen months later.
+    """
+    import main
+    from models.user import InstanceConfig
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    main.process_submission(record(text=TTCL_SMS))
+    InstanceConfig.query.first().receipt_detail_level = 'full'
+    db.session.commit()
+
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session['admin_logged_in'] = True
+    page = client.get(f'/receipts/{Receipt.query.one().id}').get_data(as_text=True)
+
+    assert 'References' in page
+    assert 'MP260717.1217.W74283' in page
+    assert 'transaction id' in page
+    # The account number is shown, and shown as the customer's rather than as an identity.
+    assert '994944252324' in page
+    assert 'Identifies the customer, not this payment' in page
+    assert 'What the scanner corrected' in page
+    assert 'KELSIA BUSINESS CONSULTANCY LIMITED' in page, 'what the model had said'
+    assert 'Read deterministically' in page
+
+
+def test_the_receipt_page_flags_an_analysis_that_claims_tax_nobody_charged(
+        app, configured, record, raw_reader, portal, judgment):
+    """The 8,474 TZS of input VAT, sitting under a card reading 0.00."""
+    import main
+
+    raw_reader(TTCL_MODEL_ANSWER)
+    main.process_submission(record(text=TTCL_SMS))
+
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session['admin_logged_in'] = True
+    page = client.get(f'/receipts/{Receipt.query.one().id}').get_data(as_text=True)
+
+    assert 'No tax is recorded on this receipt' in page
+
+
+def test_a_record_no_template_reads_is_left_to_the_model(
+        app, configured, record, raw_reader, portal, judgment):
+    """
+    Degrading, not failing.
+
+    Nothing here places a party, so the model's vendor stands. The figure and the date it
+    reported are still checked against the characters, which is most of the value.
+    """
+    import main
+
+    raw_reader({
+        'vendor_name': 'MAMA NTILIE', 'receipt_date': '2026-08-03',
+        'total_amount': 12500, 'document_type': 'other_receipt',
+        'llm_extracted_description': 'Lunch.', 'llm_tax_analysis': 'Deductible.',
+    })
+    main.process_submission(
+        record(text='Umefanya malipo ya chakula 12,500.00 tarehe 3 Aug 2026. Asante.'))
+
+    receipt = Receipt.query.one()
+    assert receipt.vendor_name == 'MAMA NTILIE'
+    assert receipt.total_incl_tax_cents == 1_250_000

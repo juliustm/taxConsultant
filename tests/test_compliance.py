@@ -337,6 +337,136 @@ def test_out_of_hours_purchases_are_noted():
     assert assessment.check('timing').status == compliance.INFO
 
 
+# --- Payment narrations, which are not descriptions of anything bought ------
+
+# What the line item on a pasted TTCL bill payment actually said. Every keyword rule in
+# utils/classify reads a description, and this description is a payment sentence carrying
+# a company's trading name - so 'consultancy' matched, and the page offered 2,750 TZS of
+# withholding tax on an internet bill.
+TTCL_NARRATION = ('Payment to KELSIA BUSINESS CONSULTANCY LIMITED - 994944252324 - '
+                  'TANZANIA TELECOMMUNICATION CORPORATION')
+
+
+def _record(items, **overrides):
+    """A pasted record: no TRA page behind it, no VAT on it, one narration line."""
+    fields = dict(
+        items=items, tax_lines=[], extraction_source='llm_text',
+        document_type='other_receipt', receipt_verification_code=None,
+        vrn=None, vendor_tin=None,
+        total_incl_tax_cents=55_000_00, total_excl_tax_cents=None, total_tax_cents=None,
+    )
+    fields.update(overrides)
+    return build_receipt(**fields)
+
+
+def test_a_payment_narration_produces_no_withholding_finding():
+    """The 2,750 that was never owed. Nobody bought consultancy."""
+    assessment = assess(_record([(TTCL_NARRATION, 55_000_00, None)]))
+
+    assert assessment.wht_lines == []
+    assert assessment.wht_total_cents == 0
+    assert status_of(assessment, 'wht') is None
+
+
+def test_a_payment_narration_is_not_categorised_from_the_payee_name():
+    assessment = assess(_record([(TTCL_NARRATION, 55_000_00, None)]))
+
+    assert assessment.computed_category is None
+
+
+def test_a_payment_narration_produces_no_capital_or_restriction_findings():
+    """A payee called '... GENERATOR SUPPLIES LIMITED' has not sold anybody a generator."""
+    narration = 'Payment of TZS 2,000,000 to MWANZA GENERATOR SUPPLIES LIMITED ref 887766554433'
+
+    assessment = assess(_record([(narration, 2_000_000_00, None)],
+                                total_incl_tax_cents=2_000_000_00))
+
+    assert assessment.capital_items == []
+    assert assessment.restrictions == []
+
+
+def test_a_genuine_service_line_still_reaches_the_withholding_rules():
+    """
+    The regression guard, and the reason this gate is stricter than products.is_opaque.
+
+    Suppressing a real finding is a false negative on money actually owed to TRA, which
+    is worse than the false positive being fixed above.
+    """
+    assessment = assess(build_receipt(items=[('CONSULTANCY SERVICES - MARCH', 118_00, 'A')]))
+
+    assert [line['wht_class'] for line in assessment.wht_lines] == ['professional_fees']
+    assert status_of(assessment, 'wht') == compliance.WARN
+
+
+def test_a_narration_line_does_not_suppress_the_real_line_beside_it():
+    """Lines are judged one at a time; one opaque line does not silence the receipt."""
+    assessment = assess(build_receipt(items=[
+        (TTCL_NARRATION, 55_000_00, None),
+        ('SECURITY SERVICE MARCH', 118_00, 'A'),
+    ]))
+
+    assert [line['line_number'] for line in assessment.wht_lines] == [2]
+
+
+# --- Where the model's prose contradicts the receipt's figures --------------
+
+def test_claiming_input_vat_on_a_receipt_with_no_tax_is_reported():
+    """
+    The analysis said 18% VAT applied and roughly 8,474 TZS was claimable. The receipt
+    records no tax at all, and the card above the analysis read 0.00.
+    """
+    receipt = _record([(TTCL_NARRATION, 55_000_00, None)])
+    analysis = ('The expense is a business cost and is generally deductible. It is subject '
+                'to 18% VAT; the VAT component (approx. 8,474 TZS) can be claimed as input tax.')
+
+    conflicts = compliance.narrative_conflicts(receipt, analysis)
+
+    assert len(conflicts) == 1
+    assert 'No tax is recorded on this receipt' in conflicts[0]
+
+
+def test_claiming_input_vat_on_a_receipt_that_charged_it_is_not_reported():
+    receipt = build_receipt()
+    analysis = 'Standard-rated at 18%. The input VAT of 18.00 is recoverable.'
+
+    assert compliance.narrative_conflicts(receipt, analysis) == []
+
+
+def test_claiming_input_vat_from_a_supplier_with_no_vrn_is_reported():
+    """Tax charged by somebody not registered for it is not input tax."""
+    receipt = build_receipt(vrn=None)
+    analysis = 'The input VAT of 18.00 can be reclaimed.'
+
+    conflicts = compliance.narrative_conflicts(receipt, analysis)
+
+    assert len(conflicts) == 1
+    assert 'no VRN' in conflicts[0]
+
+
+def test_an_analysis_that_claims_nothing_is_left_alone():
+    receipt = _record([(TTCL_NARRATION, 55_000_00, None)])
+
+    assert compliance.narrative_conflicts(receipt, 'A deductible business cost.') == []
+    assert compliance.narrative_conflicts(receipt, None) == []
+    assert compliance.narrative_conflicts(receipt, 'No input VAT is recoverable here.') == []
+
+
+def test_an_analysis_that_declines_the_claim_is_not_reported():
+    """
+    Word for word what the model wrote about the other copy of the same SMS.
+
+    It is the correct answer, and it uses every word the rule looks for. A guard that
+    cannot read the negation reports the model for getting it right.
+    """
+    receipt = _record([(TTCL_NARRATION, 55_000_00, None)])
+    analysis = ('The expense is generally deductible as a business communication cost. '
+                'Since no VAT registration number or VAT breakdown is provided, input VAT '
+                'cannot be claimed. Payments to telecom operators may be subject to a 10% '
+                'withholding tax unless a specific exemption applies.')
+
+    assert compliance.narrative_conflicts(receipt, analysis) == []
+
+
 # --- Shape ------------------------------------------------------------------
 
 def test_assessment_serialises_to_json_safe_values():

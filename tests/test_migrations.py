@@ -128,6 +128,34 @@ def test_migration_adds_the_new_schema(legacy_database):
             'activated_at', 'created_at'} <= main._table_columns('device')
 
 
+def test_migration_adds_the_record_scan_column_and_the_reference_table(legacy_database):
+    """
+    A column arrives by ALTER TABLE, a whole table by create_all, and the two are not
+    the same mechanism.
+
+    create_all builds a missing table together with the indexes declared on its model,
+    on a legacy database as readily as on an empty one, so ReceiptReference needs no
+    entry in PENDING_COLUMNS or PENDING_INDEXES. `record_scan` is a column on a table
+    that already exists, which create_all will not touch, so it does need one.
+    """
+    import main
+    from models.user import ReceiptReference
+
+    db.create_all()
+    main.apply_pending_migrations()
+
+    assert 'record_scan' in main._table_columns('submission')
+    assert {'kind', 'value', 'normalised', 'label', 'source'} <= \
+        main._table_columns('receipt_reference')
+
+    # And it is usable, not merely present.
+    db.session.add(ReceiptReference(
+        receipt_id=1, kind='transaction_id', value='MP260717.1217.W74283',
+        normalised='MP2607171217W74283', label='TransID', source='parsed'))
+    db.session.commit()
+    assert db.session.get(Receipt, 1).references[0].is_identity is True
+
+
 def test_migration_gives_existing_devices_an_activation_link(legacy_database):
     """
     A device that predates enrolment has to be activatable without being recreated.

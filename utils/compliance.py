@@ -20,6 +20,7 @@ the badge and the list can never disagree.
 Nothing here decides anything on the taxpayer's behalf. A failed check is a prompt
 to look, and the wording says which rule prompted it.
 """
+import re
 from dataclasses import dataclass, field
 from datetime import date, time
 from decimal import Decimal, ROUND_HALF_UP
@@ -28,6 +29,7 @@ from utils.classify import (
     CAPITAL_THRESHOLD_CENTS, WHT_MONTHLY_THRESHOLD_CENTS,
     categorise_receipt, deductibility_flags, is_capital_item, wht_class,
 )
+from utils.records import is_payment_narration
 
 # Check outcomes. 'na' means the check does not apply to this receipt and is left out
 # of the score entirely; 'info' is something worth showing that is not a judgment.
@@ -664,11 +666,26 @@ def _read_line_items(receipt, assessment, capital_threshold_cents):
     # the printed lines named nothing, and a line that names nothing matches none of the
     # keywords that put an amount into a finding.
     items = getattr(receipt, 'items', None) or []
-    assessment.computed_category = categorise_receipt(item.description for item in items)
+
+    # Every rule below reads a description through a keyword list, and those lists were
+    # written for the words printed on a receipt. On a record that never was a receipt the
+    # description is often the payment sentence itself, and then the keywords match the
+    # payee's trading name rather than anything anybody bought:
+    #
+    #     'Payment to KELSIA BUSINESS CONSULTANCY LIMITED - 994944252324 - TANZANIA
+    #      TELECOMMUNICATION CORPORATION'
+    #
+    # contains 'consultancy', so the withholding rule offered 2,750 TZS to withhold on a
+    # telephone bill. Nobody bought consultancy; a company with the word in its name was
+    # paid for internet. utils.records.is_payment_narration is strict on purpose - a
+    # suppressed finding on a genuine cleaning contract would be a false negative on real
+    # money, which is worse than the false positive it is fixing.
+    described = [item for item in items if not is_payment_narration(item.description)]
+    assessment.computed_category = categorise_receipt(item.description for item in described)
 
     excl_ratio = _exclusive_ratio(receipt)
 
-    for item in items:
+    for item in described:
         description = item.description or ''
         amount = item.amount_cents or 0
 
@@ -735,6 +752,70 @@ def _read_line_items(receipt, assessment, capital_threshold_cents):
             'restricted', 'Restricted expenditure', WARN,
             f'Contains {", ".join(flags)}, which the Income Tax Act restricts or disallows.',
         ))
+
+
+# The claim the model makes when it has computed a tax figure rather than read one: some
+# form of 'input VAT' within reach of a word about getting it back.
+_INPUT_TAX = re.compile(r'input\s+(?:vat|tax)', re.I)
+_CLAIM_VERB = re.compile(r'\b(?:recover|reclaim|claim|deduct)\w*', re.I)
+
+# The same words appear when the model gets it right, so the negation has to be read or
+# every correct analysis is reported as a conflict. 'Since no VAT registration number is
+# provided, input VAT cannot be claimed' is the model doing exactly what it should.
+_NEGATION = re.compile(
+    r"\b(?:no|not|cannot|can't|cant|never|nothing|without|neither|unable|"
+    r"irrecoverable|non-?recoverable|disallow\w*|ineligible)\b", re.I)
+
+# How far either side of 'input VAT' the rest of the claim is looked for. Wide enough for
+# a clause, narrow enough that the next sentence's words are not read into this one.
+_CLAIM_REACH = (40, 80)
+
+
+def _claims_input_tax(analysis):
+    """
+    Whether the prose says input VAT can be had back, rather than that it cannot.
+
+    Read as a window around each mention of input VAT rather than as one pattern, because
+    the two halves of the claim appear in either order - 'the input VAT is recoverable',
+    'you can claim the input tax' - and because the negation that reverses the whole
+    sentence can sit on either side of it.
+    """
+    before, after = _CLAIM_REACH
+    for match in _INPUT_TAX.finditer(analysis):
+        window = analysis[max(0, match.start() - before):match.end() + after]
+        if _CLAIM_VERB.search(window) and not _NEGATION.search(window):
+            return True
+    return False
+
+
+def narrative_conflicts(receipt, analysis):
+    """
+    Where the model's prose contradicts the receipt's own figures.
+
+    One rule, deliberately. A receipt recording no tax at all carried an analysis saying
+    that 18% VAT applied and roughly 8,474 TZS of it could be claimed as input tax - sat
+    directly beneath a card reading 'Input VAT recoverable 0.00'. The figure was computed
+    from the total rather than read off the record, and there was no tax invoice behind it
+    to claim against.
+
+    The prompt is the real fix; this is the backstop, and it stays one rule on purpose. A
+    general reconciler of prose against figures would need to understand the prose, and
+    would spend its life reporting disagreements that are not disagreements. This one is
+    checkable: either tax is recorded on the receipt or it is not.
+
+    Returns a list of sentences to show beside the analysis, empty when nothing conflicts.
+    """
+    if not analysis or not _claims_input_tax(analysis):
+        return []
+
+    if getattr(receipt, 'total_tax_cents', None):
+        if (getattr(receipt, 'vrn', None) or '').strip():
+            return []
+        return ['The analysis says input VAT can be claimed. The supplier has no VRN on '
+                'this record, and tax charged without one is not input tax.']
+
+    return ['The analysis says input VAT can be claimed. No tax is recorded on this '
+            'receipt, so there is nothing to recover and no tax invoice to claim against.']
 
 
 def _score(checks, voided):

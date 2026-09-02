@@ -30,8 +30,12 @@ import re
 # from the item text alone. Imported rather than restated so the model can never
 # return a category the deterministic classifier has no bucket for.
 from utils.classify import EXPENSE_CATEGORIES
+# The reference kinds are the scanner's, for the same reason: the model is offered the
+# same set of kinds the deterministic reader types a value under, so the two cannot
+# disagree about what an account number is.
+from utils import images, records
+from utils.records import REFERENCE_KINDS
 # The portal address is built in one place for every caller - see reconstructed_receipt_url.
-from utils import images
 from utils.tra import build_receipt_url
 
 JUDGMENT_SYSTEM_PROMPT = """
@@ -201,6 +205,15 @@ the same chit photographed twice from being filed as two purchases. Transcribe i
 printed, and leave the field out where nothing was printed - an invented number
 identifies the wrong document, which is worse than identifying none.
 
+Some of these photographs are not of paper at all. A screenshot of an SMS - a LUKU
+token, a mobile money confirmation, a bank alert, a bill payment - is a written record of
+a purchase that no receipt was ever issued for, and it is a great many of what arrives
+here. When that is what you are looking at, transcribe the message itself, verbatim and
+in full, into `record_text`, and read it the way that record asks to be read: the vendor
+is the party the money went TO, the account holder whose bill was paid is the CUSTOMER
+and belongs in `customer_name`, and a balance left in the wallet afterwards is not the
+amount of the purchase.
+
 The photograph sometimes arrives with a note from the person who took it. Treat it the
 way you would treat them standing beside you: it says what the paper cannot - which
 vehicle the diesel went into, whose lunch it was, what the job was for - and it is
@@ -231,21 +244,48 @@ brief tax analysis. Transcribe only what is written: leave a field out rather th
 guessing at it, and never round or reconstruct an amount. Amounts are in TZS unless
 the text names another currency.
 
+Who is who. These records name several parties and only one of them is the supplier,
+so read the roles before you read anything else:
+
+  * The vendor is the party the money went TO - TANESCO for a LUKU token, DAWASA for
+    water, the biller, the merchant named in a mobile money confirmation. On a bill
+    payment it is usually the last organisation named. The sender ID of an SMS is often
+    the best name available; use it rather than leaving the vendor blank.
+  * The account holder or subscriber whose bill was paid is the CUSTOMER, and is very
+    often the business submitting this record. Put that name in `customer_name`. A bill
+    payment reading 'paid 55,000 for ACME LIMITED - 994944252324 - TANZANIA
+    TELECOMMUNICATION CORPORATION' is a purchase from the telecommunication corporation
+    by ACME, against account 994944252324 - not a purchase from ACME, and not a purchase
+    from all three of those written out as one name.
+  * Never put the whole dash-separated string in `vendor_name`. It is three fields.
+
 Reading notes for the formats this sees most:
 
-  * The vendor is whoever was paid - TANESCO for a LUKU token, DAWASA for water, the
-    merchant named in a mobile money confirmation. The sender ID of an SMS is often the
-    best name available; use it rather than leaving the vendor blank.
   * A LUKU token, a mobile money transaction ID, a bank reference or a control number
-    is the identifier for this payment. Put it in `receipt_number`.
+    is the identifier for this payment. Put it in `receipt_number`, and put every
+    identifier the record carries in `references` with the kind each one is.
+  * An account number, a meter number, a till number and a phone number are not
+    identifiers of this payment. They belong to the customer and repeat on every payment
+    they ever make, so they go in `references` under their own kind and never in
+    `receipt_number`.
   * Do not put any of those in `receipt_verification_code`. That field means one thing
     only: the code TRA prints beside the QR square on an EFD receipt. A transaction
     reference is not one, and offering it as one sends us to look up a receipt that
     does not exist.
   * If the text is a pasted TRA verification code and time - and only then - transcribe
     them into `receipt_verification_code` and `receipt_time` exactly as written.
+  * A balance - 'New Balance', 'Salio jipya', 'Available balance' - is what was left in
+    the wallet or the account afterwards. It is never the amount, never a total, never
+    an item, and never a figure on this document at all.
   * Units bought (kWh on a LUKU token), the meter or account number, and any service
     charge or VAT line are worth recording as items.
+  * Describe the purchase in the words the record uses. Do not turn a payment sentence
+    into a description of goods it never mentioned: writing 'payment for telecom
+    services' where the record says only that a bill was paid asserts something nobody
+    wrote down.
+  * Do not compute tax. These records almost never state any. If no tax figure is
+    printed, leave `vat_amount` out, and do not say in the analysis that input VAT can
+    be claimed - there is no tax invoice behind a record like this to claim against.
 
 `document_type` is almost always 'other_receipt' here: a real proof of purchase, just
 not an EFD receipt. Use 'tra_efd_receipt' only if the text is a transcription of one,
@@ -300,11 +340,41 @@ VISION_TOOLS = [
                     },
                     "receipt_number": {
                         "type": "string",
-                        "description": "The number this document was issued under - the receipt "
-                                       "number on an EFD, the number written in a receipt book, an "
-                                       "invoice number, or the transaction reference of a payment "
-                                       "(a LUKU token, a mobile money id, a control number). "
-                                       "Transcribe it exactly and omit it if none is printed.",
+                        "description": "The number identifying THIS document or THIS payment - the "
+                                       "receipt number on an EFD, the number written in a receipt "
+                                       "book, an invoice number, or a payment's own reference (a "
+                                       "mobile money transaction id, a LUKU token, a control "
+                                       "number). Never an account, meter, till or phone number: "
+                                       "those identify the customer and repeat on every payment "
+                                       "they make, and putting one here files each of those "
+                                       "payments as a copy of this one. Transcribe it exactly and "
+                                       "omit it if none is printed.",
+                    },
+                    "references": {
+                        "type": "array",
+                        "description": "Every identifier the document carries, each under the kind "
+                                       "it actually is. A record often has several - a transaction "
+                                       "id and the account it was paid against, a meter number and "
+                                       "the token bought for it - and they are not "
+                                       "interchangeable.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": list(REFERENCE_KINDS)},
+                                "value": {"type": "string", "description": "Exactly as printed."},
+                                "label": {"type": "string",
+                                          "description": "The word printed beside it, if any: "
+                                                         "'TransID', 'Meter', 'Control No'."},
+                            },
+                            "required": ["kind", "value"],
+                        },
+                    },
+                    "record_text": {
+                        "type": "string",
+                        "description": "When the photograph is of a screen rather than of paper - a "
+                                       "screenshot of an SMS or a payment confirmation - the "
+                                       "message text, verbatim and in full. Omit it for a "
+                                       "photograph of a printed or written document.",
                     },
                     "z_number": {"type": "string"},
                     "efd_serial": {"type": "string", "description": "The EFD machine serial number, if printed."},
@@ -327,7 +397,13 @@ VISION_TOOLS = [
                                        "proforma invoice, a foreign till slip; 'not_a_receipt' if the "
                                        "photograph is not a purchase document at all.",
                     },
-                    "customer_name": {"type": "string"},
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Who the purchase was made by, where the document names "
+                                       "them. On a bill payment this is the account holder or "
+                                       "subscriber whose bill was paid - usually the business "
+                                       "submitting this record, and never the supplier.",
+                    },
                     "customer_id_type": {"type": "string"},
                     "customer_id": {"type": "string"},
                     "items": {
@@ -1214,6 +1290,33 @@ def _note_block(user_note):
     )
 
 
+def _reconciled(data, record_scan):
+    """
+    The model's answer corrected against the record, with a report of what changed.
+
+    The report rides back on the answer under a private key rather than as a second return
+    value, so that the three callers of extract_receipt_details and every test that stubs
+    it keep working unchanged. main._store_llm_draft pops it off.
+
+    `llm_before` keeps the fields the scanner overruled, exactly as the model gave them.
+    It is the only record of what would have been stored, and it is what lets a reader
+    decide the app got it wrong.
+    """
+    corrected, adjustments = records.reconcile(data, record_scan)
+    if not adjustments:
+        corrected['_record_scan'] = {'scan': record_scan.as_dict(), 'adjustments': []}
+        return corrected
+
+    print(f"[Record] The scanner overruled the model on {len(adjustments)} field(s): "
+          + ', '.join(sorted({a['field'] for a in adjustments})))
+    corrected['_record_scan'] = {
+        'scan': record_scan.as_dict(),
+        'adjustments': adjustments,
+        'llm_before': {a['field']: a['from'] for a in adjustments},
+    }
+    return corrected
+
+
 def extract_receipt_details(content, is_image, config, user_note=None, catalogue=None):
     """
     Reads a receipt the only way left: by having a model transcribe it.
@@ -1239,6 +1342,7 @@ def extract_receipt_details(content, is_image, config, user_note=None, catalogue
         raise ValueError("LLM API key is not configured.")
 
     note = _note_block(user_note) + _catalogue_block(catalogue)
+    record_scan = None
     if is_image:
         messages = [
             {"role": "system", "content": VISION_SYSTEM_PROMPT},
@@ -1258,24 +1362,41 @@ def extract_receipt_details(content, is_image, config, user_note=None, catalogue
         if not record:
             raise ValueError("There is no text to read.")
         record = record[:TEXT_RECORD_MAX_CHARS]
+        # Read before the model is asked, so the model is given the facts rather than
+        # asked to derive them. See utils/records: an amount, a timestamp, the identifiers
+        # and which party is which are all read the same way twice, and the model is left
+        # the question only it can answer.
+        record_scan = records.scan(record)
         messages = [
             {"role": "system", "content": TEXT_RECORD_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": ("Record this purchase and provide a tax analysis. The text is "
-                            f"reproduced exactly as it was received:\n\n{record}{note}"),
+                            f"reproduced exactly as it was received:\n\n{record}"
+                            f"{records.anchor_block(record_scan)}{note}"),
             },
         ]
         kind = 'text'
         print(f"[LLM] Reading a written purchase record ({len(record)} chars"
-              f"{', with a note' if note else ''})...")
+              f"{', with a note' if note else ''}"
+              f"{', scanned as ' + record_scan.template if record_scan.template else ''})...")
 
     extracted_data = _call_with_fallback(
         get_llm_client(config), config, kind, messages,
         tools=VISION_TOOLS, expected_name='save_extracted_receipt_data',
     )
     print(f"[LLM] Successfully parsed arguments: {json.dumps(extracted_data, indent=2)}")
-    return extracted_data
+
+    # A photograph of a screen is a written record that happened to arrive as pixels. Once
+    # the model has transcribed the message, the same reading applies to it - the checks
+    # then ask the model to agree with its own transcription, which still catches a
+    # balance stored as the total and a reference that is in neither.
+    if record_scan is None and (extracted_data.get('record_text') or '').strip():
+        record_scan = records.scan(extracted_data['record_text'], trust='transcribed')
+
+    if record_scan is None:
+        return extracted_data
+    return _reconciled(extracted_data, record_scan)
 
 
 def reconstructed_receipt_url(data):

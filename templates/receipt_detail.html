@@ -504,6 +504,35 @@
                     <p class="mt-2 text-xs text-gray-400">{{ ns.withheld|join(', ') }} {{ 'is' if ns.withheld|length == 1 else 'are' }} on this receipt and shown at {{ 'Everything' if detail_rank >= 2 else 'Standard' }} detail.</p>
                     {% endif %}
 
+                    {# Every identifier the record carried, under the kind it actually is.
+                       Kept out of the grid above because the arity varies - a LUKU purchase
+                       has a meter and a token, a bill payment a transaction id and an
+                       account - and because the distinction that matters is not which
+                       number it is but whether it names this payment or the customer. The
+                       one that names the payment is the receipt number above; the rest
+                       repeat on everything that customer ever buys. #}
+                    {% if receipt.references %}
+                    <div class="mt-4 border-t border-gray-100 pt-3">
+                        <p class="text-xs font-medium uppercase tracking-wide text-gray-500">References</p>
+                        <dl class="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+                            {% for reference in receipt.references %}
+                            <div class="flex items-baseline justify-between gap-x-4 py-0.5">
+                                <dt class="text-xs text-gray-500">
+                                    {{ reference.label_text }}
+                                    {% if not reference.is_identity %}
+                                    <span class="text-gray-400" title="Identifies the customer, not this payment. It repeats on every payment they make.">·&nbsp;the customer's</span>
+                                    {% endif %}
+                                </dt>
+                                <dd class="text-right font-mono text-xs text-gray-900">{{ reference.value }}</dd>
+                            </div>
+                            {% endfor %}
+                        </dl>
+                        {% if detail_rank >= 2 %}
+                        <p class="mt-1 text-xs text-gray-400">Read out of the record by the scanner, not judged. The kind of each one is the word printed beside it.</p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
                     {% if receipt.printed_items %}
                     <table class="mt-6 w-full text-sm">
                         <thead>
@@ -765,6 +794,15 @@
                        :class="categoryFailed ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-900'"
                        x-text="categoryMessage"></p>
                     <p class="text-sm text-gray-900">{{ llm_analysis or 'No analysis recorded.' }}</p>
+                    {# Where the prose contradicts the figures printed above it. The
+                       analysis is left exactly as written - it is the model's judgment and
+                       editing it would hide that it said this - and the disagreement is put
+                       beside it, because a reader following the paragraph's advice would
+                       otherwise be claiming tax nobody charged. See
+                       utils.compliance.narrative_conflicts. #}
+                    {% for conflict in analysis_conflicts %}
+                    <p class="mt-3 rounded bg-amber-50 p-3 text-sm text-amber-900">{{ conflict }}</p>
+                    {% endfor %}
                     <p x-show="freshAnalysis" class="mt-3 rounded bg-green-50 p-3 text-sm text-green-900" x-text="freshAnalysis"></p>
                 </div>
             </div>
@@ -842,6 +880,28 @@
                         <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ submission.input_data }}</pre>
                     </div>
                     {% endif %}
+                    {# What the scanner read straight out of that text, and where it
+                       disagreed with the model. Named here rather than buried in the
+                       provenance panel because it is the one thing on this page that
+                       changed a figure: a reader who cannot see that the vendor was
+                       replaced has been handed a correction and told it was a reading. #}
+                    {% if record_report and record_report.adjustments %}
+                    <div>
+                        <p class="mb-2 text-gray-500">What the scanner corrected</p>
+                        <ul class="space-y-1.5 rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                            {% for adjustment in record_report.adjustments %}
+                            <li>
+                                <span class="font-medium text-gray-900">{{ adjustment.field|replace('_', ' ') }}</span>
+                                &mdash; {{ adjustment.why }}.
+                                {% if adjustment['from'] and adjustment['from'] != adjustment['to'] %}
+                                <span class="text-gray-500">The model had read
+                                    <span class="font-mono">{{ adjustment['from'] }}</span>.</span>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
                     {% if photo_url %}
                     <div>
                         <p class="mb-2 text-gray-500">Photograph</p>
@@ -907,6 +967,15 @@
                                     receipt.corrected_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if receipt.corrected_at else '') }}
                         {{ fact_row('Category set by hand',
                                     receipt.category_corrected_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if receipt.category_corrected_at else None) }}
+                        {% if record_report and record_report.scan %}
+                        {{ fact_row('Read deterministically',
+                                    (record_report.scan.template or 'no known format').replace('_', ' ')
+                                    ~ ' (' ~ record_report.scan.trust ~ ')',
+                                    'which message format the scanner recognised before the model was asked') }}
+                        {{ fact_row('Overruled the model',
+                                    (record_report.adjustments|length ~ ' field(s)') if record_report.adjustments else None,
+                                    'fields the record settled differently from the model') }}
+                        {% endif %}
                     </dl>
 
                     {#
@@ -930,6 +999,17 @@
                         </button>
                         <pre x-show="open" x-cloak x-collapse
                              class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ raw_judgment }}</pre>
+                    </div>
+                    {% endif %}
+
+                    {% if record_scan_json %}
+                    <div class="mt-5" x-data="{ open: false }">
+                        <button type="button" @click="open = !open"
+                                class="text-sm font-semibold text-indigo-600 hover:text-indigo-500">
+                            <span x-text="open ? 'Hide' : 'Show'">Show</span> what the scanner read out of the record
+                        </button>
+                        <pre x-show="open" x-cloak x-collapse
+                             class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ record_scan_json }}</pre>
                     </div>
                     {% endif %}
                 </div>

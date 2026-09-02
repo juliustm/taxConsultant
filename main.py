@@ -8,10 +8,14 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 
 from config import Config
 from models.user import (
-    db, InstanceConfig, Device, Product, Receipt, ReceiptItem, ReceiptTaxLine,
-    Submission, Vendor, RECEIPT_DETAIL_LEVELS, DEFAULT_RECEIPT_DETAIL, receipt_detail_rank,
+    db, InstanceConfig, Device, Product, Receipt, ReceiptItem, ReceiptReference,
+    ReceiptTaxLine, Submission, Vendor, RECEIPT_DETAIL_LEVELS, DEFAULT_RECEIPT_DETAIL,
+    receipt_detail_rank,
 )
-from utils import analytics, branding, classify, compliance, fingerprint, geo, peek, products, qr
+from utils import (
+    analytics, branding, classify, compliance, fingerprint, geo, peek, products, qr, records,
+)
+from utils.records import REFERENCE_KINDS
 from utils.images import store_photo
 from utils.device_auth import (
     consume_enrolment_token, device_required, end_session, issue_enrolment_token,
@@ -101,6 +105,7 @@ PENDING_COLUMNS = {
         ('rebuild_declined', 'BOOLEAN NOT NULL DEFAULT 0'),
         ('user_note', 'TEXT'),
         ('content_hash', 'VARCHAR(80)'),
+        ('record_scan', 'TEXT'),
     ),
     'device': (
         ('created_at', 'DATETIME'),
@@ -453,7 +458,13 @@ CORRECTABLE_FIELDS = (
      'The six digits after the code in the TRA address.'),
     ('receipt_verification_code', 'Verification code', 'text',
      "The receipt's identity, and what a second submission of it is caught on."),
-    ('receipt_number', 'Receipt no.', 'text', None),
+    ('customer_name', 'Customer', 'text',
+     'Who the purchase was for. On a bill payment this is usually you - the account '
+     'holder - and not the supplier.'),
+    ('receipt_number', 'Receipt no.', 'text',
+     "This payment's own reference. A second copy of the record is caught on it, so an "
+     'account or meter number here would file every later payment on that account as a '
+     'duplicate of this one.'),
     ('total_incl_tax_cents', 'Total incl. tax', 'money', None),
     ('total_excl_tax_cents', 'Total excl. tax', 'money', None),
     ('total_tax_cents', 'Tax', 'money',
@@ -560,6 +571,17 @@ def receipt_to_dict(receipt, config=None, detailed=True):
             }
             for item in receipt.items
         ],
+        # Every identifier the record carried, each under the kind it actually is. A
+        # payment record routinely has several - a transaction id and the account it was
+        # paid against - and only one of them may ever be treated as its identity.
+        "references": [
+            {
+                "kind": reference.kind, "value": reference.value,
+                "label": reference.label, "source": reference.source,
+                "is_identity": reference.is_identity,
+            }
+            for reference in receipt.references
+        ],
         "tax_lines": [
             {
                 "code": line.code,
@@ -570,6 +592,11 @@ def receipt_to_dict(receipt, config=None, detailed=True):
         ],
         "llm_extracted_description": judgment.get('llm_extracted_description'),
         "llm_tax_analysis": judgment.get('llm_tax_analysis'),
+        # Where the model's prose contradicts the figures above it. See
+        # utils.compliance.narrative_conflicts - normally empty, and never a correction:
+        # the analysis is left exactly as written and the disagreement is shown beside it.
+        "analysis_conflicts": compliance.narrative_conflicts(
+            receipt, judgment.get('llm_tax_analysis')),
         "raw_llm_response": judgment,
         # The deterministic verdict: what is claimable, what is wrong with the receipt
         # and how long is left to act on it. See utils/compliance.
@@ -1537,13 +1564,40 @@ def _store_llm_draft(submission, data):
     and the reading is worth having either way. A draft that cannot be serialised is
     simply not stored - this is a convenience for the admin page, never a reason to
     fail a receipt that is otherwise fine.
+
+    The scanner's report rides in on the same dict and is split off here rather than by
+    each caller, so that every path that stores a draft - the queue, a re-read - stores
+    the two together and neither can be written without the other. What lands in
+    `llm_draft` is therefore the corrected answer, which is what the admin's one-click
+    accept builds a receipt from; what the model originally said is kept beside it in
+    `record_scan`, under `llm_before`.
     """
+    data = dict(data or {})
+    scan_report = data.pop('_record_scan', None)
     try:
         submission.llm_draft = json.dumps(data)
+        submission.record_scan = json.dumps(scan_report) if scan_report else None
         db.session.commit()
     except (TypeError, ValueError) as e:
         db.session.rollback()
         print(f'[Photo] Could not store the transcription for submission {submission.id}: {e}')
+
+
+def _stored_record_scan(submission):
+    """
+    The scanner's report for this submission, or {} where there is none.
+
+    Tolerant of junk for the same reason _stored_llm_draft is: a report that cannot be
+    read back is a missing convenience, never a reason to refuse the receipt it belongs to.
+    """
+    raw = getattr(submission, 'record_scan', None)
+    if not raw:
+        return {}
+    try:
+        report = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return report if isinstance(report, dict) else {}
 
 
 def _sender_note(submission):
@@ -1792,6 +1846,66 @@ def _identity_of_transcription(data):
     )
 
 
+def _attach_references(receipt, submission, data):
+    """
+    Every identifier the record carried, each under the kind it actually is.
+
+    Two sources, in order of what they are worth. The scanner's report is read off the
+    submission rather than out of the transcription, so that the admin accepting a stored
+    draft (accept_submission_extraction) gets the same references the queue would have
+    written - the draft is the model's answer and has never carried the scan. The model's
+    own list is taken second and only where the value is genuinely in the record, which is
+    the same containment test rule R5 applies to receipt_number and for the same reason.
+
+    Silent about duplicates: the same identifier read twice, once by each reader, is one
+    identifier, and the unique constraint on (receipt, kind, normalised) is the rule.
+    """
+    scanned = (_stored_record_scan(submission).get('scan') or {}).get('references') or []
+    text = _record_text_of(submission, data)
+    # Scanned once, not once per reference: the containment test below only needs the
+    # record's characters, and re-reading them for each candidate is the same answer
+    # computed again.
+    record = records.scan(text) if text else None
+    seen = set()
+
+    def _add(kind, value, label, source):
+        normalised = fingerprint.normalise_reference(value)
+        if not kind or not normalised or (kind, normalised) in seen:
+            return
+        seen.add((kind, normalised))
+        receipt.references.append(ReceiptReference(
+            kind=kind, value=str(value).strip()[:120], normalised=normalised[:120],
+            label=(label or None), source=source))
+
+    for reference in scanned:
+        if isinstance(reference, dict):
+            _add(reference.get('kind'), reference.get('value'), reference.get('label'), 'parsed')
+
+    for reference in data.get('references') or []:
+        if not isinstance(reference, dict):
+            continue
+        kind, value = reference.get('kind'), reference.get('value')
+        if kind not in REFERENCE_KINDS or not value:
+            continue
+        # A reference nobody can find in the record is one the model produced rather than
+        # read. Kept out, exactly as R5 keeps it out of receipt_number.
+        if record is not None and not record.contains_reference(value):
+            continue
+        _add(kind, value, reference.get('label'), 'llm')
+
+
+def _record_text_of(submission, data):
+    """
+    The written record behind this receipt, whether it was pasted or photographed.
+
+    A screenshot of an SMS is the same evidence as the paste of it, so the model's
+    transcription stands in for the characters where there were none to begin with.
+    """
+    if submission is not None and submission.input_type == 'text':
+        return submission.input_data or ''
+    return (data.get('record_text') or '').strip()
+
+
 def _receipt_from_transcription(submission, data, config, source='llm_vision',
                                 default_document_type='tra_efd_receipt'):
     """
@@ -1876,6 +1990,8 @@ def _receipt_from_transcription(submission, data, config, source='llm_vision',
             quantity=to_decimal(item.get('quantity')),
             amount_cents=to_cents(item.get('amount')), tax_code=item.get('tax_code'),
         ))
+
+    _attach_references(receipt, submission, data)
 
     # Only if nothing better is already there: a code recovered from the QR came off the
     # machine-readable part of the paper, and a transcription of the same characters is
@@ -2716,6 +2832,7 @@ def receipt_detail(receipt_id):
     # so a single receipt gets the same visual its aggregate view already has.
     position = geo.parse_location(receipt.submission.location) if receipt.submission else None
     scan = _stored_qr_scan(receipt.submission)
+    record_report = _stored_record_scan(receipt.submission) or None
     return render_template(
         'receipt_detail.html',
         receipt=receipt,
@@ -2754,6 +2871,18 @@ def receipt_detail(receipt_id):
         # JSON it was, not summarised: the point of showing it at all is that it is what
         # the model actually said, next to what the page made of it.
         raw_judgment=json.dumps(judgment, indent=2, sort_keys=True) if judgment else None,
+        # What the deterministic scanner read out of the record, and which of the model's
+        # answers it overruled. Shown for the same reason the QR report is: a reader told
+        # that the vendor was replaced is owed the evidence, and the evidence is the words
+        # the name came out of. See utils/records.
+        record_report=record_report,
+        record_scan_json=(json.dumps(record_report, indent=2, sort_keys=True)
+                          if record_report else None),
+        # Where the analysis contradicts the figures printed above it. Never a correction
+        # to the prose - the model's judgment is left as written and the disagreement is
+        # put beside it. See utils.compliance.narrative_conflicts.
+        analysis_conflicts=compliance.narrative_conflicts(
+            receipt, judgment.get('llm_tax_analysis')),
         # How dense a page to draw. See DETAIL_LEVEL_OPTIONS.
         **_detail_context(config),
     )

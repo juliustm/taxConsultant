@@ -96,6 +96,25 @@ def test_a_payment_line_is_recognised_as_describing_nothing():
     assert not products.is_opaque('MAYAI TREI')
 
 
+def test_opacity_is_broad_once_a_payment_word_appears():
+    """
+    Pinning the breadth, because it is easy to mistake for a bug and it is load-bearing.
+
+    A payment word makes every other plain word on the line read as part of the payee's
+    name. That is what 'LIPA JACLINE NGILISHO MOLLEL' needs, and it is why a line that
+    does name goods can still come back True. Erring this way costs a line that might
+    have been usable and gains the sender's own note, which is the better description.
+
+    It is also why utils/compliance does not use this test. Deciding withholding tax off
+    a description needs the strict one - see utils.records.is_payment_narration, and
+    tests/test_records.py for the case that separates them.
+    """
+    assert products.is_opaque('LIPA - MAYAI')
+    assert products.is_opaque('Payment for cleaning services')
+    # With no payment word at all, the line is left alone whatever else is on it.
+    assert not products.is_opaque('Cleaning services')
+
+
 def test_a_note_listing_two_things_is_two_entries():
     assert products.parse_note('Mayai x 6, mkate 2') == [('Mayai', 6.0, None), ('mkate', 2.0, None)]
 
