@@ -10,6 +10,32 @@ from utils import products as product_text
 
 db = SQLAlchemy()
 
+# How much of a receipt's page to put in front of the person reading it.
+#
+# Three densities rather than a row of switches, because what is being chosen is not a
+# set of panels - it is how much of the working the reader wants shown. Somebody filing
+# the week's receipts wants the money and whatever is wrong with it; somebody asked
+# about one receipt eighteen months later wants the provenance of every figure on it,
+# down to what the model actually answered. Both are looking at the same page.
+#
+# Ordered, and read by rank: compact is a subset of standard is a subset of full, so
+# every panel asks one question - is this instance reading at level N or higher - and
+# nothing has to enumerate the levels it belongs to.
+#
+# Nothing exists only at a higher level. Every control and every hover card is reachable
+# at compact too, on the page or one switch away; the level decides what is on screen
+# without being asked for, never what the page can do.
+RECEIPT_DETAIL_LEVELS = ('compact', 'standard', 'full')
+DEFAULT_RECEIPT_DETAIL = 'standard'
+
+
+def receipt_detail_rank(level):
+    """A detail level as its 1-based rank, so a template can compare it with >=."""
+    if level not in RECEIPT_DETAIL_LEVELS:
+        level = DEFAULT_RECEIPT_DETAIL
+    return RECEIPT_DETAIL_LEVELS.index(level) + 1
+
+
 class InstanceConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     admin_email = db.Column(db.String(120), unique=True, nullable=False)
@@ -32,6 +58,11 @@ class InstanceConfig(db.Model):
     business_name = db.Column(db.String(200), nullable=True)
     business_tin = db.Column(db.String(50), nullable=True)
     business_vrn = db.Column(db.String(50), nullable=True)
+
+    # How much of a receipt's page this instance wants on screen. One of
+    # RECEIPT_DETAIL_LEVELS; NULL means the default, which is what every instance that
+    # predates the setting has been reading all along. See receipt_detail() below.
+    receipt_detail_level = db.Column(db.String(20), nullable=True)
 
     # --- The front door: what a stranger sees at '/' ---
     # An instance's address gets shared - with a bookkeeper, in a WhatsApp group, on a
@@ -76,6 +107,21 @@ class InstanceConfig(db.Model):
 
     def is_configured(self):
         return all([self.llm_provider, self.llm_api_key])
+
+    def receipt_detail(self):
+        """
+        Which of the three densities the receipt page renders at.
+
+        Read through here rather than off the column, because a NULL and a value written
+        by a release that offered a fourth name have to mean the same thing: show what
+        this instance has always been shown.
+        """
+        level = (self.receipt_detail_level or '').strip().lower()
+        return level if level in RECEIPT_DETAIL_LEVELS else DEFAULT_RECEIPT_DETAIL
+
+    def receipt_detail_rank(self):
+        """The same answer as a rank, which is what the template actually compares."""
+        return receipt_detail_rank(self.receipt_detail())
 
     def rebuilds_urls_from_text(self):
         """Whether the photo pipeline may guess a portal address from transcribed text.
@@ -240,6 +286,16 @@ class Submission(db.Model):
     # different things done about them. NULL means the decoder was never run on this
     # submission: a URL submission, or a photo whose receipt was already identified.
     qr_scan = db.Column(db.Text, nullable=True)
+    # What the deterministic record scanner read out of the text, as the JSON report
+    # utils.records.RecordScan.as_dict returns - and beside it, the fields it overruled
+    # the model on and what the model had said.
+    #
+    # The same reasoning as qr_scan above: a reader that runs before the model and
+    # sometimes contradicts it has to leave its working where a person can see it.
+    # 'The vendor was replaced with the party paid' is a claim the app owes evidence for,
+    # and the evidence is the span the name came out of. NULL where nothing was scanned:
+    # a URL submission, or a photograph of paper rather than of a screen.
+    record_scan = db.Column(db.Text, nullable=True)
     # The scanner's idempotency key, minted on the phone before the receipt has ever
     # been near a network. A queued scan is retried until it is acknowledged, and
     # without this every dropped response would leave a duplicate behind.
@@ -855,6 +911,69 @@ class ReceiptItem(db.Model):
         if self.product is not None:
             return self.product.name
         return self.description
+
+class ReceiptReference(db.Model):
+    """
+    One identifier the document carried, under the kind it actually is.
+
+    A receipt used to have exactly one place to put a number: `receipt_number`. That is
+    enough for an EFD, which issues one. It is not enough for the records most spending
+    actually produces - a LUKU purchase carries a meter number and a token, a bill payment
+    carries a transaction id and the account it was paid against, and a bank alert carries
+    a reference and an account. Forced into one column they compete, and the one that wins
+    is whichever the model reached for first.
+
+    Which would be a cosmetic problem if `receipt_number` were only ever displayed. It is
+    not: utils/fingerprint builds a duplicate identity out of it, so an account number
+    stored there quietly files every later payment on that account as a copy of the first
+    one. Typing them is what makes that decidable rather than lucky - see
+    utils.records.IDENTIFYING.
+
+    `receipt_number` stays, and stays the one the identity is built from. This table is
+    additive: it records everything the document carried, including the numbers that must
+    never be the identity, and says which is which.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    receipt_id = db.Column(db.Integer, db.ForeignKey('receipt.id'), nullable=False, index=True)
+    receipt = db.relationship(
+        'Receipt',
+        backref=db.backref('references', lazy=True, cascade='all, delete-orphan',
+                           order_by='ReceiptReference.id'),
+    )
+    # One of utils.records.REFERENCE_KINDS: transaction_id, control_number, meter_no,
+    # account_no, token, merchant_no, and so on.
+    kind = db.Column(db.String(30), nullable=False, index=True)
+    # As printed, spacing and punctuation intact, because that is how a person reading
+    # the page will find it on their phone.
+    value = db.Column(db.String(120), nullable=False)
+    # The same value reduced to the characters that carry it, by the same rule the
+    # duplicate keys use (utils.fingerprint.normalise_reference). Indexed because 'which
+    # receipt carries this token' is the duplicate question, the peek question and the
+    # admin's search question, and none of them can be answered by scanning.
+    normalised = db.Column(db.String(120), nullable=False, index=True)
+    # The word printed beside it - 'TransID', 'Mita', 'Control No'. This is the evidence
+    # for `kind`, so it is kept rather than discarded once the kind is decided.
+    label = db.Column(db.String(60), nullable=True)
+    # 'parsed' - utils.records read it deterministically out of the text.
+    # 'llm'    - the model reported it, and it does appear in the record.
+    # 'human'  - somebody typed it.
+    source = db.Column(db.String(10), nullable=False, default='parsed')
+
+    __table_args__ = (
+        db.UniqueConstraint('receipt_id', 'kind', 'normalised', name='uq_receipt_reference'),
+    )
+
+    @property
+    def is_identity(self):
+        """Whether this kind of reference names one payment rather than one customer."""
+        from utils.records import IDENTIFYING
+        return self.kind in IDENTIFYING
+
+    @property
+    def label_text(self):
+        """The kind as a human reads it: 'transaction id', 'account no'."""
+        return (self.kind or '').replace('_', ' ')
+
 
 class ReceiptTaxLine(db.Model):
     """

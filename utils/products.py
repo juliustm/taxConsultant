@@ -179,8 +179,17 @@ def is_opaque(description):
     sender's note is not extra colour but the only description that exists, and so the
     only thing worth itemising the receipt from.
 
-    A line carrying any word that is not payment boilerplate, a number or a unit is not
-    opaque: 'LIPA - MAYAI' says what was bought and is left alone.
+    Deliberately broad. Once a line carries a payment word at all, every other plain word
+    on it is read as part of the payee's name - which is what 'LIPA JACLINE NGILISHO
+    MOLLEL' needs, and which also means 'LIPA - MAYAI' comes back True even though it
+    names the goods. Erring that way is right here: the cost is preferring the sender's
+    own note to a line that might have been usable, and the note is the better description
+    either way.
+
+    It is the wrong test for anything that must not over-reach - utils/compliance decides
+    real money off a description and uses utils.records.is_payment_narration, which is
+    strict for exactly that reason. A line with no payment word in it at all is never
+    opaque: 'MAYAI TREI' is left alone.
     """
     tokens = normalise_description(description).split()
     if not tokens:

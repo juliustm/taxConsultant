@@ -459,6 +459,93 @@ def test_a_cancelled_receipt_is_not_a_double_record(app, device):
 
 # --- Keys follow the receipt ------------------------------------------------
 
+# --- What the scanner does to the identity ----------------------------------
+#
+# The duplicate keys are only ever as good as what lands in receipt_number, and until the
+# record scanner existed that was whichever identifier the model reached for first. These
+# cover the consequence: the right one gets in, and the wrong one is kept out.
+
+TTCL_SMS = (
+    'You have paid 55000 TZS for  ATANA VENTURES – 994944252324 – TANZANIA '
+    'TELECOMMUNICATION CORPORATION. 17-07-2026 12:17:40. New Balance  44,202.04 . '
+    'TransID MP260717.1217.W74283.'
+)
+
+
+def test_an_account_number_never_becomes_the_identity(app, device, configured, monkeypatch):
+    """
+    Two bills on one account, a month apart, are two purchases.
+
+    The model put the subscriber's account number in `receipt_number` on both. Left
+    there, the account number plus the amount would be the identity of every bill ever
+    paid on that account - and where the bill is the same each month, which is what a
+    fixed-price internet subscription is, the second one would be refused as a copy of
+    the first.
+    """
+    import main
+    from utils import llm_processor
+
+    monkeypatch.setattr(llm_processor, 'get_llm_client', lambda config: object())
+    monkeypatch.setattr(llm_processor, '_call_with_fallback', lambda *a, **k: {
+        'vendor_name': 'TANZANIA TELECOMMUNICATION CORPORATION',
+        'receipt_date': '2026-07-17', 'receipt_number': '994944252324',
+        'total_amount': 55000, 'document_type': 'other_receipt',
+        'llm_extracted_description': 'Internet bill.', 'llm_tax_analysis': 'Deductible.',
+    })
+    monkeypatch.setattr(main, 'analyse_receipt', lambda *a, **k: {'category': 'telecom'})
+
+    august = (TTCL_SMS.replace('17-07-2026', '17-08-2026')
+              .replace('MP260717.1217.W74283', 'MP260817.1017.W88991'))
+    submissions = []
+    for text in (TTCL_SMS, august):
+        submission = Submission(device_id=device.id, input_type='text', input_data=text)
+        db.session.add(submission)
+        db.session.commit()
+        main.process_submission(submission)
+        submissions.append(submission)
+
+    assert [s.status for s in submissions] == ['completed', 'completed']
+    assert [r.receipt_number for r in Receipt.query.order_by(Receipt.id)] == [
+        'MP260717.1217.W74283', 'MP260817.1017.W88991']
+
+
+def test_one_payment_submitted_from_two_phones_is_one_receipt(
+        app, device, configured, monkeypatch):
+    """
+    The other side of the same coin, and the behaviour to expect on the two records that
+    prompted this work.
+
+    Both messages carry the same transaction id, the same amount and the same instant.
+    They are one payment confirmed twice, so the second is a duplicate - which it was not
+    before, because the identity was built out of an account number that told the two
+    apart only by accident.
+    """
+    import main
+    from utils import llm_processor
+
+    monkeypatch.setattr(llm_processor, 'get_llm_client', lambda config: object())
+    monkeypatch.setattr(llm_processor, '_call_with_fallback', lambda *a, **k: {
+        'vendor_name': 'TANZANIA TELECOMMUNICATION CORPORATION',
+        'receipt_date': '2026-07-17', 'receipt_number': '994944252324',
+        'total_amount': 55000, 'document_type': 'other_receipt',
+        'llm_extracted_description': 'Internet bill.', 'llm_tax_analysis': 'Deductible.',
+    })
+    monkeypatch.setattr(main, 'analyse_receipt', lambda *a, **k: {'category': 'telecom'})
+
+    # Not byte-identical, so the content hash cannot settle it - only the reference can.
+    second_text = TTCL_SMS.replace('ATANA VENTURES', 'KELSIA BUSINESS CONSULTANCY LIMITED')
+    outcomes = []
+    for text in (TTCL_SMS, second_text):
+        submission = Submission(device_id=device.id, input_type='text', input_data=text)
+        db.session.add(submission)
+        db.session.commit()
+        main.process_submission(submission)
+        outcomes.append(submission.status)
+
+    assert outcomes == ['completed', 'duplicate']
+    assert Receipt.query.count() == 1
+
+
 def test_a_corrected_total_is_what_the_receipt_is_matched_on(app, device):
     """
     The keys are derived, not recorded.
