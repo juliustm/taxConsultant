@@ -104,6 +104,43 @@
                         {{ text_field('business_vrn', config.business_vrn, 'Your VRN', 'Leave blank if not VAT-registered',
                                       span='sm:col-span-3', mono=true) }}
                     </div>
+
+                    {#
+                      How much of a receipt's page to draw.
+
+                      A setting rather than a preference hidden in a menu, because it is
+                      about who is reading: somebody filing the week wants the money and
+                      what is wrong with it, somebody answering a question about one
+                      receipt eighteen months later wants where every figure came from.
+                      Nothing is only available at a higher level - each one shows more
+                      of the same page, and the same three buttons sit on the receipt
+                      itself for the moment you notice you want a different one.
+                    #}
+                    <div class="mt-8 border-t border-gray-200 pt-6">
+                        <h3 class="text-base font-semibold leading-6 text-gray-900">Receipt pages</h3>
+                        <p class="mt-1 text-sm text-gray-500">
+                            How much of a receipt is on screen when you open one. Every control and
+                            every figure is reachable at all three &mdash; this decides what you are
+                            shown without asking.
+                        </p>
+                        <fieldset class="mt-4">
+                            <legend class="sr-only">Detail level</legend>
+                            <div class="space-y-3">
+                                {% for level in detail_levels %}
+                                <label class="flex cursor-pointer items-start gap-x-3 rounded-md border p-3
+                                              {{ 'border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600' if level.key == detail else 'border-gray-300 hover:bg-gray-50' }}">
+                                    <input type="radio" name="receipt_detail_level" value="{{ level.key }}"
+                                           {% if level.key == detail %}checked{% endif %}
+                                           class="mt-1 h-4 w-4 border-gray-300 text-indigo-600 focus:ring-indigo-600">
+                                    <span class="text-sm leading-6">
+                                        <span class="block font-medium text-gray-900">{{ level.label }}</span>
+                                        <span class="block text-gray-500">{{ level.summary }}</span>
+                                    </span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </fieldset>
+                    </div>
                 </div>
 
                 <div x-show="activeTab === 'ai-provider'" class="bg-white py-6 px-4 sm:p-6">

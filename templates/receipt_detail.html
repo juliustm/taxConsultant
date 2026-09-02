@@ -6,6 +6,20 @@
   Everything on this page is rendered by Jinja, which escapes as it goes - nothing
   here builds HTML out of stored text, and the model's narrative is printed as text
   like any other string.
+
+  The page reads at one of three densities (models.user.RECEIPT_DETAIL_LEVELS, chosen
+  in Settings -> Business or from the switcher in the header). `detail_rank` is the
+  1-based rank of the one in force, and every panel below asks the same question of it:
+  am I at level N or higher. Two rules keep that from turning into a page that hides
+  things people need:
+
+    * No control exists only at a higher level. Correcting, re-reading, re-analysing,
+      re-categorising and deleting are on the page at all three, as is every hover card.
+      The level decides what is on screen unasked, never what the page can do.
+    * Nothing that costs money to ignore is ever folded away. Failed and warned checks,
+      restricted expenditure, a cancelled receipt, a possible duplicate and the three
+      figures at the top are on every level. What compact drops is corroboration - the
+      checks that passed, where the photograph was taken, what the QR decoder saw.
 #}
 
 {% macro money(cents) -%}
@@ -19,6 +33,41 @@
     'info': ('bg-blue-50 text-blue-800 ring-blue-600/20', 'i'),
     'na':   ('bg-gray-50 text-gray-600 ring-gray-500/20', '–'),
 } %}
+
+{#
+  The checks, in the order somebody reading them can act on. The list used to be
+  rendered exactly as compliance.evaluate built it, which meant thirteen rows of equal
+  weight where two of them were "this receipt cannot be claimed" and four were "this
+  question does not apply to this receipt". Sorting them is not hiding them: every
+  group is on the page, and the ones that do not apply are one press away at any level.
+#}
+{% set failed = assessment.checks | selectattr('status', 'equalto', 'fail') | list %}
+{% set warned = assessment.checks | selectattr('status', 'equalto', 'warn') | list %}
+{% set noted = assessment.checks | selectattr('status', 'equalto', 'info') | list %}
+{% set passed = assessment.checks | selectattr('status', 'equalto', 'pass') | list %}
+{% set inapplicable = assessment.checks | selectattr('status', 'equalto', 'na') | list %}
+{% set attention = failed + warned %}
+{#
+  Which of them are open, and which are folded under one line.
+
+  Compact folds away corroboration - the checks that passed and the ones that were never
+  going to apply. Standard folds away only the second kind. Nothing folds at the deepest
+  level. `quiet` is never dropped from the page: it is the list behind the 'show N more'
+  row, because 'why is there no VAT to claim here' is answered by exactly those rows.
+#}
+{% if detail_rank < 2 %}
+    {% set open_checks = attention + noted %}
+    {% set quiet = passed + inapplicable %}
+    {% set quiet_label = 'that passed or do not apply' %}
+{% elif detail_rank < 3 %}
+    {% set open_checks = attention + noted + passed %}
+    {% set quiet = inapplicable %}
+    {% set quiet_label = 'that ' ~ ('does' if inapplicable|length == 1 else 'do') ~ ' not apply to this receipt' %}
+{% else %}
+    {% set open_checks = attention + noted + passed + inapplicable %}
+    {% set quiet = [] %}
+    {% set quiet_label = '' %}
+{% endif %}
 
 {#
   How this receipt's own values link outward. Built once here rather than at each of
@@ -40,6 +89,31 @@
     {%- elif href -%}<a class="peek {{ classes }}" href="{{ href }}" data-peek="{{ spec }}">{{ value }}</a>
     {%- else -%}<span class="peek {{ classes }}" tabindex="0" role="button" data-peek="{{ spec }}">{{ value }}</span>
     {%- endif -%}
+{%- endmacro %}
+
+{# One check, wherever it is grouped. The glyph and its ring carry the status, so a row
+   read out of context still says what it is. #}
+{% macro check_row(check) -%}
+    {% set style, glyph = status_styles.get(check.status, status_styles['na']) %}
+    <li class="px-6 py-3">
+        <div class="flex items-center gap-x-2">
+            <span class="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ring-1 ring-inset {{ style }}">{{ glyph }}</span>
+            <p class="text-sm font-medium text-gray-900">{{ check.label }}</p>
+        </div>
+        <p class="mt-1 pl-7 text-sm text-gray-600">{{ check.detail }}</p>
+    </li>
+{%- endmacro %}
+
+{# A row of the provenance panel: a label, and the one value that answers it. #}
+{% macro fact_row(label, value, hint='') -%}
+    {% if value %}
+    <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1.5">
+        <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
+        <dd class="max-w-[65%] break-words text-right text-sm text-gray-900">
+            {{ value }}{% if hint %}<span class="block text-xs font-normal text-gray-400">{{ hint }}</span>{% endif %}
+        </dd>
+    </div>
+    {% endif %}
 {%- endmacro %}
 
 {% block content %}
@@ -64,25 +138,49 @@
                     &middot; submission #{{ receipt.submission_id }}
                 </p>
             </div>
-            <div class="mt-4 flex items-center gap-x-3 md:mt-0">
-                {% if receipt.document_type == 'other_receipt' %}
-                    <span class="inline-flex items-center rounded-md bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-600/20">Not an EFD receipt</span>
-                {% elif receipt.document_type == 'not_a_receipt' %}
-                    <span class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">Not a receipt</span>
-                {% endif %}
-                {% if receipt.extraction_source == 'tra_html' %}
-                    <span class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Verified by TRA</span>
-                {% elif receipt.extraction_source == 'llm_vision' %}
-                    <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from photo</span>
-                {% elif receipt.extraction_source == 'llm_text' %}
-                    <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from pasted text</span>
-                {% endif %}
-                {% if assessment.score is not none %}
-                    {% set score_style = 'bg-green-100 text-green-800' if assessment.score >= 90 else ('bg-yellow-100 text-yellow-800' if assessment.score >= 70 else 'bg-red-100 text-red-800') %}
-                    <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold {{ score_style }}">
-                        Compliance {{ assessment.score }}/100
+            <div class="mt-4 md:mt-0 md:text-right">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-2 md:justify-end">
+                    {% if receipt.document_type == 'other_receipt' %}
+                        <span class="inline-flex items-center rounded-md bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-600/20">Not an EFD receipt</span>
+                    {% elif receipt.document_type == 'not_a_receipt' %}
+                        <span class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">Not a receipt</span>
+                    {% endif %}
+                    {% if receipt.extraction_source == 'tra_html' %}
+                        <span class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Verified by TRA</span>
+                    {% elif receipt.extraction_source == 'llm_vision' %}
+                        <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from photo</span>
+                    {% elif receipt.extraction_source == 'llm_text' %}
+                        <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">Read from pasted text</span>
+                    {% endif %}
+                    {% if assessment.score is not none %}
+                        {% set score_style = 'bg-green-100 text-green-800' if assessment.score >= 90 else ('bg-yellow-100 text-yellow-800' if assessment.score >= 70 else 'bg-red-100 text-red-800') %}
+                        <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold {{ score_style }}">
+                            Compliance {{ assessment.score }}/100
+                        </span>
+                    {% endif %}
+                </div>
+
+                {#
+                  The same setting that lives in Settings -> Business, offered where the
+                  wish for it actually occurs: while looking at a receipt that is telling
+                  you more or less than you wanted. Posting it here changes the instance's
+                  setting, which is the only behaviour that does not surprise somebody who
+                  set it in Settings yesterday.
+                #}
+                <form method="POST" action="{{ url_for('set_receipt_detail_level') }}"
+                      class="mt-3 flex flex-wrap items-center gap-x-2 md:justify-end">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <span class="text-xs text-gray-400">Detail</span>
+                    <span class="inline-flex rounded-md bg-gray-100 p-0.5 ring-1 ring-inset ring-gray-200">
+                        {% for level in detail_levels %}
+                        <button type="submit" name="level" value="{{ level.key }}" title="{{ level.summary }}"
+                                class="rounded px-2 py-1 text-xs font-medium transition
+                                       {{ 'bg-white text-gray-900 shadow-sm' if level.key == detail else 'text-gray-500 hover:text-gray-900' }}">
+                            {{ level.label }}
+                        </button>
+                        {% endfor %}
                     </span>
-                {% endif %}
+                </form>
             </div>
         </div>
     </div>
@@ -108,7 +206,9 @@
             Same supplier, same day, same total{% if receipt.receipt_time %}; this one is timed {{ receipt.receipt_time.strftime('%H:%M') }}{% endif %}.
             Neither carries a code or a reference the other could be matched against exactly, so both
             were kept. One purchase submitted twice looks like this &mdash; and so does the same fare
-            paid twice in a day. If it is a duplicate, the expense is being counted twice.
+            paid twice in a day. If it is a duplicate, the expense is being counted twice
+            &mdash; <button type="button" @click="startDeleting()" class="font-medium underline">delete
+            whichever one is the copy</button>.
         </p>
     </div>
     {% endif %}
@@ -154,32 +254,97 @@
                at this page has the photograph. Only that one gets a pencil. #}
             {% set verified = receipt.extraction_source == 'tra_html' %}
             <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
-                <div class="flex items-start justify-between gap-x-4 border-b border-gray-200 px-6 py-4">
-                    <div>
-                        <h2 class="text-base font-semibold text-gray-900">The receipt</h2>
-                        <p class="mt-1 text-sm text-gray-500">
-                            {% if verified %}
-                                As TRA printed it. Nothing on this panel is inferred.
-                            {% else %}
-                                Read off the photograph by the model, not fetched from TRA. Every figure
-                                here is a reading of the paper rather than the portal's own record.
-                            {% endif %}
-                        </p>
-                        {% if corrected_fields %}
-                        <p class="mt-1 text-sm text-gray-500">
-                            {{ corrected_fields|join(', ') }}
-                            {{ 'was' if corrected_fields|length == 1 else 'were' }} corrected by hand{% if receipt.corrected_at %}
-                            on {{ receipt.corrected_at.strftime('%d %b %Y') }}{% endif %}.
-                        </p>
+                <div class="flex flex-wrap items-start justify-between gap-x-4 gap-y-3 border-b border-gray-200 px-6 py-4">
+                    <div class="flex items-start gap-x-4">
+                        {# The paper, beside the figures read off it rather than only at the
+                           foot of the page. Small on purpose: it says which receipt this is
+                           and gets you to the full size in one click, which is the size the
+                           small print is actually legible at. #}
+                        {% if photo_url %}
+                        <a href="{{ photo_url }}" target="_blank" rel="noopener" class="flex-none"
+                           title="Open the photograph full size">
+                            <img src="{{ photo_url }}" alt="Photograph of the receipt"
+                                 class="h-20 w-16 rounded border border-gray-200 bg-white object-cover object-top hover:ring-2 hover:ring-indigo-300">
+                        </a>
                         {% endif %}
+                        <div>
+                            <h2 class="text-base font-semibold text-gray-900">The receipt</h2>
+                            <p class="mt-1 text-sm text-gray-500">
+                                {% if verified %}
+                                    As TRA printed it. Nothing on this panel is inferred.
+                                {% elif receipt.extraction_source == 'llm_text' %}
+                                    Read out of the text that was pasted, not fetched from TRA. Every figure
+                                    here is a reading of that record rather than the portal's own.
+                                {% else %}
+                                    Read off the photograph by the model, not fetched from TRA. Every figure
+                                    here is a reading of the paper rather than the portal's own record.
+                                {% endif %}
+                            </p>
+                            {% if corrected_fields %}
+                            <p class="mt-1 text-sm text-gray-500">
+                                {{ corrected_fields|join(', ') }}
+                                {{ 'was' if corrected_fields|length == 1 else 'were' }} corrected by hand{% if receipt.corrected_at %}
+                                on {{ receipt.corrected_at.strftime('%d %b %Y') }}{% endif %}.
+                            </p>
+                            {% endif %}
+                        </div>
                     </div>
                     {% if not verified %}
-                    <button x-show="!correcting" @click="correcting = true"
-                            class="flex-none rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
-                        Correct by hand
-                    </button>
+                    <div class="flex flex-none items-center gap-x-2">
+                        <button x-show="!correcting" @click="correcting = true"
+                                class="rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                            Correct by hand
+                        </button>
+                        {% if rereadable %}
+                        {# The other repair, and the cheaper one. Correcting by hand fixes a
+                           figure; this fixes a whole reading, which is what a dark photograph
+                           or a fading thermal print actually produces. #}
+                        <button x-show="!correcting" @click="startRereading()" :disabled="!!rereading"
+                                class="rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                            <span x-text="rereading ? 'Reading...' : 'Read it again'">Read it again</span>
+                        </button>
+                        {% endif %}
+                    </div>
                     {% endif %}
                 </div>
+
+                {% if rereadable %}
+                {#
+                  Asked twice, because this one is destructive in a way the other controls on
+                  this page are not: every figure below is replaced by whatever the model
+                  reads this time, and any of them somebody typed in by hand goes with them.
+                  The count of those is the whole reason the confirmation exists.
+                #}
+                <div x-show="confirmingReread" x-cloak class="border-b border-gray-200 bg-amber-50 px-6 py-4">
+                    <p class="text-sm font-medium text-amber-900">
+                        Hand {{ rereadable.label }} back to the model?
+                    </p>
+                    <p class="mt-1 text-sm text-amber-800">
+                        Every figure on this panel is replaced by the new reading &mdash; vendor, TIN,
+                        date, line items and totals.
+                        {% if corrected_fields %}
+                        <span class="font-medium">Including the {{ corrected_fields|length }}
+                        {{ 'field' if corrected_fields|length == 1 else 'fields' }} corrected by hand
+                        ({{ corrected_fields|join(', ') }}).</span>
+                        {% endif %}
+                        {% if receipt.category_corrected_at %}
+                        The category you set by hand is kept.
+                        {% endif %}
+                        It costs one call to the model and nothing is asked of TRA.
+                    </p>
+                    <div class="mt-3 flex flex-wrap items-center gap-3">
+                        <button @click="reread()" :disabled="!!rereading"
+                                class="rounded-md bg-amber-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-500 disabled:opacity-50">
+                            <span x-text="rereading ? 'Reading it again...' : 'Read it again'">Read it again</span>
+                        </button>
+                        <button @click="confirmingReread = false" :disabled="!!rereading"
+                                class="text-sm font-semibold text-gray-600 hover:text-gray-900 disabled:opacity-50">Cancel</button>
+                    </div>
+                </div>
+                {% endif %}
+                <p x-show="rereadMessage" x-cloak class="border-b border-gray-200 px-6 py-3 text-sm"
+                   :class="rereadFailed ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-900'"
+                   x-text="rereadMessage"></p>
 
                 {# The form and the receipt are the same panel in two states rather than two
                    panels, so nothing moves down the page when the pencil is picked up. #}
@@ -280,11 +445,11 @@
                     <div class="mt-4 flex flex-wrap items-center gap-3">
                         <button @click="save(true)" :disabled="!preview || !!busy"
                                 class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
-                            <span x-text="busy === 'verify' ? 'Asking TRA...' : 'Save and verify with TRA'"></span>
+                            <span x-text="busy === 'verify' ? 'Asking TRA...' : 'Save and verify with TRA'">Save and verify with TRA</span>
                         </button>
                         <button @click="save(false)" :disabled="!!busy"
                                 class="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
-                            <span x-text="busy === 'save' ? 'Saving...' : 'Save without verifying'"></span>
+                            <span x-text="busy === 'save' ? 'Saving...' : 'Save without verifying'">Save without verifying</span>
                         </button>
                         <button @click="correcting = false" :disabled="!!busy"
                                 class="text-sm font-semibold text-gray-600 hover:text-gray-900 disabled:opacity-50">Cancel</button>
@@ -301,29 +466,43 @@
                       supplier we may hold twelve other receipts from, the EFD serial is one
                       till among their four, the code is what a duplicate is caught on. Each
                       one that is carries its own card; the rest are printed as they are.
+
+                      The last number in each row is the level from which it is drawn. The
+                      first six identify the receipt and are on every level; the rest are
+                      corroboration, and compact leaves them to the levels that ask for it.
                     #}
+                    {% set ns = namespace(withheld=[]) %}
                     <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                        {% for label, value, spec, href in [
-                            ('Vendor', receipt.vendor_name, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href),
-                            ('Vendor TIN', receipt.vendor_tin, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href),
-                            ('VRN', receipt.vrn, None, None),
-                            ('Tax office', receipt.tax_office, 'tax_office:' ~ receipt.tax_office if receipt.tax_office else None, None),
-                            ('EFD serial', receipt.efd_serial, 'till:' ~ receipt.efd_serial if receipt.efd_serial else None, None),
-                            ('Receipt no.', receipt.receipt_number, None, None),
-                            ('Z number', receipt.z_number, None, None),
-                            ('Verification code', receipt.receipt_verification_code, 'code:' ~ receipt.receipt_verification_code if receipt.receipt_verification_code else None, None),
-                            ('Customer', receipt.customer_name, 'customer:' ~ receipt.id, None),
-                            ('Customer ID', ((receipt.customer_id_type or '') ~ ' ' ~ (receipt.customer_id or '')).strip(), 'customer:' ~ receipt.id, None),
-                            ('Phone', receipt.vendor_phone, None, None),
+                        {% for label, value, spec, href, from_rank in [
+                            ('Vendor', receipt.vendor_name, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href, 1),
+                            ('Vendor TIN', receipt.vendor_tin, 'vendor:' ~ vendor_key if vendor_key else None, vendor_href, 1),
+                            ('VRN', receipt.vrn, None, None, 1),
+                            ('Receipt no.', receipt.receipt_number, None, None, 1),
+                            ('Verification code', receipt.receipt_verification_code, 'code:' ~ receipt.receipt_verification_code if receipt.receipt_verification_code else None, None, 1),
+                            ('Customer', receipt.customer_name, 'customer:' ~ receipt.id, None, 1),
+                            ('Customer ID', ((receipt.customer_id_type or '') ~ ' ' ~ (receipt.customer_id or '')).strip(), 'customer:' ~ receipt.id, None, 2),
+                            ('Tax office', receipt.tax_office, 'tax_office:' ~ receipt.tax_office if receipt.tax_office else None, None, 2),
+                            ('EFD serial', receipt.efd_serial, 'till:' ~ receipt.efd_serial if receipt.efd_serial else None, None, 2),
+                            ('Z number', receipt.z_number, None, None, 2),
+                            ('Phone', receipt.vendor_phone, None, None, 2),
+                            ('UIN', receipt.uin, None, None, 3),
                         ] %}
-                            {% if value %}
+                            {% if value and detail_rank >= from_rank %}
                             <div class="flex justify-between gap-x-4 border-b border-gray-100 py-1">
                                 <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ label }}</dt>
                                 <dd class="text-sm text-gray-900 text-right">{{ peek(value, spec, href) }}</dd>
                             </div>
+                            {% elif value %}
+                            {% set ns.withheld = ns.withheld + [label] %}
                             {% endif %}
                         {% endfor %}
                     </dl>
+                    {# What this level left out, named rather than silently missing. A field
+                       that is on the receipt and not on the page is a thing somebody will go
+                       looking for, and the honest answer is which switch brings it back. #}
+                    {% if ns.withheld %}
+                    <p class="mt-2 text-xs text-gray-400">{{ ns.withheld|join(', ') }} {{ 'is' if ns.withheld|length == 1 else 'are' }} on this receipt and shown at {{ 'Everything' if detail_rank >= 2 else 'Standard' }} detail.</p>
+                    {% endif %}
 
                     {% if receipt.printed_items %}
                     <table class="mt-6 w-full text-sm">
@@ -361,7 +540,12 @@
 
                     <table class="mt-4 w-full border-t border-gray-200 text-sm">
                         <tbody>
+                            {# A total the document never printed is a dash at standard and
+                               above, where the absence is itself worth knowing, and simply
+                               absent at compact, where it is a row saying nothing. #}
+                            {% if receipt.total_excl_tax_cents is not none or detail_rank >= 2 %}
                             <tr><td class="py-1 text-gray-500">Total excl. tax</td><td class="py-1 text-right font-mono">{{ money(receipt.total_excl_tax_cents) }}</td></tr>
+                            {% endif %}
                             {% if receipt.discount_cents %}
                             <tr><td class="py-1 text-gray-500">Discount</td><td class="py-1 text-right font-mono">{{ money(receipt.discount_cents) }}</td></tr>
                             {% endif %}
@@ -385,7 +569,7 @@
               verified line, which is the one thing this app cannot allow.
             #}
             {% if receipt.note_items %}
-            <div class="mt-6 overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
                 <div class="border-b border-gray-200 px-6 py-4">
                     <h2 class="text-base font-semibold text-gray-900">What was bought</h2>
                     <p class="mt-1 text-sm text-gray-500">
@@ -419,6 +603,9 @@
             {% endif %}
 
             <!-- What was bought, and what follows from it -->
+            {# On every level. Each of these is money - tax that should have been withheld,
+               a purchase that is capital rather than an expense, a line that is not
+               deductible at all - and none of it is corroboration. #}
             {% if assessment.wht_lines or assessment.capital_items or assessment.restrictions %}
             <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
                 <div class="border-b border-gray-200 px-6 py-4">
@@ -457,7 +644,7 @@
 
             <!-- The model's narrative, clearly labelled as judgment -->
             <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
-                <div class="flex items-start justify-between border-b border-gray-200 px-6 py-4">
+                <div class="flex items-start justify-between gap-x-4 border-b border-gray-200 px-6 py-4">
                     <div>
                         <h2 class="text-base font-semibold text-gray-900">Tax analysis</h2>
                         <p class="mt-1 text-sm text-gray-500">
@@ -468,9 +655,12 @@
                             {% endif %}
                         </p>
                     </div>
-                    <button @click="reanalyse()" :disabled="analysing"
-                            class="rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
-                        <span x-text="analysing ? 'Working...' : 'Re-analyse'"></span>
+                    {# Judgment only: the figures above are never touched by this, whichever
+                       way the receipt got here. Re-reading the document is the button on the
+                       receipt panel, and it says so. #}
+                    <button @click="reanalyse()" :disabled="analysing" title="Asks the model to categorise and comment again. The figures are not touched."
+                            class="flex-none rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                        <span x-text="analysing ? 'Working...' : 'Re-analyse'">Re-analyse</span>
                     </button>
                 </div>
                 <div class="px-6 py-5">
@@ -583,6 +773,7 @@
             <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
                 <div class="border-b border-gray-200 px-6 py-4">
                     <h2 class="text-base font-semibold text-gray-900">Source</h2>
+                    <p class="mt-1 text-sm text-gray-500">Where this receipt came from, and what came with it.</p>
                 </div>
                 <div class="space-y-4 px-6 py-5 text-sm">
                     <div class="flex justify-between gap-x-4">
@@ -594,15 +785,16 @@
                     </div>
                     {% if sender_note %}
                     {# What the person who scanned it typed, kept apart from the model's own
-                       summary above. It is shown because it is an input to that summary and
-                       to the category beside it: a reader who cannot see the note has no way
-                       to tell why this was filed where it was. #}
+                       summary above. On every level, because it is an input to that summary
+                       and to the category beside it: a reader who cannot see the note has no
+                       way to tell why this was filed where it was. #}
                     <div>
                         <span class="text-gray-500">Note from the sender</span>
                         <p class="mt-1 rounded-md bg-gray-50 p-3 text-gray-900 ring-1 ring-inset ring-gray-200">{{ sender_note }}</p>
                         <p class="mt-1 text-xs text-gray-500">Sent to the model with the receipt.</p>
                     </div>
                     {% endif %}
+                    {% if detail_rank >= 2 %}
                     {% if submission.location %}
                     <div class="flex justify-between gap-x-4">
                         <span class="text-gray-500">Location</span>
@@ -656,34 +848,225 @@
                         <img src="{{ photo_url }}" alt="Photograph of the receipt" class="w-full max-w-md rounded-md border">
                     </div>
                     {% endif %}
+                    {% else %}
+                    {# Compact. The paper is still one click away - the thumbnail beside the
+                       figures opens it full size - and everything folded here is on the
+                       next level up. #}
+                    <p class="text-xs text-gray-400">
+                        Where it was collected, the document this was read from and the QR decoder's
+                        report are shown at Standard detail.{% if photo_url %} The thumbnail beside the
+                        figures opens the photograph at any level.{% endif %}
+                    </p>
+                    {% endif %}
                 </div>
             </div>
 
             {# Only ever populated for a photograph, and it is the provenance of every
                number above it: whether this receipt is TRA's copy or a reading of the
-               picture. #}
-            {% include "_qr_scan.html" %}
+               picture. Corroboration, so compact leaves it out. #}
+            {% if detail_rank >= 2 %}
+                {% include "_qr_scan.html" %}
+            {% endif %}
+
+            {#
+              Everything the page has been standing on, at the level that asks for it.
+
+              This is the panel for the question that arrives eighteen months later: where
+              did this figure come from, was anybody else's hand in it, and is this the same
+              document as that one. All of it is already stored - it was simply never shown,
+              which meant answering that question meant opening the database.
+            #}
+            {% if detail_rank >= 3 %}
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">Provenance</h2>
+                    <p class="mt-1 text-sm text-gray-500">
+                        How this row came to say what it says. Nothing here is on the receipt; it is
+                        what this app did with it.
+                    </p>
+                </div>
+                <div class="px-6 py-5">
+                    <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+                        {{ fact_row('Facts from', {
+                            'tra_html': "TRA's verified page",
+                            'llm_vision': 'the vision model reading the photograph',
+                            'llm_text': 'the text model reading a pasted record',
+                        }.get(receipt.extraction_source, receipt.extraction_source or 'unknown')) }}
+                        {{ fact_row('Document type', (receipt.document_type or '').replace('_', ' ')) }}
+                        {{ fact_row('Analysis', receipt.llm_status,
+                                    'whether the judgment step completed - never the figures') }}
+                        {{ fact_row('Stored', receipt.processed_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if receipt.processed_at else None) }}
+                        {{ fact_row('Submission', '#' ~ submission.id ~ ' · ' ~ submission.status ~ ' · ' ~ submission.input_type) }}
+                        {{ fact_row('Captured on the phone',
+                                    submission.captured_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if submission.captured_at else None,
+                                    'when somebody stood in front of it, not when we heard about it') }}
+                        {{ fact_row('Attempts', submission.retry_count or None) }}
+                        {{ fact_row('Address asked of TRA', submission.recovered_url) }}
+                        {{ fact_row('Address rebuilding', 'declined for this submission' if submission.rebuild_declined else None) }}
+                        {{ fact_row('Corrected by hand', corrected_fields|join(', ') if corrected_fields else None,
+                                    receipt.corrected_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if receipt.corrected_at else '') }}
+                        {{ fact_row('Category set by hand',
+                                    receipt.category_corrected_at.strftime('%Y-%m-%d %H:%M') ~ ' UTC' if receipt.category_corrected_at else None) }}
+                    </dl>
+
+                    {#
+                      The two keys a duplicate is caught on, printed because 'why was this
+                      not flagged as a copy of that' is otherwise unanswerable from the
+                      outside. identity_key is the assertion that blocks a second copy at
+                      intake; near_key is the observation reported to a human.
+                    #}
+                    <dl class="mt-4 grid grid-cols-1 gap-x-6">
+                        {{ fact_row('Identity key', receipt.identity_key, 'the same key means the same document, and is refused at intake') }}
+                        {{ fact_row('Near key', receipt.near_key, 'same supplier, day and total - reported, never refused') }}
+                        {{ fact_row('Content hash', submission.content_hash, 'of the bytes or characters submitted') }}
+                        {{ fact_row('Scanner reference', submission.client_uuid) }}
+                    </dl>
+
+                    {% if raw_judgment %}
+                    <div class="mt-5" x-data="{ open: false }">
+                        <button type="button" @click="open = !open"
+                                class="text-sm font-semibold text-indigo-600 hover:text-indigo-500">
+                            <span x-text="open ? 'Hide' : 'Show'">Show</span> what the model actually replied
+                        </button>
+                        <pre x-show="open" x-cloak x-collapse
+                             class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 font-mono text-xs text-gray-800">{{ raw_judgment }}</pre>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            {#
+              Deleting, at the bottom of the page and behind two steps.
+
+              The button is here rather than in the header on purpose: it is the one
+              irreversible thing on this page, and nothing else should ever be a slip of
+              the pointer away from it. The second step asks for the receipt's own number,
+              which the server checks as well - so it cannot be got past by reflex, and a
+              wrong page cannot be deleted by muscle memory.
+            #}
+            <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-red-200">
+                <div class="flex flex-wrap items-start justify-between gap-x-4 gap-y-3 border-b border-gray-200 px-6 py-4">
+                    <div>
+                        <h2 class="text-base font-semibold text-gray-900">Delete this receipt</h2>
+                        <p class="mt-1 text-sm text-gray-500">
+                            For a purchase that should never have been in the book &mdash; the same receipt
+                            caught twice, a personal expense, a photograph that was not a receipt at all.
+                            Correcting it, re-reading it or re-filing it are all better answers when they apply.
+                        </p>
+                    </div>
+                    <button x-show="!deleting" @click="startDeleting()"
+                            class="flex-none rounded-md bg-white px-2.5 py-1.5 text-sm font-semibold text-red-700 shadow-sm ring-1 ring-inset ring-red-300 hover:bg-red-50">
+                        Delete receipt #{{ receipt.id }}
+                    </button>
+                </div>
+
+                <div x-show="deleting" x-cloak class="bg-red-50 px-6 py-5">
+                    <p class="text-sm font-semibold text-red-900">This cannot be undone. It removes:</p>
+                    <ul class="mt-2 list-disc space-y-1 pl-5 text-sm text-red-800">
+                        <li>
+                            Receipt #{{ receipt.id }} &mdash; {{ receipt.vendor_name or 'unnamed vendor' }},
+                            {{ money(receipt.total_incl_tax_cents) }} TZS{% if receipt.receipt_date %} on
+                            {{ receipt.receipt_date.strftime('%d %b %Y') }}{% endif %}, with
+                            {{ receipt.items|length }} line{{ '' if receipt.items|length == 1 else 's' }}
+                            {%- if receipt.tax_lines %} and {{ receipt.tax_lines|length }} tax
+                            line{{ '' if receipt.tax_lines|length == 1 else 's' }}{% endif %}.
+                        </li>
+                        <li>
+                            Submission #{{ submission.id }}, its queue history{% if sender_note %}, the note sent
+                            with it{% endif %}{% if photo_url %} and the photograph on disk{% elif submission.input_type == 'text' %}
+                            and the text that was pasted{% endif %}.
+                        </li>
+                        {% if assessment.input_vat_cents %}
+                        <li>
+                            {{ money(assessment.recoverable_vat_cents) }} of recoverable input VAT from the
+                            VAT ledger, and this purchase from every total, category slice and insight.
+                        </li>
+                        {% else %}
+                        <li>This purchase from every total, category slice and insight it appears in.</li>
+                        {% endif %}
+                    </ul>
+                    <p class="mt-3 text-sm text-red-800">
+                        The supplier and any products stay &mdash; other receipts share them.
+                        The same document can be submitted again afterwards.
+                    </p>
+
+                    <div class="mt-4 sm:flex sm:items-end sm:gap-x-3">
+                        <div>
+                            <label for="confirm-delete" class="block text-sm font-medium text-red-900">
+                                Type <span class="font-mono font-bold">{{ receipt.id }}</span> to confirm
+                            </label>
+                            <input id="confirm-delete" type="text" x-model="deleteConfirm" x-ref="deleteConfirm"
+                                   inputmode="numeric" autocomplete="off" spellcheck="false"
+                                   @keydown.enter.prevent="deleteReceipt()"
+                                   class="mt-1 block w-32 rounded-md border-0 py-1.5 font-mono text-gray-900 shadow-sm ring-1 ring-inset ring-red-300 focus:ring-2 focus:ring-inset focus:ring-red-600 sm:text-sm">
+                        </div>
+                        <div class="mt-3 flex items-center gap-x-3 sm:mt-0">
+                            <button @click="deleteReceipt()"
+                                    :disabled="deleteConfirm.trim() !== '{{ receipt.id }}' || deletingNow"
+                                    class="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 disabled:opacity-40">
+                                <span x-text="deletingNow ? 'Deleting...' : 'Delete for good'">Delete for good</span>
+                            </button>
+                            <button @click="deleting = false" :disabled="deletingNow"
+                                    class="text-sm font-semibold text-gray-600 hover:text-gray-900 disabled:opacity-50">Cancel</button>
+                        </div>
+                    </div>
+                    <p x-show="deleteMessage" x-cloak class="mt-3 rounded-md bg-white p-3 text-sm text-red-800"
+                       x-text="deleteMessage"></p>
+                </div>
+            </div>
         </div>
 
         <!-- The checks -->
         <div class="space-y-6">
             <div class="overflow-hidden rounded-lg bg-white shadow ring-1 ring-black ring-opacity-5">
                 <div class="border-b border-gray-200 px-6 py-4">
-                    <h2 class="text-base font-semibold text-gray-900">Checks</h2>
-                    <p class="mt-1 text-sm text-gray-500">Computed from the receipt. No model involved.</p>
+                    <div class="flex items-baseline justify-between gap-x-3">
+                        <h2 class="text-base font-semibold text-gray-900">Checks</h2>
+                        {% if attention %}
+                        <span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-800 ring-1 ring-inset ring-red-600/20">
+                            {{ attention|length }} to answer
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-800 ring-1 ring-inset ring-green-600/20">
+                            nothing to fix
+                        </span>
+                        {% endif %}
+                    </div>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Computed from the receipt. No model involved.
+                        {% if attention %}
+                        Worst first &mdash; the rest are underneath.
+                        {% endif %}
+                    </p>
                 </div>
+
                 <ul class="divide-y divide-gray-100">
-                    {% for check in assessment.checks %}
-                    {% set style, glyph = status_styles.get(check.status, status_styles['na']) %}
-                    <li class="px-6 py-3">
-                        <div class="flex items-center gap-x-2">
-                            <span class="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ring-1 ring-inset {{ style }}">{{ glyph }}</span>
-                            <p class="text-sm font-medium text-gray-900">{{ check.label }}</p>
-                        </div>
-                        <p class="mt-1 pl-7 text-sm text-gray-600">{{ check.detail }}</p>
-                    </li>
-                    {% endfor %}
+                    {% for check in open_checks %}{{ check_row(check) }}{% endfor %}
                 </ul>
+
+                {#
+                  Never removed, only folded: a check that does not apply to this receipt is
+                  still the answer to somebody's question about it, and 'why is there no VAT
+                  claim on this' is answered by exactly those rows. One press opens them, and
+                  the deepest detail level opens them by default.
+                #}
+                {% if quiet %}
+                <div x-data="{ open: false }" class="border-t border-gray-100">
+                    <button type="button" @click="open = !open"
+                            class="flex w-full items-center justify-between px-6 py-3 text-left text-sm font-medium text-gray-600 hover:bg-gray-50">
+                        <span>
+                            <span x-text="open ? 'Hide' : 'Show'">Show</span>
+                            {{ quiet|length }} more {{ quiet_label }}
+                        </span>
+                        <span class="text-gray-400" x-text="open ? '−' : '+'">+</span>
+                    </button>
+                    <ul x-show="open" x-cloak x-collapse class="divide-y divide-gray-100 border-t border-gray-100">
+                        {% for check in quiet %}{{ check_row(check) }}{% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+
                 {% if not business or not business.business_tin %}
                 <div class="border-t border-gray-200 bg-yellow-50 px-6 py-3">
                     <p class="text-sm text-yellow-900">
@@ -737,6 +1120,83 @@ function receiptPage() {
                 this.freshAnalysis = error.message;
             } finally {
                 this.analysing = false;
+            }
+        },
+
+        // --- Reading the document again ---
+        // The destructive sibling of re-analysis: it replaces every figure on the page
+        // rather than the judgment about them, so it is confirmed first and the
+        // confirmation names what will be lost. Only rendered where there is something
+        // left to read - see main._rereadable_source.
+        confirmingReread: false,
+        rereading: false,
+        rereadMessage: '',
+        rereadFailed: false,
+        startRereading() {
+            this.rereadMessage = '';
+            this.confirmingReread = true;
+        },
+        async reread() {
+            this.rereading = true;
+            this.rereadFailed = false;
+            this.rereadMessage = '';
+            try {
+                const response = await fetch('{{ url_for('reread_receipt', receipt_id=receipt.id) }}', { method: 'POST' });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'It could not be read again.');
+
+                this.confirmingReread = false;
+                this.rereadMessage = payload.message;
+                setTimeout(() => {
+                    // A re-read receipt is a new row - the old one is deleted so the new
+                    // one can take the submission - so this address is gone with it.
+                    if (payload.receipt_id) {
+                        window.location = `/receipts/${payload.receipt_id}`;
+                    } else if (payload.submission_id) {
+                        // The reading turned out to name a receipt already in the ledger,
+                        // so this submission is a duplicate and has no receipt of its own.
+                        window.location = `/submissions/${payload.submission_id}`;
+                    } else {
+                        window.location.reload();
+                    }
+                }, 1200);
+            } catch (error) {
+                this.rereadFailed = true;
+                this.rereadMessage = error.message;
+                this.rereading = false;
+            }
+        },
+
+        // --- Deleting ---
+        // Two steps, and the second one is typing this receipt's number. The server asks
+        // for the same thing (see main.delete_receipt), so the confirmation is not merely
+        // a dialog somebody can dismiss by reflex.
+        deleting: false,
+        deletingNow: false,
+        deleteConfirm: '',
+        deleteMessage: '',
+        startDeleting() {
+            this.deleting = true;
+            this.deleteMessage = '';
+            this.$nextTick(() => this.$refs.deleteConfirm?.focus());
+        },
+        async deleteReceipt() {
+            if (this.deleteConfirm.trim() !== '{{ receipt.id }}') return;
+            this.deletingNow = true;
+            this.deleteMessage = '';
+            try {
+                const body = new FormData();
+                body.append('confirm', this.deleteConfirm.trim());
+                const response = await fetch('{{ url_for('delete_receipt', receipt_id=receipt.id) }}',
+                                             { method: 'POST', body });
+                const payload = await response.json();
+                if (!response.ok) throw new Error(payload.error || 'The deletion was refused.');
+                // Nothing is left at this address, so there is nothing to redraw here. The
+                // dashboard says what was removed, from the flash the server set.
+                window.location = payload.redirect_url || '/';
+            } catch (error) {
+                this.deleteMessage = error.message;
+                this.deletingNow = false;
             }
         },
 

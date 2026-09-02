@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, f
 from config import Config
 from models.user import (
     db, InstanceConfig, Device, Product, Receipt, ReceiptItem, ReceiptTaxLine,
-    Submission, Vendor,
+    Submission, Vendor, RECEIPT_DETAIL_LEVELS, DEFAULT_RECEIPT_DETAIL, receipt_detail_rank,
 )
 from utils import analytics, branding, classify, compliance, fingerprint, geo, peek, products, qr
 from utils.images import store_photo
@@ -84,6 +84,7 @@ PENDING_COLUMNS = {
         ('llm_text_model', 'VARCHAR(100)'),
         ('llm_vision_model', 'VARCHAR(100)'),
         ('rebuild_url_from_text', 'BOOLEAN'),
+        ('receipt_detail_level', 'VARCHAR(20)'),
     ),
     'submission': (
         ('next_attempt_at', 'DATETIME'),
@@ -2602,6 +2603,89 @@ def api_peek(kind, key):
         return jsonify({'error': f'Nothing to show for {kind}.'}), 404
     return jsonify(card)
 
+# --- HOW MUCH OF A RECEIPT TO SHOW ---
+#
+# The receipt page answers two different questions for two different readings of it.
+# Filing the week's receipts, what is wanted is the money and whatever is wrong with
+# it. Being asked about one receipt eighteen months later, what is wanted is where
+# every figure on it came from - which layer of the photo pipeline answered, what the
+# QR decoder saw, what the model was actually handed back.
+#
+# Showing both at once is how the page got to thirteen equally-weighted check rows and
+# a provenance panel nobody reads. So the density is a setting (Settings -> Business,
+# and the switcher on the page itself), described here once so the two places that
+# offer the choice cannot describe it differently. The order is the order in
+# models.user.RECEIPT_DETAIL_LEVELS, which is what makes 'level N or higher' a
+# meaningful question.
+DETAIL_LEVEL_OPTIONS = (
+    {
+        'key': 'compact',
+        'label': 'Compact',
+        'summary': 'The money, the receipt, and only the checks that need an answer.',
+    },
+    {
+        'key': 'standard',
+        'label': 'Standard',
+        'summary': 'Everything above, plus every check, where it was collected and the '
+                   'photograph it came from.',
+    },
+    {
+        'key': 'full',
+        'label': 'Everything',
+        'summary': 'Everything above, plus provenance: which layer of the pipeline '
+                   'answered, the duplicate keys, and the model\'s own reply.',
+    },
+)
+
+
+def _detail_context(config):
+    """
+    Which density to render a receipt at, in the three forms the template wants.
+
+    `detail_rank` is what panels actually test, because 'is this at least standard' is
+    one comparison rather than a list of level names repeated down the page.
+    """
+    level = config.receipt_detail() if config is not None else DEFAULT_RECEIPT_DETAIL
+    return {
+        'detail': level,
+        'detail_rank': receipt_detail_rank(level),
+        'detail_levels': DETAIL_LEVEL_OPTIONS,
+    }
+
+
+@app.route('/settings/receipt-detail', methods=['POST'])
+@login_required
+def set_receipt_detail_level():
+    """
+    Sets the receipt page's density, from either place that offers the choice.
+
+    The setting lives on the Business tab, but the moment you want a different one is
+    while you are looking at a receipt and it is telling you too much or too little - so
+    the page carries the same three buttons and posts them here. One setting, two doors:
+    a switch flicked on a receipt is the instance's setting from then on, which is the
+    only behaviour that does not surprise somebody who set it in Settings yesterday.
+    """
+    config = get_instance_config()
+    if config is None:
+        flash('This instance has not been set up yet.', 'danger')
+        return redirect(url_for('index'))
+
+    level = (request.form.get('level') or '').strip().lower()
+    if level not in RECEIPT_DETAIL_LEVELS:
+        flash('That is not one of the three detail levels.', 'danger')
+        return redirect(url_for('configure_instance', tab='business'))
+
+    config.receipt_detail_level = level
+    db.session.commit()
+
+    # Back where it was changed from. Only a path on this instance: 'next' arrives in a
+    # form post and an absolute URL in it would make this an open redirect.
+    destination = request.form.get('next') or ''
+    if not destination.startswith('/') or destination.startswith('//'):
+        destination = url_for('configure_instance', tab='business')
+    return redirect(destination)
+
+
 @app.route('/receipts/<int:receipt_id>')
 @login_required
 def receipt_detail(receipt_id):
@@ -2661,6 +2745,17 @@ def receipt_detail(receipt_id):
         # part of how this receipt was categorised, and a reader who cannot see it has
         # no way to tell why the model concluded what it did.
         sender_note=_sender_note(receipt.submission),
+        # Whether this receipt's facts could be read again, and from what. A receipt
+        # parsed from TRA's page never can be - the portal supplied those numbers, and
+        # replacing them with a model's reading of the same purchase is a downgrade in
+        # every case. See reread_receipt.
+        rereadable=_rereadable_source(receipt),
+        # The model's whole reply, for the level that shows provenance. Rendered as the
+        # JSON it was, not summarised: the point of showing it at all is that it is what
+        # the model actually said, next to what the page made of it.
+        raw_judgment=json.dumps(judgment, indent=2, sort_keys=True) if judgment else None,
+        # How dense a page to draw. See DETAIL_LEVEL_OPTIONS.
+        **_detail_context(config),
     )
 
 # Windows the insights page can be run over. Kept only as an inbound alias now: the
@@ -3931,16 +4026,124 @@ def correct_receipt(receipt_id):
     payload['message'] = f"{saved} {payload['message']}"
     return jsonify(payload), status
 
+def _plain_number(value):
+    """
+    A quantity or a rate as the TRA parser renders one: 1, 2.5, 18 - never 2.5000.
+
+    Mirrors utils.tra_parser._number_str, because the two feed the same prompt and a
+    quantity written differently depending on how the receipt arrived is a difference
+    the model can see.
+    """
+    number = to_decimal(value)
+    if number is None:
+        return None
+    trimmed = number.normalize()
+    if trimmed == trimmed.to_integral_value():
+        trimmed = trimmed.to_integral_value()
+    return format(trimmed, 'f')
+
+
+def _facts_from_receipt(receipt):
+    """
+    The same compact facts ParsedReceipt.as_llm_facts() builds, read off a stored row.
+
+    Deliberately the same shape and the same omissions. The judgment prompt is written
+    against that JSON, so a receipt read off a photograph has to arrive at the model
+    looking like one parsed from the portal - otherwise the model is being asked a
+    subtly different question depending on how the receipt got here, and the categories
+    the two produce stop being comparable.
+
+    Printed lines only, exactly as the parser's version is. A note line is what the
+    sender said they bought rather than something a document asserts, and it reaches the
+    model the way it always has - as the note, through `user_note`.
+    """
+    return {
+        'vendor_name': receipt.vendor_name,
+        'vendor_tin': receipt.vendor_tin,
+        'vrn': receipt.vrn,
+        'vendor_is_vat_registered': bool(receipt.vrn),
+        'tax_office': receipt.tax_office,
+        'receipt_date': receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+        'items': [
+            {
+                'description': item.description,
+                'quantity': _plain_number(item.quantity),
+                'amount': format_cents(item.amount_cents),
+                'tax_code': item.tax_code,
+            }
+            for item in receipt.printed_items
+        ],
+        'tax_lines': [
+            {
+                'code': line.code,
+                'rate': _plain_number(line.rate),
+                'amount': format_cents(line.amount_cents),
+            }
+            for line in receipt.tax_lines
+        ],
+        'total_excl_tax': format_cents(receipt.total_excl_tax_cents),
+        'total_tax': format_cents(receipt.total_tax_cents),
+        'total_incl_tax': format_cents(receipt.total_incl_tax_cents),
+        'is_cancelled': receipt.is_cancelled,
+        'is_test': receipt.is_test,
+    }
+
+
+def _rereadable_source(receipt):
+    """
+    What this receipt's facts could be read again from, or None.
+
+    A {'kind': 'photo'|'text', 'label': ...} the template prints and the route dispatches
+    on, so the page and the route can never disagree about whether re-reading is on offer.
+
+    Two things have to be true, and they fail for different reasons worth telling apart:
+
+      * The numbers must not be TRA's. A verified receipt carries the portal's own record
+        of the sale, and replacing it with a model's reading of the same paper is a
+        downgrade however bad the reading currently on screen looks.
+      * The evidence has to still be here - the photograph on disk, or the text somebody
+        pasted. A receipt whose photograph has been cleared off the volume cannot be
+        re-read from anything, and offering the button would be a lie.
+    """
+    if receipt is None or receipt.extraction_source == 'tra_html':
+        return None
+
+    submission = receipt.submission
+    if submission is None:
+        return None
+
+    path = submission_photo_path(submission)
+    if path and os.path.exists(path):
+        return {'kind': 'photo', 'label': 'the photograph'}
+    if submission.input_type == 'text' and (submission.input_data or '').strip():
+        return {'kind': 'text', 'label': 'the pasted text'}
+    return None
+
+
 @app.route('/receipts/<int:receipt_id>/reanalyse', methods=['POST'])
 @login_required
 def reanalyse_receipt(receipt_id):
     """
     Asks the model for a fresh judgment on a receipt already in the ledger.
 
-    The facts are never re-read: they were parsed from the verified page and are not
-    the model's to revise. Only the category and the narrative analysis are replaced,
-    which is what is worth redoing after a prompt change or an LLM outage. The stored
-    page is re-parsed rather than re-fetched, so this costs TRA nothing.
+    The facts are never touched. Whatever this receipt says was bought, for how much and
+    on what date stays exactly as it is; only the category and the narrative analysis are
+    replaced, which is what is worth redoing after a prompt change, an LLM outage, or a
+    correction that changed what the receipt says. Nothing is fetched from TRA.
+
+    Which facts the model is handed depends on where they came from, and this is the one
+    place that difference is visible:
+
+      * A verified receipt re-parses its own stored page, so the model sees the same
+        compact JSON the first judgment was made from.
+      * A receipt read off a photograph or a paste has no page. Its facts are the row
+        itself - hand corrections included - and they are read straight off it. That
+        used to be refused, which was backwards: those are exactly the receipts whose
+        category is most often wrong, and the only ones an admin cannot fix by asking
+        the portal instead.
+
+    Re-reading the *document* is a different request, and a destructive one. See
+    reread_receipt.
     """
     receipt = db.session.get(Receipt, receipt_id)
     if receipt is None:
@@ -3950,17 +4153,17 @@ def reanalyse_receipt(receipt_id):
     if not config or not config.is_configured():
         return jsonify({'error': 'No LLM provider is configured for this instance.'}), 409
 
-    if not receipt.source_html:
-        return jsonify({'error': 'This receipt has no stored TRA page to re-read.'}), 409
-
-    try:
-        parsed = parse_receipt_html(receipt.source_html)
-    except TraParseError as e:
-        return jsonify({'error': f'The stored page no longer parses: {e}'}), 500
+    if receipt.source_html:
+        try:
+            facts = parse_receipt_html(receipt.source_html).as_llm_facts()
+        except TraParseError as e:
+            return jsonify({'error': f'The stored page no longer parses: {e}'}), 500
+    else:
+        facts = _facts_from_receipt(receipt)
 
     try:
         judgment = analyse_receipt(
-            parsed.as_llm_facts(), config,
+            facts, config,
             user_note=_sender_note(receipt.submission),
             catalogue=Product.catalogue(),
         )
@@ -3985,6 +4188,258 @@ def reanalyse_receipt(receipt_id):
         'category_kept': kept,
         'message': ('Re-analysed. The category you set by hand was kept.' if kept
                     else 'Re-analysed.'),
+    }), 200
+
+
+@app.route('/receipts/<int:receipt_id>/reread', methods=['POST'])
+@login_required
+def reread_receipt(receipt_id):
+    """
+    Hands the original document back to the model and keeps what it reads this time.
+
+    Re-analysis (above) asks the model what a receipt *means* and never touches the
+    figures. This asks it what the receipt *says*, which is a different and far more
+    destructive request: every field on the page is replaced by a fresh reading of the
+    photograph or the paste, including any an admin typed in by hand.
+
+    It exists because the first reading is sometimes simply wrong - a dark photograph, a
+    thermal print already fading, a total read off the change due - and until now the
+    only repair was to retype the receipt field by field. A second look at the same paper
+    costs one vision call and fixes most of those outright, and the ones it does not,
+    correcting by hand still fixes afterwards.
+
+    Refused for a receipt parsed from TRA's verified page, for the same reason correcting
+    one is: those numbers are the portal's own record of the sale. A verified receipt that
+    looks wrong is a parser problem.
+
+    Two things survive the re-read, and both are somebody's decision rather than the
+    model's reading:
+
+      * A category set by hand, exactly as re-analysis keeps it.
+      * The submission's own note, which is an input to the new reading and not an
+        output of the old one.
+
+    What does not survive is any hand correction of a printed field, which is why the
+    page asks a second time before calling this when there are some.
+    """
+    receipt = db.session.get(Receipt, receipt_id)
+    if receipt is None:
+        return jsonify({'error': 'No such receipt.'}), 404
+
+    if receipt.extraction_source == 'tra_html':
+        return jsonify({
+            'error': "These numbers were parsed from TRA's own verified page. Re-reading the "
+                     "paper would replace the portal's record of this sale with a model's "
+                     'reading of it, which is never an improvement.',
+        }), 409
+
+    source = _rereadable_source(receipt)
+    if source is None:
+        return jsonify({
+            'error': 'There is nothing left to re-read this receipt from - no photograph on '
+                     'the volume and no pasted text. Correct it by hand instead.',
+        }), 409
+
+    config = get_instance_config()
+    if not config or not config.is_configured():
+        return jsonify({'error': 'No LLM provider is configured for this instance.'}), 409
+
+    submission = receipt.submission
+    is_image = source['kind'] == 'photo'
+    content = submission_photo_path(submission) if is_image else submission.input_data
+
+    try:
+        data = extract_receipt_details(
+            content, is_image, config, user_note=_sender_note(submission),
+            catalogue=Product.catalogue(),
+        )
+    except Exception as e:
+        # Nothing has been touched yet, so the receipt on screen is exactly as it was.
+        print(f'[Re-read] Receipt {receipt.id} could not be re-read: {e}')
+        return jsonify({'error': f'The model could not read it again: {e}'}), 503
+
+    # Checked before anything is deleted, and against every receipt but this one. The
+    # ordinary duplicate path marks the submission a duplicate and stores nothing, which
+    # here would mean destroying the row an admin is looking at in order to file it as a
+    # copy of somebody else's - a surprising amount of loss for a button labelled
+    # 're-read'. So the collision is reported instead, and deleting is left to the admin
+    # who now knows there are two.
+    twin = _reread_collides_with(receipt, data)
+    if twin is not None:
+        return jsonify({
+            'error': f'Read again, this document is receipt #{twin.id}, which is already in the '
+                     'ledger. Nothing was changed. If the two really are one purchase, delete '
+                     'this one.',
+            'receipt_id': twin.id,
+        }), 409
+
+    _store_llm_draft(submission, data)
+
+    # What a person decided, carried across the replacement. The category is the same
+    # exception re-analysis makes; the timestamp goes with it, because without it the
+    # next re-analysis would treat the kept category as the model's own and overwrite it.
+    kept_category = receipt.category if receipt.category_corrected_at else None
+    kept_category_at = receipt.category_corrected_at
+    replaced_fields = json.loads(receipt.corrected_fields or '[]')
+
+    # The old row goes before the new one is built: submission_id is unique, and
+    # SQLAlchemy issues inserts before deletes, so the two would collide. Same ordering
+    # the correction path uses when TRA's page supersedes a photograph.
+    db.session.delete(receipt)
+    db.session.flush()
+
+    fresh = _receipt_from_transcription(
+        submission, data, config,
+        source='llm_vision' if is_image else 'llm_text',
+        default_document_type='tra_efd_receipt' if is_image else 'other_receipt',
+    )
+    if fresh is None:
+        # A duplicate the pre-check could not see - the transcription now asserts an
+        # identity another receipt already holds. The submission has been committed as a
+        # duplicate, which is the honest record of what was just discovered.
+        db.session.commit()
+        return jsonify({
+            'submission_id': submission.id, 'status': submission.status,
+            'message': 'Read again, this document turned out to be one already in the ledger, '
+                       'so it is now recorded as a duplicate rather than a second copy.',
+        }), 200
+
+    if kept_category:
+        fresh.category = kept_category
+        fresh.category_corrected_at = kept_category_at
+
+    _complete_submission(submission, fresh, config)
+    print(f'[Re-read] Receipt {receipt_id} replaced by {fresh.id} from {source["label"]}.')
+
+    return jsonify({
+        'receipt_id': fresh.id,
+        'read_from': source['kind'],
+        'category_kept': bool(kept_category),
+        'replaced_fields': replaced_fields,
+        'message': f'Read again from {source["label"]}.'
+                   + (' The category you set by hand was kept.' if kept_category else ''),
+    }), 200
+
+
+def _reread_collides_with(receipt, data):
+    """
+    The other receipt a fresh reading turns out to name, or None.
+
+    The same two questions _receipt_from_transcription asks - the same verification code,
+    the same identity - asked before anything is destroyed and with this receipt's own row
+    excluded, because a re-read of a receipt naturally matches itself.
+    """
+    code = (data.get('receipt_verification_code') or '').strip()
+    if code:
+        twin = Receipt.query.filter(
+            Receipt.receipt_verification_code == code, Receipt.id != receipt.id,
+        ).first()
+        if twin is not None:
+            return twin
+
+    key = _identity_of_transcription(data)
+    if not key:
+        return None
+    return Receipt.query.filter(
+        Receipt.identity_key == key, Receipt.id != receipt.id,
+    ).first()
+
+
+# --- DELETING A RECEIPT ---
+#
+# The one irreversible thing an admin can do to the ledger, and the case for having it is
+# that the alternatives are worse. A receipt that should not be in the book - the same
+# purchase caught twice by two people, a personal lunch put through by mistake, a
+# photograph of a wall that the model gamely turned into a 3,000/= receipt - otherwise
+# sits in every total, every category slice and every VAT figure for good.
+#
+# Three things make it safe enough to offer:
+#
+#   * It is asked for twice, and the second time is not a dialog somebody can dismiss by
+#     reflex: the receipt's own number has to be typed, and the *server* checks it. A
+#     wrong page cannot be deleted by muscle memory, and a script cannot delete a receipt
+#     without naming which one.
+#   * What goes is stated in full before it goes, on the page, itemised.
+#   * It goes completely - the receipt, its lines, the submission behind it and the
+#     photograph on disk - rather than leaving a completed submission with nothing behind
+#     it, which every list on this app would then have to learn to draw. It also means
+#     the same document can be submitted again afterwards: the content hash that would
+#     otherwise catch it as a duplicate went with the submission.
+#
+# Vendors and products are left alone. Both are keyed rows other receipts share, and the
+# vendor list is an inner join on receipts, so a supplier whose last receipt this was
+# simply stops appearing.
+
+
+@app.route('/receipts/<int:receipt_id>/delete', methods=['POST'])
+@login_required
+def delete_receipt(receipt_id):
+    """
+    Removes one receipt from the ledger for good, along with the submission behind it.
+
+    The `confirm` field must carry the receipt's own id. That is the second step: not a
+    checkbox and not a dialog, but a value only somebody looking at this receipt has.
+    """
+    receipt = db.session.get(Receipt, receipt_id)
+    if receipt is None:
+        return jsonify({'error': 'No such receipt.'}), 404
+
+    if (request.form.get('confirm') or '').strip() != str(receipt.id):
+        return jsonify({
+            'error': f'To delete this receipt, type its number ({receipt.id}) to confirm.',
+        }), 400
+
+    submission = receipt.submission
+    # Read before the row goes, so the flash and the log can say what was removed rather
+    # than which id used to exist.
+    described = ' - '.join(filter(None, [
+        f'Receipt #{receipt.id}',
+        receipt.vendor_name,
+        f'{format_cents(receipt.total_incl_tax_cents)} TZS'
+            if receipt.total_incl_tax_cents is not None else None,
+        receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+    ]))
+    photo_path = submission_photo_path(submission)
+    submission_id = submission.id if submission is not None else None
+    device_id = submission.device_id if submission is not None else receipt.device_id
+    # The submission's own arrival time, kept for the event below. Export destinations
+    # partition on it (utils.export.log_to_s3 builds its object key out of it), and an
+    # event about a deletion still belongs with the day the receipt was collected.
+    received_at = submission.received_at if submission is not None else None
+
+    db.session.delete(receipt)
+    if submission is not None:
+        # After the receipt, and in the same transaction: the receipt's submission_id is
+        # NOT NULL, so the two only make sense as one commit.
+        db.session.flush()
+        db.session.delete(submission)
+    db.session.commit()
+
+    # Last, and never allowed to fail the request. The rows are already gone; a file that
+    # cannot be unlinked is a byte of wasted disk, not a reason to tell an admin the
+    # deletion did not happen when it did.
+    if photo_path:
+        try:
+            os.remove(photo_path)
+        except OSError as e:
+            print(f'[Delete] Receipt {receipt_id} removed, but its photograph was not: {e}')
+
+    print(f'[Delete] {described} deleted by hand.')
+    # Every open dashboard is showing a row that no longer exists. Any event type it does
+    # not recognise makes it refetch the table, which is exactly what is wanted here.
+    dispatch_event('submission.deleted', {
+        'submission_id': submission_id, 'receipt_id': receipt_id,
+        'status': 'deleted', 'device_id': device_id, 'description': described,
+        'received_at': received_at.isoformat() if received_at else None,
+        'deleted_at': datetime.utcnow().isoformat(),
+    }, get_instance_config())
+
+    flash(f'{described} was deleted, along with the submission and photograph behind it.',
+          'success')
+    return jsonify({
+        'receipt_id': receipt_id, 'submission_id': submission_id,
+        'redirect_url': url_for('index'),
+        'message': f'{described} deleted.',
     }), 200
 
 
@@ -4498,6 +4953,13 @@ def configure_instance():
         config.business_tin = optional('business_tin')
         config.business_vrn = optional('business_vrn')
 
+        # How much of a receipt's page to draw. Guarded, and validated against the three
+        # names that exist, so a post that does not carry the field cannot quietly reset
+        # a level somebody chose - the same care the front-page group above takes.
+        level = (request.form.get('receipt_detail_level') or '').strip().lower()
+        if level in RECEIPT_DETAIL_LEVELS:
+            config.receipt_detail_level = level
+
         # The public page. Everything here is optional and every blank falls back to
         # something sensible in utils/branding, so a half-filled form still renders a
         # page rather than an empty one. Guarded as a group: a post that does not carry
@@ -4544,6 +5006,10 @@ def configure_instance():
     # Pass the active_tab variable to the template
     return render_template(
         'admin/configure.html', config=config, devices=devices, active_tab=active_tab,
+        # The three receipt-page densities, described in the one place both this tab and
+        # the receipt page's own switcher read them from.
+        detail_levels=DETAIL_LEVEL_OPTIONS,
+        detail=config.receipt_detail() if config else DEFAULT_RECEIPT_DETAIL,
         # Photographed receipts degrade quietly without it - they are read by the model
         # instead of verified against TRA - so the one place it can be noticed is here.
         qr_decoder_problem=qr.unavailable_reason(),

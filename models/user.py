@@ -10,6 +10,32 @@ from utils import products as product_text
 
 db = SQLAlchemy()
 
+# How much of a receipt's page to put in front of the person reading it.
+#
+# Three densities rather than a row of switches, because what is being chosen is not a
+# set of panels - it is how much of the working the reader wants shown. Somebody filing
+# the week's receipts wants the money and whatever is wrong with it; somebody asked
+# about one receipt eighteen months later wants the provenance of every figure on it,
+# down to what the model actually answered. Both are looking at the same page.
+#
+# Ordered, and read by rank: compact is a subset of standard is a subset of full, so
+# every panel asks one question - is this instance reading at level N or higher - and
+# nothing has to enumerate the levels it belongs to.
+#
+# Nothing exists only at a higher level. Every control and every hover card is reachable
+# at compact too, on the page or one switch away; the level decides what is on screen
+# without being asked for, never what the page can do.
+RECEIPT_DETAIL_LEVELS = ('compact', 'standard', 'full')
+DEFAULT_RECEIPT_DETAIL = 'standard'
+
+
+def receipt_detail_rank(level):
+    """A detail level as its 1-based rank, so a template can compare it with >=."""
+    if level not in RECEIPT_DETAIL_LEVELS:
+        level = DEFAULT_RECEIPT_DETAIL
+    return RECEIPT_DETAIL_LEVELS.index(level) + 1
+
+
 class InstanceConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     admin_email = db.Column(db.String(120), unique=True, nullable=False)
@@ -32,6 +58,11 @@ class InstanceConfig(db.Model):
     business_name = db.Column(db.String(200), nullable=True)
     business_tin = db.Column(db.String(50), nullable=True)
     business_vrn = db.Column(db.String(50), nullable=True)
+
+    # How much of a receipt's page this instance wants on screen. One of
+    # RECEIPT_DETAIL_LEVELS; NULL means the default, which is what every instance that
+    # predates the setting has been reading all along. See receipt_detail() below.
+    receipt_detail_level = db.Column(db.String(20), nullable=True)
 
     # --- The front door: what a stranger sees at '/' ---
     # An instance's address gets shared - with a bookkeeper, in a WhatsApp group, on a
@@ -76,6 +107,21 @@ class InstanceConfig(db.Model):
 
     def is_configured(self):
         return all([self.llm_provider, self.llm_api_key])
+
+    def receipt_detail(self):
+        """
+        Which of the three densities the receipt page renders at.
+
+        Read through here rather than off the column, because a NULL and a value written
+        by a release that offered a fourth name have to mean the same thing: show what
+        this instance has always been shown.
+        """
+        level = (self.receipt_detail_level or '').strip().lower()
+        return level if level in RECEIPT_DETAIL_LEVELS else DEFAULT_RECEIPT_DETAIL
+
+    def receipt_detail_rank(self):
+        """The same answer as a rank, which is what the template actually compares."""
+        return receipt_detail_rank(self.receipt_detail())
 
     def rebuilds_urls_from_text(self):
         """Whether the photo pipeline may guess a portal address from transcribed text.

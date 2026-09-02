@@ -595,15 +595,41 @@ def test_reanalysis_replaces_the_judgment_but_never_the_facts(client, device, co
     assert (refreshed.total_incl_tax_cents, refreshed.vendor_tin, refreshed.receipt_date) == original
 
 
-def test_reanalysis_needs_a_stored_page_to_re_read(client, device, config, monkeypatch):
-    """Without the source HTML there is nothing to re-read, and TRA is not asked again."""
+def test_a_receipt_with_no_stored_page_is_re_analysed_from_its_own_facts(
+        client, device, config, monkeypatch):
+    """
+    The receipts most in need of re-analysis are the ones with no page behind them.
+
+    A receipt read off a photograph or a pasted SMS has no verified page to re-parse, and
+    for a while that meant it could not be re-analysed at all - which was backwards: those
+    are exactly the ones whose category is most often wrong, and the only ones an admin
+    cannot repair by asking the portal instead. Its facts are the row itself, corrections
+    included, and TRA is not contacted either way.
+    """
+    import main
+
     monkeypatch.setattr(config.__class__, 'is_configured', lambda self: True)
-    _, receipt = store(device, source_html=None)
+    _, receipt = store(device, source_html=None, extraction_source='llm_vision',
+                       category='other')
+
+    seen = {}
+
+    def judge(facts, *args, **kwargs):
+        seen.update(facts)
+        return {'category': 'fuel', 'llm_tax_analysis': 'Deductible.'}
+
+    monkeypatch.setattr(main, 'analyse_receipt', judge)
+    monkeypatch.setattr(main, 'fetch_receipt_html', lambda *a, **k: pytest.fail(
+        'Re-analysis must never go back to TRA'))
 
     response = client.post(f'/receipts/{receipt.id}/reanalyse')
 
-    assert response.status_code == 409
-    assert 'no stored TRA page' in response.get_json()['error']
+    assert response.status_code == 200
+    assert db.session.get(Receipt, receipt.id).category == 'fuel'
+    # Handed the same shape a parsed page produces, read off the stored row.
+    assert seen['vendor_tin'] == '100147181'
+    assert seen['total_incl_tax'] == '118.00'
+    assert seen['items'][0]['description'] == 'DIESEL AGO'
 
 
 def test_reanalysis_reports_an_unavailable_model_rather_than_failing_silently(
